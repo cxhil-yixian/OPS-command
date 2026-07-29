@@ -57,6 +57,7 @@ OPS-command/
 │   └── selfheal-ssh.sh SSH 連線取證與即時監看（夜鶯 n9e 自愈腳本）
 ├── REPO/
 │   └── URL             換源腳本的來源網址（linuxmirrors.cn，第三方）
+├── CHANGELOG.md        變更記錄
 └── LICENSE             MIT
 ```
 
@@ -149,6 +150,12 @@ OPS-command/
   不放心請先自行下載檢視再執行。
 - **`selfheal-ssh.sh` 純取證，不改變系統任何狀態、不封鎖任何 IP**。這是刻意的——
   自動封鎖腳本誤封跳板機或監控伺服器會讓機器直接失聯，要封請用 fail2ban。
+
+---
+
+## 變更記錄
+
+見 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 
