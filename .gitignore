@@ -1,0 +1,10 @@
+# 編輯器 / 工具的本機狀態，與專案無關
+.claude/
+.vscode/
+.idea/
+*.swp
+*~
+
+# 腳本執行期產物（正常位置在 /var，這裡只擋誤放進 repo 的情況）
+*.log
+n9e-selfheal/
