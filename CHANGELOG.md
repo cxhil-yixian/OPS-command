@@ -83,6 +83,8 @@
   建議會把真正的問題蓋掉：fail2ban 明明在跑，失敗數還在漲，代表封鎖根本沒擋住封包
   ——多半是 jail 的 `port` 還停在預設的 22。現在依 fail2ban 現況給三種建議
   （在跑 / 已裝沒跑 / 沒裝），前兩種都指向 `FAIL2BAN/fail2ban.sh doctor`。
+  建議文字不寫死猜「port 停在 22」——真實案例裡 port 已經對了，失效原因是規則
+  根本沒進防火牆。兩種可能都提，判斷交給 `doctor`。
   狀態用 socket 是否存在判斷，不呼叫 `fail2ban-client`：`watch` 每秒刷新一次，
   每秒 fork 一支 python 程式太貴。
 - `ops.sh` 的 `doctor` 腳本清單、相依檢查的 fail2ban 說明改指向新工具。

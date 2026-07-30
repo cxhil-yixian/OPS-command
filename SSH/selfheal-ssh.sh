@@ -506,7 +506,7 @@ judge() {
         # 代表封鎖沒有真的擋住封包——最常見的是 jail 的 port 還是預設的 22，
         # 而 sshd 早就換到別的埠。這時叫人「安裝 fail2ban」等於把真正的問題蓋掉。
         case "$(f2b_state)" in
-            running) ADVICE="fail2ban 在跑但失敗數仍在累積 = 封鎖沒擋住封包，多半是 jail 的 port 還停在 22。跑 FAIL2BAN/fail2ban.sh doctor" ;;
+            running) ADVICE="fail2ban 在跑但失敗數仍在累積 = 封鎖沒擋住封包（jail 的 port 沒對上，或規則沒進防火牆）。跑 FAIL2BAN/fail2ban.sh doctor" ;;
             stopped) ADVICE="fail2ban 已安裝但沒在跑。啟動後跑 FAIL2BAN/fail2ban.sh doctor 確認 jail 有涵蓋實際的 SSH 埠" ;;
             *)       ADVICE="看失敗來源 IP TOP15。建議裝 fail2ban（FAIL2BAN/fail2ban.sh install），或改用金鑰登入並關閉密碼驗證" ;;
         esac
