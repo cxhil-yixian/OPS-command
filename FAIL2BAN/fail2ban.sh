@@ -238,25 +238,55 @@ my_ips() {
     fi
 }
 
+# 本行程的祖先 pid 鏈（含自己）。用來判斷哪條 TCP 連線「確定是自己這條 session」。
+ancestors() {
+    _p=$$; _n=0
+    while [ -n "$_p" ] && [ "$_p" != 0 ] && [ "$_n" -lt 16 ]; do
+        printf '%s ' "$_p"
+        _p=$(awk '/^PPid:/{print $2}' "/proc/$_p/status" 2>/dev/null)
+        _n=$((_n + 1))
+    done
+}
+
 # 目前這條 SSH 連線的來源 IP（可能有多條，全部列出）
+#
+# 只認「確定是自己」的來源。絕對不能拿「連到 SSH 埠的所有連線」充數：爆破攻擊的
+# 連線也在同一個埠上，把它們當成自己的來源會造成兩件很糟的事——不准你封鎖正在
+# 攻擊你的 IP，以及 doctor 反過來建議你把攻擊者加進白名單。
 ssh_peers() {
     [ -n "${SSH_CONNECTION:-}" ] && printf '%s\n' "$SSH_CONNECTION" | awk '{print $1}'
     [ -n "${SSH_CLIENT:-}" ]     && printf '%s\n' "$SSH_CLIENT" | awk '{print $1}'
-    # sudo 之後環境變數可能被清掉，改從 who 取
-    who 2>/dev/null | sed -n 's/.*(\([0-9a-fA-F:.]\{3,\}\)).*/\1/p'
-    # 連 who 都沒有（Alpine 不維護 utmp）時，用「本地埠 = 實際 SSH 埠」的連線反推。
-    # 一定要比對埠號：抓所有 established 的對端會把資料庫、監控連線也當成自己的
-    # SSH 來源，合法的封鎖就會被誤擋下來。
-    if has ss; then
+
+    # sudo / su 會把環境變數清掉。改用「兩個條件同時成立」反查，缺一不可：
+    #
+    #   1. 連線的持有行程在自己的祖先鏈上 —— 排除攻擊者：他們的爆破連線也在
+    #      SSH 埠上，但不屬於自己這條 session。只比對埠號會把攻擊者當成自己，
+    #      結果是「不准封鎖正在攻擊你的 IP」。
+    #   2. 本地埠是實際的 SSH 埠 —— 排除自己祖先行程持有的對外連線（登入後在這
+    #      條 session 裡跑的任何東西：yum、curl、agent…）。只比對祖先鏈會把那些
+    #      對端也當成自己的來源。
+    if has ss && [ -r /proc/self/status ]; then
+        _anc=$(ancestors)
         _sp=$(live_ssh_ports | tr '\n' '|' | sed 's/|$//')
-        # $3=本地 位址:埠、$4=對端 位址:埠。要的是本地「埠」與對端「位址」，
-        # 所以兩邊各切一次：埠取最後一段，位址是去掉尾端 :埠 之後的部分
-        # （IPv6 會是 [fe80::1]:1234，中括號一併去掉）。
-        [ -n "$_sp" ] && ss -tn state established 2>/dev/null | awk -v pat="^($_sp)$" '
-            NR>1 { lp=$3; sub(/.*:/, "", lp)
-                   pa=$4; sub(/:[0-9]+$/, "", pa); gsub(/[][]/, "", pa)
-                   if (lp ~ pat) print pa }'
+        [ -n "$_anc" ] && [ -n "$_sp" ] &&
+        ss -tnp state established 2>/dev/null | awk -v anc=" $_anc " -v pat="^($_sp)$" '
+            { pid = ""
+              if (match($0, /pid=[0-9]+/))                       # iproute2 4.x
+                  pid = substr($0, RSTART+4, RLENGTH-4)
+              else if (match($0, /"[^"]*",[0-9]+,[0-9]+\)/)) {   # iproute2 3.x（CentOS 7）
+                  t = substr($0, RSTART, RLENGTH)
+                  sub(/^"[^"]*",/, "", t); sub(/,[0-9]+\)$/, "", t); pid = t
+              }
+              if (pid == "" || !index(anc, " " pid " ")) next
+              lp = $3; sub(/.*:/, "", lp)                        # 本地埠
+              if (lp !~ pat) next
+              pa = $4                                            # 對端 位址:埠
+              sub(/:[0-9]+$/, "", pa); gsub(/[][]/, "", pa)
+              print pa }'
     fi
+
+    # 其他已登入的 session。who 只列通過認證的使用者，爆破連線不會出現在這裡。
+    who 2>/dev/null | sed -n 's/.*(\([0-9a-fA-F:.]\{3,\}\)).*/\1/p'
 }
 
 # $1=CIDR 或 IP，$2=IP → 0 表示 $1 涵蓋 $2
@@ -901,7 +931,7 @@ cmd_doctor() {
     # 白名單與自己的來源
     _ig=$(ignore_effective | sort -u | tr '\n' ' ')
     info "白名單    : ${_ig:-（空）}"
-    _me=$(ssh_peers | sort -u | head -3 | tr '\n' ' ')
+    _me=$(ssh_peers | sort -u | head -5 | tr '\n' ' ')
     if [ -n "$_me" ]; then
         info "你的來源  : $_me"
         for _p in $_me; do
@@ -919,23 +949,33 @@ cmd_doctor() {
         ok "日誌來源  : $_src"
     fi
 
-    # 封鎖動作的後端
-    if has nft && nft list ruleset 2>/dev/null | grep -q f2b; then
-        ok "封鎖規則  : nftables（看得到 f2b 相關規則）"
-    elif has iptables && iptables -S 2>/dev/null | grep -q 'f2b\|fail2ban'; then
-        ok "封鎖規則  : iptables（看得到 f2b 鏈）"
-    elif [ -n "$_js" ]; then
-        _cnt=0
-        for _j in $_js; do
-            _c=$(jail_banned "$_j" | cnt .)
-            _cnt=$((_cnt + _c))
-        done
-        if [ "$_cnt" -gt 0 ]; then
-            err "有 $_cnt 筆封鎖中，但在 iptables / nftables 裡看不到對應規則 — 封鎖可能沒有真的生效"
-            info "檢查 banaction 與防火牆後端是否一致（firewalld 環境常見）"
-        else
-            info "封鎖規則  : 目前沒有封鎖中，無法判斷後端"
-        fi
+    # 封鎖到底有沒有落到防火牆裡
+    #
+    # 不能用「規則名稱裡有沒有 f2b」判斷：banaction 走 firewalld 或 ipset 時，
+    # 規則不叫這個名字，會變成誤報。改成拿一個「現在真的被封的 IP」去各個後端
+    # 裡找——這是唯一跟 banaction 寫法無關的驗證方式。
+    _cnt=0; _one=''
+    for _j in $_js; do
+        _c=$(jail_banned "$_j" | cnt .)
+        _cnt=$((_cnt + _c))
+        [ -z "$_one" ] && _one=$(jail_banned "$_j" | head -1)
+    done
+
+    if [ -z "$_one" ]; then
+        info "封鎖規則  : 目前沒有封鎖中，無法驗證（有封鎖時這裡會實際去防火牆裡找）"
+    elif has iptables && iptables-save 2>/dev/null | grep -qF "$_one"; then
+        ok "封鎖規則  : iptables 裡找得到 $_one"
+    elif has nft && nft list ruleset 2>/dev/null | grep -qF "$_one"; then
+        ok "封鎖規則  : nftables 裡找得到 $_one"
+    elif has ipset && ipset list 2>/dev/null | grep -qF "$_one"; then
+        ok "封鎖規則  : ipset 裡找得到 $_one"
+    elif has firewall-cmd && firewall-cmd --list-all-zones 2>/dev/null | grep -qF "$_one"; then
+        ok "封鎖規則  : firewalld 裡找得到 $_one"
+    else
+        err "有 $_cnt 筆封鎖中，但 $_one 在 iptables / nftables / ipset / firewalld 裡都找不到"
+        info "封鎖清單有它、防火牆沒有 = 封包照樣進得來。看 banaction 是否對應這台的防火牆後端："
+        info "  grep -rE '^ *(banaction|action)' ${F2B_ETC}/jail.conf ${F2B_ETC}/jail.local ${F2B_JAILD}/ 2>/dev/null"
+        info "  ${F2B_SVC} 的錯誤會寫在 $(log_src)（找 'Failed to execute ban jail'）"
     fi
 }
 

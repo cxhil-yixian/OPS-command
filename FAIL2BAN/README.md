@@ -46,9 +46,14 @@
 
 | 檢查 | 說明 |
 |---|---|
-| 你目前的 SSH 來源 | 取自 `SSH_CONNECTION` / `SSH_CLIENT`；`sudo` 把環境變數清掉時改用 `who`，再不行就從 `ss` 裡找「本地埠 = 實際 SSH 埠」的連線反推 |
+| 你目前的 SSH 來源 | 取自 `SSH_CONNECTION` / `SSH_CLIENT`；`sudo` 把環境變數清掉時，改用「持有行程在自己的祖先鏈上**且**本地埠是實際 SSH 埠」的連線反推；再加上 `who` 列出的其他已登入 session |
 | 本機自己的位址 | `ip addr` / `ifconfig` 上的所有位址 |
 | loopback | `127.0.0.0/8`、`::1` |
+
+> 反推那條的兩個條件缺一不可，而且都是真的踩過才補上的：**只比對埠號**會把攻擊者
+> 卡在認證階段的連線也當成「你自己」——結果是不准你封鎖正在爆破你的 IP，`doctor`
+> 還會建議你把攻擊者加白名單；**只比對祖先鏈**則會把登入後在這條 session 裡跑的
+> 任何對外連線（yum、curl、agent…）的對端算成你的來源。
 
 CIDR 是真的做網段涵蓋計算的，不是字串比對：
 
@@ -95,8 +100,13 @@ RHEL 系裝完 fail2ban 之後，`jail.conf` 裡全部 `enabled = false`，服�
 **換完 SSH 埠請重跑一次 `enable-sshd`。**
 
 **3. 封鎖清單有東西，防火牆裡卻沒有規則**
-`banaction` 與實際的防火牆後端對不上時會這樣（firewalld 環境常見）。`doctor` 會在
-「有封鎖中但 iptables / nftables 裡找不到 f2b 規則」時報錯。
+`banaction` 與實際的防火牆後端對不上時會這樣（firewalld 環境常見）。封鎖清單裡有、
+防火牆裡沒有，就是封包照樣進得來。
+
+`doctor` 的驗證方式是**拿一個現在真的被封的 IP，去 iptables / nftables / ipset /
+firewalld 裡實際找**，而不是看規則名稱裡有沒有 `f2b`——後者在 banaction 走 firewalld
+或 ipset 時規則不叫這個名字，會變成誤報。找不到時會一併給出該查哪個設定、
+以及 fail2ban 日誌裡對應的錯誤關鍵字。
 
 ---
 
