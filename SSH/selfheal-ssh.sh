@@ -512,6 +512,16 @@ judge() {
 # =========================================================
 if [ "$MODE" = watch ]; then
     case "$INTERVAL" in ''|*[!0-9.]*) echo "間隔秒數需為數字"; exit 1 ;; esac
+    # 監看是靠反覆呼叫「本腳本 snap」刷新，$0 是管線 / fd 時取不到實體路徑，
+    # 每一輪都會失敗。改跑單次快照，並說明怎麼取得可監看的版本。
+    if [ ! -f "$SELF" ]; then
+        echo "以管線 / 行程替換方式執行時無法連續監看（\$0 = $0），先給你一次快照。" >&2
+        echo "要即時監看請用選單入口 ops.sh，或 git clone 後執行本腳本。" >&2
+        echo >&2
+        MODE=snap
+    fi
+fi
+if [ "$MODE" = watch ]; then
     if has watch; then
         # busybox 的 watch 與 procps 的 watch 支援的選項不同，逐項探測
         W_HELP=$(watch --help 2>&1)

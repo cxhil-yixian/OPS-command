@@ -28,6 +28,24 @@ set -u
 VERSION=1.0
 SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
 
+# 一行指令執行（bash <(curl …)、curl … | sh）時 $0 是行程替換的 fd 或 "sh"，
+# 不是實體檔案。看門狗必須把「本腳本路徑 rollback --auto」寫進背景排程才能
+# 自動還原，路徑不存在就等於還原機制失效——換埠失敗時會真的被鎖在門外，
+# 所以這種執行方式直接拒絕，不做降級。
+if [ ! -f "$SELF" ]; then
+    {
+        echo "ssh-port.sh 不能用管線 / 行程替換的方式執行（\$0 = $0）。"
+        echo "看門狗需要本腳本的實體路徑才能自動還原，否則換埠失敗會把你鎖在門外。"
+        echo
+        echo "請改用選單入口，它會先把腳本下載到本機再呼叫："
+        echo "  bash <(curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.sh)"
+        echo "或直接取得 repo："
+        echo "  git clone https://github.com/cxhil-yixian/OPS-command.git"
+        echo "  sh OPS-command/SSH/ssh-port.sh status"
+    } >&2
+    exit 1
+fi
+
 # SSHPORT_TEST_ROOT 僅供測試用，會把所有設定檔路徑加上前綴
 PREFIX="${SSHPORT_TEST_ROOT:-}"
 

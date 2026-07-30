@@ -7,9 +7,14 @@
 #       Ubuntu 18.04-24.04 / Debian 9-12 / Alpine (OpenRC + busybox)
 #
 # 用法：
-#   ./ops.sh            進入互動選單
-#   ./ops.sh doctor     只做環境檢查後離開（可寫進巡檢排程）
-#   ./ops.sh -h         說明
+#   本機執行（git clone 後）
+#     ./ops.sh            進入互動選單
+#     ./ops.sh doctor     只做環境檢查後離開（可寫進巡檢排程）
+#     ./ops.sh -h         說明
+#
+#   一行指令執行（不落地 repo）
+#     bash <(curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.sh)
+#     curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.sh | sh
 #
 # 設計原則：
 #   1. POSIX sh 撰寫，Alpine 的 busybox ash 與 CentOS 7 的舊 bash 都能跑，
@@ -22,18 +27,165 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.0
+OPS_VERSION=1.1
+
+# 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
+#   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
+OPS_RAW_BASE="${OPS_RAW_BASE:-https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main}"
+
 SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
 BASE=$(dirname "$SELF")
 
-SSH_DIR="$BASE/SSH"
-SSH_PORT_SH="$SSH_DIR/ssh-port.sh"
-SELFHEAL_SH="$SSH_DIR/selfheal-ssh.sh"
-MIRROR_URL_FILE="$BASE/REPO/URL"
+SSH_PORT_REL='SSH/ssh-port.sh'
+SELFHEAL_REL='SSH/selfheal-ssh.sh'
+MIRROR_URL_REL='REPO/URL'
 
 PORT_STATE=/var/lib/ssh-port/state
 
 has() { command -v "$1" >/dev/null 2>&1; }
+
+# =========================================================
+# 工具來源解析
+#   一行指令執行時（bash <(curl …)）$0 是 /dev/fd/NN、管線執行時是 "sh"，
+#   兩種情況都拿不到 repo 目錄，SSH/ 底下的腳本必須改成下載到本機再呼叫。
+# =========================================================
+
+# 快取目錄一定要是「長期存在」的路徑，不能用 mktemp -d 後離開時刪掉：
+# ssh-port.sh 的看門狗會把「本腳本路徑 rollback --auto」寫進背景排程，
+# 檔案被刪等於自動還原機制失效，換埠失敗時真的會被鎖在門外。
+cache_dir() {
+    if [ "$(id -u)" = 0 ]; then
+        printf '%s\n' /var/lib/ops-command
+    elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+        printf '%s\n' "$XDG_CACHE_HOME/ops-command"
+    elif [ -n "${HOME:-}" ] && [ -d "$HOME" ]; then
+        printf '%s\n' "$HOME/.cache/ops-command"
+    else
+        printf '%s\n' "${TMPDIR:-/tmp}/ops-command-$(id -u)"
+    fi
+}
+
+CACHE_DIR=$(cache_dir)
+CACHE_MARK="$CACHE_DIR/.ops-remote"
+
+# 判為本機模式的條件：$0 旁邊就有完整的 SSH/，而且那個目錄不是我們自己的快取
+# （快取裡也會有這些檔案，若不排除，第二次執行就會誤判成 git clone 的 repo，
+#  導致選單少掉「更新腳本快取」而一直用舊版）
+if [ -f "$BASE/$SSH_PORT_REL" ] && [ -f "$BASE/$SELFHEAL_REL" ] &&
+   [ ! -f "$BASE/.ops-remote" ] && [ "$BASE" != "$CACHE_DIR" ]; then
+    RUN_MODE=local
+    ASSET_DIR="$BASE"
+    RERUN_HINT="$SELF"
+else
+    RUN_MODE=remote
+    ASSET_DIR="$CACHE_DIR"
+    RERUN_HINT="bash <(curl -fsSL $OPS_RAW_BASE/ops.sh)"
+fi
+
+SSH_DIR="$ASSET_DIR/SSH"
+SSH_PORT_SH="$ASSET_DIR/$SSH_PORT_REL"
+SELFHEAL_SH="$ASSET_DIR/$SELFHEAL_REL"
+MIRROR_URL_FILE="$ASSET_DIR/$MIRROR_URL_REL"
+
+FETCH_ERR=''
+
+# 下載單一檔案到指定路徑（僅負責取得，不做驗證）
+fetch_url() {
+    _u=$1; _d=$2
+    if has curl; then
+        curl -fsSL --connect-timeout 10 --max-time 180 -o "$_d" "$_u" 2>/dev/null
+    elif has wget; then
+        wget -q --timeout=20 -O "$_d" "$_u" 2>/dev/null
+    else
+        FETCH_ERR='需要 curl 或 wget 才能下載工具'
+        return 127
+    fi
+}
+
+# 取得 repo 中的某個腳本，成功後才覆蓋既有檔案（下載中斷不會留下半截檔）
+fetch_script() {
+    _rel=$1
+    _dst="$ASSET_DIR/$_rel"
+    _tmp="$_dst.part"
+    FETCH_ERR=''
+
+    if ! mkdir -p "$(dirname "$_dst")" 2>/dev/null; then
+        FETCH_ERR="無法建立目錄 $(dirname "$_dst")"
+        return 1
+    fi
+    if ! fetch_url "$OPS_RAW_BASE/$_rel" "$_tmp"; then
+        rm -f "$_tmp"
+        [ -z "$FETCH_ERR" ] && FETCH_ERR="下載失敗：$OPS_RAW_BASE/$_rel"
+        return 1
+    fi
+    if [ ! -s "$_tmp" ]; then
+        rm -f "$_tmp"
+        FETCH_ERR="下載到空檔案：$OPS_RAW_BASE/$_rel"
+        return 1
+    fi
+    # 被 captive portal / 代理攔截時拿到的會是 HTML，直接跑會很難查，先擋掉
+    case $(head -1 "$_tmp" 2>/dev/null) in
+        '#!'*) : ;;
+        *) rm -f "$_tmp"
+           FETCH_ERR="$_rel 內容不是腳本，可能被代理或入口網頁攔截"
+           return 1 ;;
+    esac
+    if ! mv -f "$_tmp" "$_dst" 2>/dev/null; then
+        rm -f "$_tmp"
+        FETCH_ERR="無法寫入 $_dst"
+        return 1
+    fi
+    chmod 755 "$_dst" 2>/dev/null || true
+    return 0
+}
+
+# 遠端模式的開場下載。一次抓齊，讓選單與 doctor 看到的狀態一致。
+# $1 = force 時強制重抓（選單的 u）
+assets_sync() {
+    [ "$RUN_MODE" = remote ] || return 0
+    if ! has curl && ! has wget; then
+        nomsg "遠端執行需要 curl 或 wget"
+        row "請改用：git clone https://github.com/cxhil-yixian/OPS-command.git"
+        return 1
+    fi
+    mkdir -p "$ASSET_DIR" 2>/dev/null || { nomsg "無法建立 $ASSET_DIR"; return 1; }
+    chmod 700 "$ASSET_DIR" 2>/dev/null || true
+    : > "$CACHE_MARK" 2>/dev/null || true
+
+    _rc=0
+    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL"; do
+        if [ "${1:-}" = force ] || [ ! -f "$ASSET_DIR/$_rel" ]; then
+            printf ' 取得 %s … ' "$_rel"
+            if fetch_script "$_rel"; then
+                printf '%s%s%s\n' "$CG" "$MK_OK" "$C0"
+            else
+                printf '%s%s%s  %s\n' "$CR" "$MK_NO" "$C0" "$FETCH_ERR"
+                _rc=1
+            fi
+        fi
+    done
+    # 換源網址檔沒抓到不影響，act_mirror 會退回內建預設值
+    if [ "${1:-}" = force ] || [ ! -f "$MIRROR_URL_FILE" ]; then
+        mkdir -p "$(dirname "$MIRROR_URL_FILE")" 2>/dev/null &&
+            fetch_url "$OPS_RAW_BASE/$MIRROR_URL_REL" "$MIRROR_URL_FILE" 2>/dev/null || true
+    fi
+    return $_rc
+}
+
+# 把 ops.sh 自己落地成檔案，供「curl … | sh」時重新 exec 用
+SELF_FILE=''
+ensure_self() {
+    if [ "$RUN_MODE" = local ] && [ -f "$SELF" ]; then
+        SELF_FILE="$SELF"
+        return 0
+    fi
+    mkdir -p "$ASSET_DIR" 2>/dev/null || return 1
+    chmod 700 "$ASSET_DIR" 2>/dev/null || true
+    : > "$CACHE_MARK" 2>/dev/null || true
+    fetch_script ops.sh || return 1
+    SELF_FILE="$ASSET_DIR/ops.sh"
+    return 0
+}
 
 # =========================================================
 # 介面初始化
@@ -92,7 +244,7 @@ confirm() {
 need_root() {
     [ "$(id -u)" = 0 ] && return 0
     nomsg "這個動作需要 root 權限，目前身分是 $(id -un)"
-    row "請用 sudo -i 或 su - 切換後重跑：$SELF"
+    row "請用 sudo -i 或 su - 切換後重跑：$RERUN_HINT"
     return 1
 }
 
@@ -296,6 +448,11 @@ banner() {
     [ -n "$SOCKET_UNIT" ] && printf '   %s[%s 接管中]%s' "$CY" "$SOCKET_UNIT" "$C0"
     printf '\n'
     printf ' 防護   防火牆 %s   SELinux %s   身分 %s\n' "$FW" "$SELINUX" "$(id -un)"
+    if [ "$RUN_MODE" = remote ]; then
+        printf ' 工具   %s遠端執行%s  腳本快取於 %s\n' "$CY" "$C0" "$ASSET_DIR"
+    else
+        printf ' 工具   本機 %s\n' "$ASSET_DIR"
+    fi
 
     if [ "$PENDING" = 1 ]; then
         printf '\n'
@@ -322,6 +479,8 @@ menu() {
     row "9) 更換套件來源鏡像 ${CD}呼叫 linuxmirrors.cn 的外部腳本${C0}"
     row "d) 環境自我診斷     ${CD}檢查相依套件與已知相容性問題${C0}"
     row "i) 安裝缺少的相依套件"
+    [ "$RUN_MODE" = remote ] && \
+        row "u) 更新腳本快取     ${CD}重新下載 SSH/ 底下的工具${C0}"
     row "q) 離開"
     printf '\n'
 }
@@ -329,20 +488,32 @@ menu() {
 # =========================================================
 # 動作
 # =========================================================
+# $1 = 完整路徑，$2 = repo 內的相對路徑（遠端模式要用它補下載）
 require_script() {
     [ -f "$1" ] && return 0
+    if [ "$RUN_MODE" = remote ]; then
+        printf ' 取得 %s … ' "$2"
+        if fetch_script "$2"; then
+            printf '%s%s%s\n' "$CG" "$MK_OK" "$C0"
+            return 0
+        fi
+        printf '%s%s%s\n' "$CR" "$MK_NO" "$C0"
+        nomsg "$FETCH_ERR"
+        row "可改用 git clone 在本機執行，或設 OPS_RAW_BASE 指到連得到的鏡像"
+        return 1
+    fi
     nomsg "找不到 $1"
     row "請確認是從 repo 根目錄執行 ops.sh，且 SSH/ 目錄完整"
     return 1
 }
 
 act_port_status() {
-    require_script "$SSH_PORT_SH" || return 0
+    require_script "$SSH_PORT_SH" "$SSH_PORT_REL" || return 0
     sh "$SSH_PORT_SH" status
 }
 
 act_port_set() {
-    require_script "$SSH_PORT_SH" || return 0
+    require_script "$SSH_PORT_SH" "$SSH_PORT_REL" || return 0
     need_root || return 0
 
     printf '\n'
@@ -354,6 +525,10 @@ act_port_set() {
     [ -n "$SOCKET_UNIT" ] && wmsg "$SOCKET_UNIT 接管中，實際生效的是 ListenStream，腳本會一併處理"
     [ "$OS_FAMILY" = rhel ] && [ "$SELINUX" != disabled ] && \
         wmsg "SELinux 為 $SELINUX，腳本會用 semanage 標記新埠為 ssh_port_t"
+    # 看門狗是背景執行「$SSH_PORT_SH rollback --auto」，遠端模式下這是快取檔案，
+    # 在 confirm 之前把它刪掉，自動還原就沒得跑了。
+    [ "$RUN_MODE" = remote ] && \
+        wmsg "看門狗會呼叫 $SSH_PORT_SH，confirm 之前請不要刪掉 $ASSET_DIR"
     printf '\n'
 
     printf ' 要換到哪個埠？(1-65535，直接 Enter 取消) '
@@ -376,7 +551,7 @@ act_port_set() {
 }
 
 act_port_confirm() {
-    require_script "$SSH_PORT_SH" || return 0
+    require_script "$SSH_PORT_SH" "$SSH_PORT_REL" || return 0
     need_root || return 0
     printf '\n'
     wmsg "確認前請先在「另一個新視窗」用新埠登入成功，不要只看這個舊連線還活著"
@@ -385,7 +560,7 @@ act_port_confirm() {
 }
 
 act_port_rollback() {
-    require_script "$SSH_PORT_SH" || return 0
+    require_script "$SSH_PORT_SH" "$SSH_PORT_REL" || return 0
     need_root || return 0
     printf '\n'
     confirm "要立即還原 SSH 埠設定嗎？" || return 0
@@ -393,7 +568,7 @@ act_port_rollback() {
 }
 
 selfheal_guard() {
-    require_script "$SELFHEAL_SH" || return 1
+    require_script "$SELFHEAL_SH" "$SELFHEAL_REL" || return 1
     if [ "$(ps_probe)" = none ]; then
         wmsg "找不到可用的 ps -o，「已登入 / 認證中」分類會失效"
         row "安裝：$PKG_INSTALL procps（或按 i 自動安裝）"
@@ -491,6 +666,12 @@ act_doctor() {
     row "SELinux   : $SELINUX"
     row "防火牆    : $FW"
     row "執行身分  : $(id -un) (uid=$(id -u))"
+    if [ "$RUN_MODE" = remote ]; then
+        row "工具來源  : 遠端 $OPS_RAW_BASE"
+        row "腳本快取  : $ASSET_DIR"
+    else
+        row "工具來源  : 本機 $ASSET_DIR"
+    fi
     hr
     sect "相依套件"
     check_deps
@@ -499,6 +680,8 @@ act_doctor() {
     for _s in "$SSH_PORT_SH" "$SELFHEAL_SH"; do
         if [ -f "$_s" ]; then
             [ -x "$_s" ] && okmsg "$_s" || wmsg "$_s（無執行權限，本選單以 sh/bash 呼叫故仍可用）"
+        elif [ "$RUN_MODE" = remote ]; then
+            nomsg "$_s 尚未下載成功（選 u 重試，或檢查對外連線）"
         else
             nomsg "$_s 不存在"
         fi
@@ -542,6 +725,32 @@ act_doctor() {
             row "未能辨識的發行版，兩支腳本會退回通用路徑，建議先跑一次乾跑（選 2）確認"
             ;;
     esac
+
+    if [ "$RUN_MODE" = remote ]; then
+        printf '\n'
+        sect "遠端執行注意"
+        row "腳本是下載到 $ASSET_DIR 後執行，不是隨用隨丟"
+        row "換埠的看門狗會呼叫 $SSH_PORT_SH 做自動還原，"
+        row "所以在 confirm 完成之前，這個目錄不能刪除或搬移"
+        row "要換來源（fork / 內網鏡像 / 其他分支）：設環境變數 OPS_RAW_BASE"
+    fi
+}
+
+act_refresh() {
+    printf '\n'
+    sect "更新腳本快取"
+    if [ "$RUN_MODE" != remote ]; then
+        okmsg "目前是本機模式，直接 git pull 即可"
+        return 0
+    fi
+    if [ "$PENDING" = 1 ]; then
+        wmsg "有未確認的換埠作業進行中，此時覆蓋腳本會影響看門狗的還原行為"
+        confirm "還是要更新嗎？" || return 0
+    fi
+    row "來源：${CB}${OPS_RAW_BASE}${C0}"
+    row "目標：${CB}${ASSET_DIR}${C0}"
+    printf '\n'
+    assets_sync force
 }
 
 act_install_deps() {
@@ -573,8 +782,30 @@ act_install_deps() {
 # =========================================================
 # 進入點
 # =========================================================
+# 一行指令執行時 $0 是管線 / fd，讀不回自己的註解，所以說明文字直接內嵌。
 usage() {
-    sed -n '3,20p' "$SELF" | sed 's/^# \{0,1\}//'
+    cat <<EOF
+ops.sh — OPS-command 視覺化操作選單  v$OPS_VERSION
+
+本機執行（git clone 後）
+    ./ops.sh            進入互動選單
+    ./ops.sh doctor     只做環境檢查後離開（可寫進巡檢排程）
+    ./ops.sh -h         本說明
+
+一行指令執行（不落地 repo）
+    bash <(curl -fsSL $OPS_RAW_BASE/ops.sh)
+    curl -fsSL $OPS_RAW_BASE/ops.sh | sh
+
+    此模式會把 SSH/ 底下的腳本下載到 $(cache_dir) 後再呼叫。
+    換埠的看門狗會回頭呼叫該路徑做自動還原，確認完成前請勿刪除。
+
+環境變數
+    OPS_RAW_BASE   遠端來源前綴（fork / 內網鏡像 / 其他分支）
+                   目前：$OPS_RAW_BASE
+    NO_COLOR       關閉顏色
+
+目前模式：$RUN_MODE（工具路徑 $ASSET_DIR）
+EOF
     exit 0
 }
 
@@ -584,6 +815,7 @@ detect
 case "${1:-}" in
     -h|--help|help) usage ;;
     doctor|--doctor)
+        assets_sync || true         # 抓不到也要把環境資訊印完
         act_doctor
         printf '\n'
         [ "${DEP_HARD:-0}" = 1 ] && exit 1
@@ -592,14 +824,26 @@ case "${1:-}" in
     *) printf '未知參數：%s（可用 doctor / -h）\n' "$1"; exit 1 ;;
 esac
 
+# 「curl … | sh」時 stdin 是腳本本身，讀不到鍵盤。此時把自己落地成檔案，
+# 改用 /dev/tty 當 stdin 重新執行，使用者就不必先 clone 也能用選單。
+if [ ! -t 0 ] && [ -z "${OPS_TTY_REEXEC:-}" ] && ( exec 3</dev/tty ) 2>/dev/null; then
+    if ensure_self; then
+        OPS_TTY_REEXEC=1; export OPS_TTY_REEXEC
+        exec sh "$SELF_FILE" ${1+"$@"} < /dev/tty
+    fi
+    nomsg "$FETCH_ERR"
+fi
+
 if [ ! -t 0 ]; then
     printf '%s\n' "ops.sh 是互動選單，需要終端機。"
     printf '%s\n' "非互動場合請直接呼叫底層腳本，例如："
-    printf '%s\n' "    sh SSH/ssh-port.sh status"
-    printf '%s\n' "    sh SSH/selfheal-ssh.sh oneshot"
+    printf '%s\n' "    sh $SSH_PORT_SH status"
+    printf '%s\n' "    sh $SELFHEAL_SH oneshot"
     printf '%s\n' "或執行 ops.sh doctor 做環境檢查。"
     exit 1
 fi
+
+assets_sync || true                 # 缺哪支腳本，選到時 require_script 會再試一次
 
 while :; do
     detect                      # 每輪重測，換完埠後標頭要能立刻反映
@@ -620,6 +864,7 @@ while :; do
         9) act_mirror ;;
         d|D) act_doctor ;;
         i|I) act_install_deps ;;
+        u|U) act_refresh ;;
         q|Q|exit|quit) printf ' 離開\n'; exit 0 ;;
         '') continue ;;
         *) nomsg "無此選項：$choice" ;;

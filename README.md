@@ -8,6 +8,24 @@
 
 ## 快速開始
 
+一行指令，不用先 clone：
+
+```bash
+sudo bash <(curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.sh)
+
+# 沒有 process substitution 的 shell（dash / busybox ash）用這行
+curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.sh | sudo sh
+```
+
+這個模式下 `ops.sh` 會把 `SSH/` 底下的腳本下載到 `/var/lib/ops-command`（非 root 時是
+`~/.cache/ops-command`）再呼叫，選單裡的 `u` 可以隨時重抓最新版。
+
+> **快取目錄在 `confirm` 完成前不能刪。** 換埠的看門狗是背景執行
+> `/var/lib/ops-command/SSH/ssh-port.sh rollback --auto` 來自動還原的，
+> 腳本檔案被刪掉等於還原機制失效。這也是為什麼不用 `mktemp -d` 之後就丟。
+
+或者照傳統方式落地成 repo：
+
 ```bash
 git clone https://github.com/cxhil-yixian/OPS-command.git
 cd OPS-command
@@ -15,6 +33,16 @@ chmod +x ops.sh SSH/*.sh
 
 sudo ./ops.sh
 ```
+
+兩種方式的選單完全一樣，`ops.sh` 會自己判斷：`$0` 旁邊有完整的 `SSH/` 就用本機的，
+沒有就走下載。要指到自己的 fork、內網鏡像或其他分支，設 `OPS_RAW_BASE` 即可：
+
+```bash
+OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
+```
+
+底層的 `SSH/ssh-port.sh` **不接受**用管線 / 行程替換執行，會直接拒絕並提示改用
+`ops.sh` 或 clone——因為看門狗需要腳本的實體路徑，取不到就等於失去自動還原。
 
 ```
 ────────────────────────────────────────────────────────────────────
@@ -73,6 +101,19 @@ OPS-command/
 ./ops.sh -h         說明
 ```
 
+遠端執行時同樣可以帶參數：
+
+```bash
+bash <(curl -fsSL .../ops.sh) doctor
+```
+
+環境變數：
+
+| 變數 | 作用 |
+|---|---|
+| `OPS_RAW_BASE` | 遠端來源前綴（fork / 內網鏡像 / 其他分支），預設指向本 repo 的 `main` |
+| `NO_COLOR` | 關閉顏色 |
+
 設計上刻意保持三件事：
 
 1. **零相依**：純 POSIX sh，不需要 `dialog` / `whiptail` / ncurses。Alpine 的 busybox
@@ -83,7 +124,11 @@ OPS-command/
    做；換源要打完整的 `YES` 才會執行。
 
 沒有 UTF-8 locale 的機器（常見於最小化安裝的 CentOS 7）會自動退回 ASCII 框線；
-非終端機執行會直接擋下來並提示改用底層腳本。設 `NO_COLOR=1` 可關閉顏色。
+設 `NO_COLOR=1` 可關閉顏色。
+
+`curl … | sh` 這種寫法的 stdin 是腳本本身、讀不到鍵盤，此時 `ops.sh` 會把自己
+落地成檔案並改用 `/dev/tty` 當 stdin 重新執行，選單照樣能操作。真的沒有終端機
+（cron、CI）才會擋下來並提示改用底層腳本或 `doctor`。
 
 ---
 
