@@ -18,7 +18,7 @@ sudo bash <(curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-comman
 curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.sh | sudo sh
 ```
 
-這個模式下 `ops.sh` 會把 `SSH/` 底下的腳本下載到 `/var/lib/ops-command`（非 root 時是
+這個模式下 `ops.sh` 會把各工具腳本下載到 `/var/lib/ops-command`（非 root 時是
 `~/.cache/ops-command`）再呼叫，選單裡的 `u` 可以隨時重抓最新版。
 
 > **快取目錄在 `confirm` 完成前不能刪。** 換埠的看門狗是背景執行
@@ -73,7 +73,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
    9) 更換套件來源鏡像 呼叫 linuxmirrors.cn 的外部腳本
    d) 環境自我診斷     檢查相依套件與已知相容性問題
    i) 安裝缺少的相依套件
-   u) 更新腳本快取     重新下載 SSH/ 底下的工具
+   u) 更新腳本快取     重新下載所有工具腳本
    q) 離開
 ```
 

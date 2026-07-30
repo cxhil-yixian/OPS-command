@@ -1,7 +1,7 @@
 #!/bin/sh
 # ops.sh — OPS-command 視覺化操作選單
 #
-# 一支入口把 SSH/ 底下的工具包起來，用選單操作，不必記參數。
+# 一支入口把 SSH/ 與 FAIL2BAN/ 底下的工具包起來，用選單操作，不必記參數。
 #
 # 支援：CentOS 7.9 / RHEL 7-10 / Rocky / AlmaLinux
 #       Ubuntu 18.04-24.04 / Debian 9-12 / Alpine (OpenRC + busybox)
@@ -41,7 +41,7 @@ SELFHEAL_REL='SSH/selfheal-ssh.sh'
 F2B_REL='FAIL2BAN/fail2ban.sh'
 MIRROR_URL_REL='REPO/URL'
 
-# SSH/ 底下的腳本產出的東西統一收在這裡；export 讓它們沿用同一個值
+# 各工具腳本產出的東西統一收在這裡；export 讓它們沿用同一個值
 OPS_SSH_DIR="${OPS_SSH_DIR:-/var/log/OPS-ssh}"
 export OPS_SSH_DIR
 
@@ -53,7 +53,7 @@ has() { command -v "$1" >/dev/null 2>&1; }
 # =========================================================
 # 工具來源解析
 #   一行指令執行時（bash <(curl …)）$0 是 /dev/fd/NN、管線執行時是 "sh"，
-#   兩種情況都拿不到 repo 目錄，SSH/ 底下的腳本必須改成下載到本機再呼叫。
+#   兩種情況都拿不到 repo 目錄，各工具腳本必須改成下載到本機再呼叫。
 # =========================================================
 
 # 快取目錄一定要是「長期存在」的路徑，不能用 mktemp -d 後離開時刪掉：
@@ -500,7 +500,7 @@ menu() {
     row "d) 環境自我診斷     ${CD}檢查相依套件與已知相容性問題${C0}"
     row "i) 安裝缺少的相依套件"
     [ "$RUN_MODE" = remote ] && \
-        row "u) 更新腳本快取     ${CD}重新下載 SSH/ 底下的工具${C0}"
+        row "u) 更新腳本快取     ${CD}重新下載所有工具腳本${C0}"
     row "q) 離開"
     printf '\n'
 }
@@ -897,7 +897,7 @@ ops.sh — OPS-command 視覺化操作選單  v$OPS_VERSION
     bash <(curl -fsSL $OPS_RAW_BASE/ops.sh)
     curl -fsSL $OPS_RAW_BASE/ops.sh | sh
 
-    此模式會把 SSH/ 底下的腳本下載到 $(cache_dir) 後再呼叫。
+    此模式會把各工具腳本下載到 $(cache_dir) 後再呼叫。
     換埠的看門狗會回頭呼叫該路徑做自動還原，確認完成前請勿刪除。
 
 環境變數
