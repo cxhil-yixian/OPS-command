@@ -118,7 +118,12 @@ override。所以就算新埠完全連不上、你連視窗都關了，時限到
 | `/var/log/OPS-ssh/selfheal.rate` / `.lock` | 連線速率基準與取證的重入鎖 |
 | `/etc/ssh/sshd_config.d/00-ssh-port.conf` | drop-in（僅 OpenSSH 8.2+），**這是設定檔不是產出物** |
 
-> 目錄權限 750。**不要對它套 logrotate 或定期清空**：`ssh-port/` 底下是狀態與看門狗
+> 目錄權限 750（報告裡有來源 IP、被嘗試的帳號、`authorized_keys` 時間戳，不該讓其他
+> 使用者讀）。寫不進去時（非 root）退到 `$TMPDIR/OPS-ssh`，同樣是 750；若該目錄已被
+> 別人建立而權限設不上，會改用帶 uid 的 `$TMPDIR/OPS-ssh-<uid>`，不把報告寫進別人
+> 控制得到的目錄。
+>
+> **不要對它套 logrotate 或定期清空**：`ssh-port/` 底下是狀態與看門狗
 > 腳本，不是日誌，清掉會讓進行中的換埠失去自動還原能力。日誌的輪替腳本自己會做。
 
 1.1.0 之前的位置（`/var/lib/ssh-port/`、`/var/log/ssh-port.log`、
@@ -254,7 +259,7 @@ ESTAB 裡。只看 ESTAB 數字，你分不出「50 個人在用」和「正在�
 
 ## 一次性取證（oneshot）
 
-完整報告寫到 `/var/log/OPS-ssh/ssh-health.log`（寫不進去時退到 `/tmp/OPS-ssh/`），
+完整報告寫到 `/var/log/OPS-ssh/ssh-health.log`（寫不進去時退到 `$TMPDIR/OPS-ssh/`，權限 750），
 stdout 只印摘要。超過 5MB 自動輪替，保留 3 份；用 `flock` 防重入。
 
 報告內容包含連線統計、三個階段各自的來源排名、互動 session 與**每個 session 正在跑什麼

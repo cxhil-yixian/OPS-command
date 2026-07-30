@@ -153,9 +153,7 @@ assets_sync() {
         row "請改用：git clone https://github.com/cxhil-yixian/OPS-command.git"
         return 1
     fi
-    mkdir -p "$ASSET_DIR" 2>/dev/null || { nomsg "無法建立 $ASSET_DIR"; return 1; }
-    chmod 700 "$ASSET_DIR" 2>/dev/null || true
-    : > "$CACHE_MARK" 2>/dev/null || true
+    ensure_asset_dir || return 1
 
     _rc=0
     for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL"; do
@@ -177,6 +175,20 @@ assets_sync() {
     return $_rc
 }
 
+# 快取目錄要能放「等一下會被 root 執行」的腳本，所以權限一定要收得起來。
+# cache_dir 的最後一層退路是 TMPDIR，那是所有人可寫的：同名目錄若已被別人建好，
+# mkdir -p 會「成功」但 chmod 會失敗——這種情況直接停下，不接受降級。
+ensure_asset_dir() {
+    mkdir -p "$ASSET_DIR" 2>/dev/null || { nomsg "無法建立 $ASSET_DIR"; return 1; }
+    if ! chmod 700 "$ASSET_DIR" 2>/dev/null; then
+        nomsg "$ASSET_DIR 的權限設不上（目錄可能不屬於你）"
+        row "拒絕把要執行的腳本放進去。請改用 git clone，或把 TMPDIR 設到自己的目錄"
+        return 1
+    fi
+    : > "$CACHE_MARK" 2>/dev/null || true
+    return 0
+}
+
 # 把 ops.sh 自己落地成檔案，供「curl … | sh」時重新 exec 用
 SELF_FILE=''
 ensure_self() {
@@ -184,9 +196,7 @@ ensure_self() {
         SELF_FILE="$SELF"
         return 0
     fi
-    mkdir -p "$ASSET_DIR" 2>/dev/null || return 1
-    chmod 700 "$ASSET_DIR" 2>/dev/null || true
-    : > "$CACHE_MARK" 2>/dev/null || true
+    ensure_asset_dir || return 1
     fetch_script ops.sh || return 1
     SELF_FILE="$ASSET_DIR/ops.sh"
     return 0

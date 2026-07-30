@@ -84,14 +84,24 @@ esac
 has() { command -v "$1" >/dev/null 2>&1; }
 
 # ---------- 產出目錄 ----------
-# 取證報告、速率基準、重入鎖全部收在同一個目錄，出事時只要看一個地方。
+# 取證報告裡有來源 IP、被嘗試的帳號、authorized_keys 時間戳，不該讓其他使用者讀，
+# 所以目錄一律收成 750。
+#
+# 退路建在 /tmp 這種所有人可寫的地方時，同名目錄可能已經被別人建好——那時 mkdir -p
+# 會「成功」（目錄已存在），但 chmod 會失敗，等於把報告寫進別人控制得到的目錄。
+# 所以這裡用 chmod 的結果來判斷目錄是不是自己的，不是的話換成帶 uid 的名字。
+tmp_outdir() {
+    _t="${TMPDIR:-/tmp}/OPS-ssh"
+    mkdir -p "$_t" 2>/dev/null && chmod 750 "$_t" 2>/dev/null && { printf '%s\n' "$_t"; return 0; }
+    _t="${TMPDIR:-/tmp}/OPS-ssh-$(id -u)"
+    mkdir -p "$_t" 2>/dev/null && chmod 750 "$_t" 2>/dev/null
+    printf '%s\n' "$_t"
+}
+
 # 設 OPS_SSH_DIR 可換位置；寫不進去（非 root）就退到暫存目錄，不讓腳本失敗。
 OPS_SSH_DIR="${OPS_SSH_DIR:-/var/log/OPS-ssh}"
 mkdir -p "$OPS_SSH_DIR" 2>/dev/null && chmod 750 "$OPS_SSH_DIR" 2>/dev/null
-if [ ! -w "$OPS_SSH_DIR" ]; then
-    OPS_SSH_DIR="${TMPDIR:-/tmp}/OPS-ssh"
-    mkdir -p "$OPS_SSH_DIR" 2>/dev/null
-fi
+[ -w "$OPS_SSH_DIR" ] || OPS_SSH_DIR=$(tmp_outdir)
 
 # 1.1.0 之前：報告在 /var/log/n9e-selfheal、速率基準在 /run（重開機就沒了）。
 # 舊的 /var/lock/selfheal-ssh.lock 不主動刪：可能正被另一個行程持有，刪掉會讓
@@ -765,8 +775,8 @@ LOGDIR=${SSH_FORENSIC_LOGDIR:-$OPS_SSH_DIR}
 OUT="$LOGDIR/ssh-health.log"
 mkdir -p "$LOGDIR" 2>/dev/null
 if ! touch "$OUT" 2>/dev/null; then          # 寫不進去時退到暫存目錄，避免整支腳本失敗
-    LOGDIR="${TMPDIR:-/tmp}/OPS-ssh"; OUT="$LOGDIR/ssh-health.log"
-    mkdir -p "$LOGDIR" 2>/dev/null; touch "$OUT" 2>/dev/null
+    LOGDIR=$(tmp_outdir); OUT="$LOGDIR/ssh-health.log"
+    touch "$OUT" 2>/dev/null
 fi
 chmod 640 "$OUT" 2>/dev/null
 
@@ -790,7 +800,7 @@ fi
 # 「已有程序執行中」而整輪不採集，故先確認指令存在再取鎖。
 if has flock; then
     LOCK="${OPS_SSH_DIR}/selfheal.lock"
-    exec 9>"$LOCK" 2>/dev/null || exec 9>"${TMPDIR:-/tmp}/selfheal-ssh.lock"
+    exec 9>"$LOCK" 2>/dev/null || exec 9>"$(tmp_outdir)/selfheal.lock"
     flock -n 9 || { echo "已有診斷程序執行中，本次略過"; exit 0; }
 fi
 

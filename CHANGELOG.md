@@ -65,7 +65,8 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 - 新增 `OPS_SSH_DIR` 環境變數可換整個產出目錄；`ops.sh` 會 export 給子腳本，
   兩邊一定一致。`SSH_FORENSIC_LOGDIR`（只改取證報告輸出）仍然有效且優先。
 - `selfheal-ssh.sh` 寫不進產出目錄時（非 root）退到 `$TMPDIR/OPS-ssh`，
-  原本是 `/tmp/n9e-selfheal`。
+  原本是 `/tmp/n9e-selfheal`。這個退路同樣是 750，且不再有檔案散落在 `/tmp` 根層
+  （重入鎖原本直接落在 `/tmp/selfheal-ssh.lock`，現在也在目錄裡）。
 
 > 這個目錄**不要套 logrotate 或定期清空**：`ssh-port/` 底下是狀態與看門狗腳本，
 > 不是日誌，清掉會讓進行中的換埠失去自動還原能力。取證報告本身已有輪替（5MB × 3）。
@@ -87,6 +88,13 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
   或 clone，不做降級。
 - `SSH/selfheal-ssh.sh` 的 `watch` 在同樣情況下無法反覆呼叫自己刷新，改為輸出一次
   快照並說明原因，不再每輪失敗。
+- **`/tmp` 退路的目錄劫持防護**。`/tmp` 是所有人可寫的，同名目錄若已經被別的使用者
+  建好，`mkdir -p` 會「成功」（目錄已存在）但 `chmod` 會失敗——單純加 `chmod 750`
+  並不能保證目錄是自己的。兩支腳本改用 `chmod` 的結果來判斷：
+  - `selfheal-ssh.sh`：不是自己的目錄就換成 `$TMPDIR/OPS-ssh-<uid>`，避免把含來源 IP
+    與帳號的取證報告寫進別人控制得到的目錄。
+  - `ops.sh`：快取目錄放的是「等一下會被 root 執行」的腳本，權限設不上時**直接停下**
+    並提示改用 `git clone` 或改 `TMPDIR`，不接受降級。
 
 ---
 
