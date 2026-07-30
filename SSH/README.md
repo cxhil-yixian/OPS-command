@@ -86,7 +86,7 @@ sshd_config 寫兩行 `Port` 就會監聽兩個埠——雙埠並存正是靠這
 
 ```
 sleep <timeout>
-若 /var/lib/ssh-port/confirmed 存在 → 什麼都不做
+若 /var/log/OPS-ssh/ssh-port/confirmed 存在 → 什麼都不做
 否則 → ssh-port.sh rollback --auto
 ```
 
@@ -105,13 +105,27 @@ override。所以就算新埠完全連不上、你連視窗都關了，時限到
 
 ## 檔案位置
 
+兩支腳本產出的東西全部收在 `/var/log/OPS-ssh/` 底下，出事時只要看一個地方，
+也方便整批備份或搬走。設 `OPS_SSH_DIR` 可換位置。
+
 | 路徑 | 用途 |
 |---|---|
-| `/var/lib/ssh-port/state` | 進行中變更的狀態（舊埠、新埠、備份路徑…） |
-| `/var/lib/ssh-port/backup-<時間戳>/` | 設定檔備份，`confirm` 後仍保留，確認穩定可自行刪 |
-| `/var/lib/ssh-port/watchdog.sh` / `.pid` | 看門狗 |
-| `/var/log/ssh-port.log` | 操作記錄（含看門狗的自動還原記錄） |
-| `/etc/ssh/sshd_config.d/00-ssh-port.conf` | drop-in（僅 OpenSSH 8.2+） |
+| `/var/log/OPS-ssh/ssh-port.log` | 換埠操作記錄（含看門狗的自動還原記錄） |
+| `/var/log/OPS-ssh/ssh-port/state` | 進行中變更的狀態（舊埠、新埠、備份路徑…） |
+| `/var/log/OPS-ssh/ssh-port/backup-<時間戳>/` | 設定檔備份，`confirm` 後仍保留，確認穩定可自行刪 |
+| `/var/log/OPS-ssh/ssh-port/watchdog.sh` / `.pid` | 看門狗 |
+| `/var/log/OPS-ssh/ssh-health.log` | 取證報告（5MB 輪替，保留 3 份） |
+| `/var/log/OPS-ssh/selfheal.rate` / `.lock` | 連線速率基準與取證的重入鎖 |
+| `/etc/ssh/sshd_config.d/00-ssh-port.conf` | drop-in（僅 OpenSSH 8.2+），**這是設定檔不是產出物** |
+
+> 目錄權限 750。**不要對它套 logrotate 或定期清空**：`ssh-port/` 底下是狀態與看門狗
+> 腳本，不是日誌，清掉會讓進行中的換埠失去自動還原能力。日誌的輪替腳本自己會做。
+
+1.1.0 之前的位置（`/var/lib/ssh-port/`、`/var/log/ssh-port.log`、
+`/var/log/n9e-selfheal/`、`/run/selfheal-ssh.rate`）會在下次執行時自動搬過來。
+唯一的例外是**換埠進行中**：看門狗行程正在執行舊目錄下的 `watchdog.sh`，此時搬移
+會把它腳下的檔案抽掉，所以會沿用舊路徑到 `confirm` / `rollback` 結束，之後才搬。
+舊的 `/var/lock/selfheal-ssh.lock` 不會自動刪（可能正被別的行程持有），可自行清掉。
 
 腳本寫進主設定檔的內容一律包在標記區塊裡，方便肉眼辨識與手動清除：
 
@@ -141,7 +155,7 @@ nftables 的規則結構因人而異，腳本不會自動改，只會提示你�
 
 **已經失聯了**
 唯一的路是走主控台（雲端 Console / VNC / IPMI），登入後執行
-`./ssh-port.sh rollback`，或直接從 `/var/lib/ssh-port/backup-*/` 把設定檔複製回去。
+`./ssh-port.sh rollback`，或直接從 `/var/log/OPS-ssh/ssh-port/backup-*/` 把設定檔複製回去。
 
 **`status` 顯示有未確認的變更，但我忘記做到哪了**
 `status` 會把狀態檔內容和看門狗是否還在跑印出來。不確定就選 `rollback`，回到原狀最安全。
@@ -240,7 +254,7 @@ ESTAB 裡。只看 ESTAB 數字，你分不出「50 個人在用」和「正在�
 
 ## 一次性取證（oneshot）
 
-完整報告寫到 `/var/log/n9e-selfheal/ssh-health.log`（非 root 時退到 `/tmp/n9e-selfheal/`），
+完整報告寫到 `/var/log/OPS-ssh/ssh-health.log`（寫不進去時退到 `/tmp/OPS-ssh/`），
 stdout 只印摘要。超過 5MB 自動輪替，保留 3 份；用 `flock` 防重入。
 
 報告內容包含連線統計、三個階段各自的來源排名、互動 session 與**每個 session 正在跑什麼
@@ -256,7 +270,8 @@ stdout 只印摘要。超過 5MB 自動輪替，保留 3 份；用 `flock` 防�
 同一個 IP 大量失敗之後出現成功登入，代表**可能已經被攻破**。命中時判讀結果會被覆寫成
 「疑似已被攻破」，建議立即比對 `authorized_keys`、新增帳號與 cron，必要時隔離主機。
 
-環境變數 `SSH_FORENSIC_LOGDIR` 可改輸出目錄，`IDENT` 可改報告裡的主機識別名。
+環境變數 `OPS_SSH_DIR` 可改整個產出目錄，`SSH_FORENSIC_LOGDIR` 只改取證報告的輸出
+目錄（優先於前者），`IDENT` 可改報告裡的主機識別名。
 
 ## 與 n9e 整合
 

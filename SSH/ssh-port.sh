@@ -55,9 +55,18 @@ DROPIN="${SSHD_CONFD}/00-ssh-port.conf"
 SOCKET_DIR="${PREFIX}/etc/systemd/system/ssh.socket.d"
 SOCKET_OVERRIDE="${SOCKET_DIR}/override.conf"
 
-STATE_DIR="${PREFIX}/var/lib/ssh-port"
+# 本腳本產出的東西（狀態、備份、看門狗、日誌）全部收在同一個目錄底下，
+# 出事時只要看一個地方，也方便整批備份或搬走。設 OPS_SSH_DIR 可換位置。
+OPS_SSH_DIR="${OPS_SSH_DIR:-/var/log/OPS-ssh}"
+BASE_DIR="${PREFIX}${OPS_SSH_DIR}"
+
+STATE_DIR="${BASE_DIR}/ssh-port"
 STATE="${STATE_DIR}/state"
-LOGFILE="${PREFIX}/var/log/ssh-port.log"
+LOGFILE="${BASE_DIR}/ssh-port.log"
+
+# 1.1.0 之前：狀態在 /var/lib/ssh-port，日誌在 /var/log/ssh-port.log
+LEGACY_STATE_DIR="${PREFIX}/var/lib/ssh-port"
+LEGACY_LOGFILE="${PREFIX}/var/log/ssh-port.log"
 
 MARK_BEGIN="# >>> ssh-port.sh 管理區塊 開始 >>>"
 MARK_END="# <<< ssh-port.sh 管理區塊 結束 <<<"
@@ -82,6 +91,47 @@ err()   { _log "${CR}  ✗${C0} $*"; }
 die()   { err "$*"; exit 1; }
 
 has() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------- 舊路徑搬遷 ----------
+# 換埠進行中（舊 state 還在）時「不搬」：看門狗行程此刻正在執行舊目錄下的
+# watchdog.sh，跨檔案系統的 mv 會把它腳下的檔案抽掉，等於毀掉自動還原。
+# 這種情況本次沿用舊路徑，等 confirm / rollback 結束後下一次執行再搬。
+migrate_legacy() {
+    [ -d "$LEGACY_STATE_DIR" ] || [ -f "$LEGACY_LOGFILE" ] || return 0
+
+    if [ -f "${LEGACY_STATE_DIR}/state" ] && [ ! -f "$STATE" ]; then
+        STATE_DIR="$LEGACY_STATE_DIR"
+        STATE="${STATE_DIR}/state"
+        LOGFILE="$LEGACY_LOGFILE"
+        warn "進行中的換埠作業在舊路徑 ${LEGACY_STATE_DIR}，本次沿用不搬移"
+        info "confirm 或 rollback 完成後，下次執行會自動搬到 ${BASE_DIR}"
+        return 0
+    fi
+
+    mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+    _moved=0
+
+    for _b in "$LEGACY_STATE_DIR"/backup-*; do
+        [ -e "$_b" ] || continue
+        mv -f "$_b" "${STATE_DIR}/" 2>/dev/null && _moved=1
+    done
+    # 沒有進行中的作業，這幾個是上一輪的殘留，留著只會誤導
+    rm -f "${LEGACY_STATE_DIR}/state" "${LEGACY_STATE_DIR}/confirmed" \
+          "${LEGACY_STATE_DIR}/watchdog.sh" "${LEGACY_STATE_DIR}/watchdog.pid" 2>/dev/null
+    rmdir "$LEGACY_STATE_DIR" 2>/dev/null
+
+    if [ -f "$LEGACY_LOGFILE" ]; then
+        if [ -f "$LOGFILE" ]; then
+            cat "$LEGACY_LOGFILE" >> "$LOGFILE" 2>/dev/null && rm -f "$LEGACY_LOGFILE"
+        else
+            mv -f "$LEGACY_LOGFILE" "$LOGFILE" 2>/dev/null
+        fi
+        _moved=1
+    fi
+
+    [ "$_moved" = 1 ] && info "舊路徑的日誌與備份已搬到 ${BASE_DIR}"
+    return 0
+}
 
 # 對外 IP。busybox 的 hostname 沒有 -I，且失敗時會走 awk 而不觸發 ||，
 # 結果是印出空字串——提示訊息裡少了 IP 等於少了最關鍵的那一行，故逐一退回。
@@ -801,7 +851,10 @@ if [ "$(id -u)" != 0 ] && [ "$CMD" != status ]; then
     die "需要 root 權限執行"
 fi
 
-mkdir -p "$STATE_DIR" 2>/dev/null
+mkdir -p "$BASE_DIR" 2>/dev/null && chmod 750 "$BASE_DIR" 2>/dev/null
+migrate_legacy
+# 底下會放 sshd_config 的備份，權限跟著收緊
+mkdir -p "$STATE_DIR" 2>/dev/null && chmod 750 "$STATE_DIR" 2>/dev/null
 
 case "$CMD" in
     set)      cmd_set "$NEW_PORT" ;;

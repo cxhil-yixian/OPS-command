@@ -40,7 +40,12 @@ SSH_PORT_REL='SSH/ssh-port.sh'
 SELFHEAL_REL='SSH/selfheal-ssh.sh'
 MIRROR_URL_REL='REPO/URL'
 
-PORT_STATE=/var/lib/ssh-port/state
+# SSH/ 底下的腳本產出的東西統一收在這裡；export 讓它們沿用同一個值
+OPS_SSH_DIR="${OPS_SSH_DIR:-/var/log/OPS-ssh}"
+export OPS_SSH_DIR
+
+PORT_STATE="$OPS_SSH_DIR/ssh-port/state"
+LEGACY_PORT_STATE=/var/lib/ssh-port/state    # 1.1.0 之前的位置，換埠進行中時仍會用
 
 has() { command -v "$1" >/dev/null 2>&1; }
 
@@ -335,7 +340,7 @@ detect() {
     PORTS=$(printf '%s\n' $PORTS | sort -un | tr '\n' ',' | sed 's/,$//')
 
     PENDING=0
-    [ -f "$PORT_STATE" ] && PENDING=1
+    { [ -f "$PORT_STATE" ] || [ -f "$LEGACY_PORT_STATE" ]; } && PENDING=1
 }
 
 # =========================================================
@@ -471,7 +476,7 @@ menu() {
     printf '\n'
     sect "SSH 監控與取證  (SSH/selfheal-ssh.sh)"
     row "5) 即時監看        ${CD}每秒刷新，看得到誰在連、卡在哪個階段${C0}"
-    row "6) 一次性取證      ${CD}完整報告寫入 /var/log/n9e-selfheal/${C0}"
+    row "6) 一次性取證      ${CD}完整報告寫入 $OPS_SSH_DIR/${C0}"
     row "7) 追蹤認證日誌    ${CD}即時 tail 登入成功/失敗事件${C0}"
     row "8) 解析排查        ${CD}傾印原始 ss / ps 資料，回報問題時用${C0}"
     printf '\n'
@@ -592,7 +597,7 @@ act_watch() {
 act_forensic() {
     selfheal_guard || return 0
     printf '\n'
-    dim " 完整報告寫入 /var/log/n9e-selfheal/ssh-health.log，以下是摘要："
+    dim " 完整報告寫入 $OPS_SSH_DIR/ssh-health.log，以下是摘要："
     hr
     sh "$SELFHEAL_SH" oneshot
 }
@@ -672,6 +677,9 @@ act_doctor() {
     else
         row "工具來源  : 本機 $ASSET_DIR"
     fi
+    row "產出目錄  : $OPS_SSH_DIR$([ -d "$OPS_SSH_DIR" ] || printf '   （尚未建立）')"
+    [ -f "$LEGACY_PORT_STATE" ] && \
+        row "            換埠進行中且使用舊路徑 /var/lib/ssh-port，confirm 後會自動搬移"
     hr
     sect "相依套件"
     check_deps
@@ -802,6 +810,8 @@ ops.sh — OPS-command 視覺化操作選單  v$OPS_VERSION
 環境變數
     OPS_RAW_BASE   遠端來源前綴（fork / 內網鏡像 / 其他分支）
                    目前：$OPS_RAW_BASE
+    OPS_SSH_DIR    SSH/ 腳本的產出目錄（狀態、備份、看門狗、日誌、取證報告）
+                   目前：$OPS_SSH_DIR
     NO_COLOR       關閉顏色
 
 目前模式：$RUN_MODE（工具路徑 $ASSET_DIR）

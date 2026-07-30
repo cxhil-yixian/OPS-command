@@ -71,7 +71,7 @@ case "${1:-}" in
     help|-h|--help)
         cat <<'USAGE'
 用法：
-  selfheal-ssh.sh              一次性取證，寫入 /var/log/n9e-selfheal/ssh-health.log
+  selfheal-ssh.sh              一次性取證，寫入 /var/log/OPS-ssh/ssh-health.log
   selfheal-ssh.sh watch [秒]   即時監看，預設每 1 秒更新（Ctrl-C 離開）
   selfheal-ssh.sh snap         輸出單次即時快照
   selfheal-ssh.sh tail         即時追蹤 sshd 認證日誌
@@ -82,6 +82,29 @@ USAGE
 esac
 
 has() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------- 產出目錄 ----------
+# 取證報告、速率基準、重入鎖全部收在同一個目錄，出事時只要看一個地方。
+# 設 OPS_SSH_DIR 可換位置；寫不進去（非 root）就退到暫存目錄，不讓腳本失敗。
+OPS_SSH_DIR="${OPS_SSH_DIR:-/var/log/OPS-ssh}"
+mkdir -p "$OPS_SSH_DIR" 2>/dev/null && chmod 750 "$OPS_SSH_DIR" 2>/dev/null
+if [ ! -w "$OPS_SSH_DIR" ]; then
+    OPS_SSH_DIR="${TMPDIR:-/tmp}/OPS-ssh"
+    mkdir -p "$OPS_SSH_DIR" 2>/dev/null
+fi
+
+# 1.1.0 之前：報告在 /var/log/n9e-selfheal、速率基準在 /run（重開機就沒了）。
+# 舊的 /var/lock/selfheal-ssh.lock 不主動刪：可能正被另一個行程持有，刪掉會讓
+# 重入保護失效一次；它是 0 bytes 的死檔，要清可自行 rm。
+LEGACY_FORENSIC_DIR=/var/log/n9e-selfheal
+if [ -w "$OPS_SSH_DIR" ] && [ -d "$LEGACY_FORENSIC_DIR" ]; then
+    for _f in "$LEGACY_FORENSIC_DIR"/ssh-health.log*; do
+        [ -e "$_f" ] || continue
+        [ -e "${OPS_SSH_DIR}/$(basename "$_f")" ] || mv -f "$_f" "${OPS_SSH_DIR}/" 2>/dev/null
+    done
+    rmdir "$LEGACY_FORENSIC_DIR" 2>/dev/null
+fi
+rm -f /run/selfheal-ssh.rate 2>/dev/null
 
 # ---------- 發行版判定 ----------
 if [ -r /etc/os-release ]; then . /etc/os-release; else ID=unknown; ID_LIKE=""; fi
@@ -370,8 +393,9 @@ collect_conn() {
 # watch 模式不能 sleep 1（會拖慢刷新），改用狀態檔算差值。
 po() { awk '/^Tcp:/{if(h){print $7}else{h=1}}' /proc/net/snmp 2>/dev/null | head -1; }
 
-RATE_STATE=/run/selfheal-ssh.rate
-[ -w /run ] 2>/dev/null || RATE_STATE=/tmp/selfheal-ssh.rate
+# 基準檔改放產出目錄（原本在 /run，重開機就沒了）。這裡不怕殘留：讀回來的
+# 基準只有在 1~120 秒內且計數沒回捲時才採用，重開機後的舊值會自動被忽略。
+RATE_STATE="${OPS_SSH_DIR}/selfheal.rate"
 
 collect_newconn() {
     cur=$(po); now=$(date +%s); NEWCONN=0
@@ -737,11 +761,11 @@ fi
 # =========================================================
 # 模式：oneshot — 完整取證，輸出到 /var/log
 # =========================================================
-LOGDIR=${SSH_FORENSIC_LOGDIR:-/var/log/n9e-selfheal}
+LOGDIR=${SSH_FORENSIC_LOGDIR:-$OPS_SSH_DIR}
 OUT="$LOGDIR/ssh-health.log"
 mkdir -p "$LOGDIR" 2>/dev/null
-if ! touch "$OUT" 2>/dev/null; then          # 非 root 時退到 /tmp，避免整支腳本失敗
-    LOGDIR=/tmp/n9e-selfheal; OUT="$LOGDIR/ssh-health.log"
+if ! touch "$OUT" 2>/dev/null; then          # 寫不進去時退到暫存目錄，避免整支腳本失敗
+    LOGDIR="${TMPDIR:-/tmp}/OPS-ssh"; OUT="$LOGDIR/ssh-health.log"
     mkdir -p "$LOGDIR" 2>/dev/null; touch "$OUT" 2>/dev/null
 fi
 chmod 640 "$OUT" 2>/dev/null
@@ -765,9 +789,8 @@ fi
 # flock 不存在時（busybox 最小安裝）不能讓 `flock || exit 0` 誤判成
 # 「已有程序執行中」而整輪不採集，故先確認指令存在再取鎖。
 if has flock; then
-    LOCK=/var/lock/selfheal-ssh.lock
-    [ -d /var/lock ] || LOCK=/tmp/selfheal-ssh.lock
-    exec 9>"$LOCK" 2>/dev/null || exec 9>/tmp/selfheal-ssh.lock
+    LOCK="${OPS_SSH_DIR}/selfheal.lock"
+    exec 9>"$LOCK" 2>/dev/null || exec 9>"${TMPDIR:-/tmp}/selfheal-ssh.lock"
     flock -n 9 || { echo "已有診斷程序執行中，本次略過"; exit 0; }
 fi
 

@@ -9,7 +9,8 @@
 
 ## [1.1.0] - 2026-07-30
 
-支援一行指令直接執行，不必先 clone。
+兩件事：支援一行指令直接執行不必先 clone，以及 `SSH/` 腳本的產出檔案統一收到
+`/var/log/OPS-ssh/`。
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.sh)
@@ -39,6 +40,35 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
   真的沒有控制終端（cron / CI）才維持原本的擋下行為。
 - 標頭與 `doctor` 會顯示工具來源（本機路徑或遠端 URL + 快取位置），
   `doctor` 另外多一段「遠端執行注意」。
+
+### 變更
+
+- **產出路徑統一到 `/var/log/OPS-ssh/`**（權限 750），原本散在四個地方：
+
+  | 舊路徑 | 新路徑 |
+  |---|---|
+  | `/var/log/ssh-port.log` | `/var/log/OPS-ssh/ssh-port.log` |
+  | `/var/lib/ssh-port/` | `/var/log/OPS-ssh/ssh-port/` |
+  | `/var/log/n9e-selfheal/ssh-health.log` | `/var/log/OPS-ssh/ssh-health.log` |
+  | `/run/selfheal-ssh.rate` | `/var/log/OPS-ssh/selfheal.rate` |
+  | `/var/lock/selfheal-ssh.lock` | `/var/log/OPS-ssh/selfheal.lock` |
+
+  - 舊路徑會在下次執行時自動搬過來（含 `backup-*` 目錄與既有日誌），搬完移除舊目錄。
+  - **換埠進行中不搬**：看門狗行程此刻正在執行舊目錄下的 `watchdog.sh`，跨檔案系統的
+    `mv` 會把它腳下的檔案抽掉，等於毀掉自動還原。這種情況會沿用舊路徑並印出說明，
+    等 `confirm` / `rollback` 結束後下一次執行才搬。`ops.sh` 的 `doctor` 會顯示
+    目前處於這個狀態。
+  - 舊的 `/var/lock/selfheal-ssh.lock` 不主動刪除：可能正被另一個行程持有，刪掉會讓
+    重入保護失效一次。它是 0 bytes 的死檔，要清可自行 `rm`。
+  - 速率基準從 `/run`（tmpfs，重開機清空）移到持久目錄不影響正確性：讀回來的基準
+    只在 1~120 秒內且計數沒回捲時才採用，重開機後的舊值會自動被忽略。
+- 新增 `OPS_SSH_DIR` 環境變數可換整個產出目錄；`ops.sh` 會 export 給子腳本，
+  兩邊一定一致。`SSH_FORENSIC_LOGDIR`（只改取證報告輸出）仍然有效且優先。
+- `selfheal-ssh.sh` 寫不進產出目錄時（非 root）退到 `$TMPDIR/OPS-ssh`，
+  原本是 `/tmp/n9e-selfheal`。
+
+> 這個目錄**不要套 logrotate 或定期清空**：`ssh-port/` 底下是狀態與看門狗腳本，
+> 不是日誌，清掉會讓進行中的換埠失去自動還原能力。取證報告本身已有輪替（5MB × 3）。
 
 ### 修正
 

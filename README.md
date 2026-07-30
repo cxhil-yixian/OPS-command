@@ -46,11 +46,12 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.0
+ OPS-command 運維工具箱  v1.1
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
  防護   防火牆 firewalld   SELinux enforcing   身分 root
+ 工具   遠端執行  腳本快取於 /var/lib/ops-command
 ────────────────────────────────────────────────────────────────────
  SSH 連接埠  (SSH/ssh-port.sh)
    1) 查看目前狀態
@@ -60,7 +61,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
  SSH 監控與取證  (SSH/selfheal-ssh.sh)
    5) 即時監看        每秒刷新，看得到誰在連、卡在哪個階段
-   6) 一次性取證      完整報告寫入 /var/log/n9e-selfheal/
+   6) 一次性取證      完整報告寫入 /var/log/OPS-ssh/
    7) 追蹤認證日誌    即時 tail 登入成功/失敗事件
    8) 解析排查        傾印原始 ss / ps 資料，回報問題時用
 
@@ -68,6 +69,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
    9) 更換套件來源鏡像 呼叫 linuxmirrors.cn 的外部腳本
    d) 環境自我診斷     檢查相依套件與已知相容性問題
    i) 安裝缺少的相依套件
+   u) 更新腳本快取     重新下載 SSH/ 底下的工具
    q) 離開
 ```
 
@@ -112,7 +114,14 @@ bash <(curl -fsSL .../ops.sh) doctor
 | 變數 | 作用 |
 |---|---|
 | `OPS_RAW_BASE` | 遠端來源前綴（fork / 內網鏡像 / 其他分支），預設指向本 repo 的 `main` |
+| `OPS_SSH_DIR` | `SSH/` 腳本的產出目錄，預設 `/var/log/OPS-ssh`；`ops.sh` 會傳給子腳本 |
 | `NO_COLOR` | 關閉顏色 |
+
+`SSH/` 底下兩支腳本產出的東西（換埠狀態、設定檔備份、看門狗、操作日誌、取證報告、
+速率基準、重入鎖）全部收在 `/var/log/OPS-ssh/`，權限 750。**不要對它套 logrotate 或
+定期清空** —— `ssh-port/` 子目錄放的是狀態與看門狗腳本而不是日誌，清掉會讓進行中的
+換埠失去自動還原能力；取證報告的輪替腳本自己會做（5MB × 3 份）。
+舊版路徑會在下次執行時自動搬過來，細節見 [SSH/README.md](SSH/README.md#檔案位置)。
 
 設計上刻意保持三件事：
 
