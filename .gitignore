@@ -5,6 +5,7 @@
 *.swp
 *~
 
-# 腳本執行期產物（正常位置在 /var，這裡只擋誤放進 repo 的情況）
+# 腳本執行期產物（正常位置是 /var/log/OPS-ssh，這裡只擋誤放進 repo 的情況）
 *.log
+OPS-ssh/
 n9e-selfheal/

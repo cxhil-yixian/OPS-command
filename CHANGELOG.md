@@ -7,6 +7,49 @@
 
 ---
 
+## [1.2.0] - 2026-07-30
+
+新增 fail2ban 封鎖管理工具。
+
+### 新增
+
+- **`FAIL2BAN/fail2ban.sh` — fail2ban 封鎖管理**（POSIX sh，Alpine 可直接執行）
+  - 手動封鎖 / 解封、清空封鎖、白名單增刪、IP 查詢、封鎖排行、日誌追蹤、
+    封鎖時長設定、建立 sshd jail、安裝、環境檢查。支援 IP 與 CIDR。
+  - **封鎖前先算會不會鎖到自己**：比對目前的 SSH 來源（`SSH_CONNECTION` →
+    `who` → 從 `ss` 找「本地埠 = 實際 SSH 埠」的連線反推）、本機所有位址、loopback。
+    CIDR 是真的做網段涵蓋計算——POSIX awk 沒有位元運算，改用「除以 2^(32-prefix)
+    後比商」，效果等同遮罩比對且不需要 gawk 擴充。命中就擋下，要硬幹得加 `--force`。
+  - **專門抓「設了但不會生效」**（`doctor`）：沒有任何 jail（RHEL 系裝完預設全部
+    `enabled = false`）、jail 的 `port` 沒跟上實際 SSH 埠、有封鎖中但 iptables /
+    nftables 裡找不到對應規則。這三種情況服務都是「綠的」，但一個攻擊都擋不住。
+  - 封鎖一律透過 `fail2ban-client`，**不自己寫防火牆規則**——手寫規則與 fail2ban
+    自己的狀態不一致，是這類工具最難查的問題。
+  - 設定只寫 `jail.d/zz-ops-*.local`，不碰發行版的 `jail.conf`（套件升級會覆寫它）。
+    白名單寫入前會先讀回目前生效的 `ignoreip` 合併，因為 `jail.d/*.local` 載入順序
+    在最後，直接寫會把管理員原有的白名單默默吃掉。
+  - 相容 fail2ban 0.9（Debian 9 內建）到 1.x：狀態解析 `status` 輸出而非 0.10+ 才有的
+    `get` 子命令；`banip --time` 與 `addignoreip` 用「試一次看結果」判斷能力，
+    不比版本號（發行版常有 backport）也不解析 help 文字（各版用詞不同），
+    不支援就降級並在畫面上講明一次。
+  - 操作稽核寫入 `/var/log/OPS-ssh/fail2ban-ops.log`。
+- **`FAIL2BAN/README.md`** — 自鎖防護、三種「設了但不會生效」、白名單的載入順序陷阱、
+  封鎖時長的 best-effort 行為、相容性對照表、疑難排解。
+- **`ops.sh` 封鎖子選單**（主選單按 `b`）：項目多，塞進主選單會把最常用的 SSH 工具淹掉，
+  所以獨立成子選單。IP 相關動作一律不帶 `-y`，讓底層腳本自己印出「將要做什麼」再確認，
+  確認邏輯只留一份。遠端模式會一併下載 `FAIL2BAN/fail2ban.sh`。
+
+### 修正
+
+- `ops.sh` 的 `doctor` 腳本清單、相依檢查的 fail2ban 說明改指向新工具。
+- `.gitignore` 補上 `OPS-ssh/`（產出目錄改名後的殘留防護）。
+
+### 移除
+
+- `.claude/`（Claude Code 的本機權限快取，與專案無關；1.0.0 移除過，之後又被重建）。
+
+---
+
 ## [1.1.0] - 2026-07-30
 
 兩件事：支援一行指令直接執行不必先 clone，以及 `SSH/` 腳本的產出檔案統一收到

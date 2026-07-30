@@ -9,6 +9,10 @@
 | [`ssh-port.sh`](#ssh-portsh) | 變更 SSH 連接埠 | POSIX sh | 會（有完整還原機制） |
 | [`selfheal-ssh.sh`](#selfheal-sshsh) | 連線取證與即時監看 | POSIX sh | **不會**，純唯讀 |
 
+要封鎖 IP 請用 [`../FAIL2BAN/fail2ban.sh`](../FAIL2BAN/README.md)：這兩支都不封鎖任何東西。
+**用 `ssh-port.sh` 換過埠之後，記得跑 `../FAIL2BAN/fail2ban.sh enable-sshd`** ——
+fail2ban 的 jail 沒跟著改 port 的話，封鎖規則會套在舊埠上，等於沒有防護。
+
 兩支都是 POSIX sh，Alpine 的 busybox ash 可直接執行，不需要安裝 bash。
 
 ---
@@ -116,6 +120,7 @@ override。所以就算新埠完全連不上、你連視窗都關了，時限到
 | `/var/log/OPS-ssh/ssh-port/watchdog.sh` / `.pid` | 看門狗 |
 | `/var/log/OPS-ssh/ssh-health.log` | 取證報告（5MB 輪替，保留 3 份） |
 | `/var/log/OPS-ssh/selfheal.rate` / `.lock` | 連線速率基準與取證的重入鎖 |
+| `/var/log/OPS-ssh/fail2ban-ops.log` | `../FAIL2BAN/fail2ban.sh` 的操作稽核 |
 | `/etc/ssh/sshd_config.d/00-ssh-port.conf` | drop-in（僅 OpenSSH 8.2+），**這是設定檔不是產出物** |
 
 > 目錄權限 750（報告裡有來源 IP、被嘗試的帳號、`authorized_keys` 時間戳，不該讓其他

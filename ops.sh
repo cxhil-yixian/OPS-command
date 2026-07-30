@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.1
+OPS_VERSION=1.2
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -38,6 +38,7 @@ BASE=$(dirname "$SELF")
 
 SSH_PORT_REL='SSH/ssh-port.sh'
 SELFHEAL_REL='SSH/selfheal-ssh.sh'
+F2B_REL='FAIL2BAN/fail2ban.sh'
 MIRROR_URL_REL='REPO/URL'
 
 # SSH/ 底下的腳本產出的東西統一收在這裡；export 讓它們沿用同一個值
@@ -90,6 +91,7 @@ fi
 SSH_DIR="$ASSET_DIR/SSH"
 SSH_PORT_SH="$ASSET_DIR/$SSH_PORT_REL"
 SELFHEAL_SH="$ASSET_DIR/$SELFHEAL_REL"
+F2B_SH="$ASSET_DIR/$F2B_REL"
 MIRROR_URL_FILE="$ASSET_DIR/$MIRROR_URL_REL"
 
 FETCH_ERR=''
@@ -156,7 +158,7 @@ assets_sync() {
     ensure_asset_dir || return 1
 
     _rc=0
-    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL"; do
+    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL" "$F2B_REL"; do
         if [ "${1:-}" = force ] || [ ! -f "$ASSET_DIR/$_rel" ]; then
             printf ' 取得 %s … ' "$_rel"
             if fetch_script "$_rel"; then
@@ -443,8 +445,8 @@ check_deps() {
         DEP_SOFT=1
     fi
 
-    if has fail2ban-client; then okmsg "fail2ban（取證會一併輸出封鎖狀態）"
-    else dim "   （未安裝 fail2ban，非必要）"
+    if has fail2ban-client; then okmsg "fail2ban（選單 b 可管理封鎖清單）"
+    else dim "   （未安裝 fail2ban，非必要；選單 b -> i 可安裝）"
     fi
 }
 
@@ -489,6 +491,9 @@ menu() {
     row "6) 一次性取證      ${CD}完整報告寫入 $OPS_SSH_DIR/${C0}"
     row "7) 追蹤認證日誌    ${CD}即時 tail 登入成功/失敗事件${C0}"
     row "8) 解析排查        ${CD}傾印原始 ss / ps 資料，回報問題時用${C0}"
+    printf '\n'
+    sect "封鎖管理  (FAIL2BAN/fail2ban.sh)"
+    row "b) 進入封鎖選單    ${CD}手動封鎖 / 解封 / 白名單 / 排行，底層走 fail2ban${C0}"
     printf '\n'
     sect "系統"
     row "9) 更換套件來源鏡像 ${CD}呼叫 linuxmirrors.cn 的外部腳本${C0}"
@@ -624,6 +629,84 @@ act_debug() {
     sh "$SELFHEAL_SH" debug
 }
 
+# =========================================================
+# 封鎖管理（fail2ban）
+#   自成一個子選單：項目多，塞進主選單會讓最常用的 SSH 工具被淹掉。
+#   IP 相關動作一律不帶 -y，讓 fail2ban.sh 自己把「將要做什麼」印出來再問，
+#   確認的邏輯只留在底層一份。
+# =========================================================
+f2b_ask_ip() {
+    printf ' %s（可空白分隔多個，直接 Enter 取消）：' "$1"
+    read -r _ips 2>/dev/null || _ips=''
+    [ -n "$_ips" ]
+}
+
+act_f2b_menu() {
+    require_script "$F2B_SH" "$F2B_REL" || return 0
+    while :; do
+        clear 2>/dev/null || printf '\n\n'
+        hr
+        printf '%s 封鎖管理%s  %sFAIL2BAN/fail2ban.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
+        hr
+        if has fail2ban-client; then
+            sh "$F2B_SH" status 2>/dev/null | sed -n '1,12p'
+        else
+            wmsg "這台機器還沒安裝 fail2ban（選 i 安裝）"
+        fi
+        hr
+        row "1) 已封鎖清單"
+        row "2) 手動封鎖 IP    ${CD}預設所有 jail，會先檢查會不會鎖到自己${C0}"
+        row "3) 解除封鎖        ${CD}自動找出是哪些 jail 封的${C0}"
+        row "4) 查詢某個 IP     ${CD}封鎖狀態 / 白名單 / 歷史次數${C0}"
+        row "5) 白名單：加入    ${CD}ignoreip，寫進 jail.d 並即時生效${C0}"
+        row "6) 白名單：移除"
+        row "7) 封鎖次數排行    ${CD}讀 fail2ban 日誌${C0}"
+        row "8) 追蹤 fail2ban 日誌"
+        row "9) 清空所有封鎖    ${CD}要打 y 二次確認${C0}"
+        printf '\n'
+        row "e) 建立 sshd jail  ${CD}埠號取實際生效值，換過 SSH 埠後要重跑${C0}"
+        row "t) 封鎖時長設定"
+        row "d) 環境檢查        ${CD}含「設了但不會生效」的常見情況${C0}"
+        row "i) 安裝 fail2ban"
+        row "b) 返回主選單"
+        printf '\n 請選擇：'
+        read -r _c 2>/dev/null || return 0
+        printf '\n'
+        case "$_c" in
+            1) sh "$F2B_SH" list ;;
+            2) if f2b_ask_ip "要封鎖的 IP / CIDR"; then
+                   printf ' 封鎖多久？(秒，perm = 永久，Enter = 用 jail 預設) '
+                   read -r _t 2>/dev/null || _t=''
+                   # shellcheck disable=SC2086
+                   if [ -n "$_t" ]; then sh "$F2B_SH" ban $_ips -t "$_t"; else sh "$F2B_SH" ban $_ips; fi
+               fi ;;
+            3) f2b_ask_ip "要解除封鎖的 IP" && sh "$F2B_SH" unban $_ips ;;
+            4) f2b_ask_ip "要查詢的 IP" && sh "$F2B_SH" check $_ips ;;
+            5) f2b_ask_ip "要加白名單的 IP / CIDR" && sh "$F2B_SH" allow $_ips ;;
+            6) f2b_ask_ip "要移出白名單的 IP" && sh "$F2B_SH" disallow $_ips ;;
+            7) printf ' 顯示前幾名？(Enter = 15) '
+               read -r _n 2>/dev/null || _n=''
+               sh "$F2B_SH" top "${_n:-15}" ;;
+            8) dim " Ctrl-C 離開，會回到本選單"; sleep 1; sh "$F2B_SH" tail ;;
+            9) sh "$F2B_SH" unban-all ;;
+            e|E) sh "$F2B_SH" enable-sshd ;;
+            t|T) sh "$F2B_SH" bantime
+                 printf ' 要改哪個 jail？(Enter 略過) '
+                 read -r _j 2>/dev/null || _j=''
+                 if [ -n "$_j" ]; then
+                     printf ' 改成幾秒？(-1 = 永久) '
+                     read -r _s 2>/dev/null || _s=''
+                     [ -n "$_s" ] && sh "$F2B_SH" bantime "$_j" "$_s"
+                 fi ;;
+            d|D) sh "$F2B_SH" doctor ;;
+            i|I) sh "$F2B_SH" install ;;
+            b|B|q|Q|'') return 0 ;;
+            *) nomsg "無此選項：$_c" ;;
+        esac
+        pause
+    done
+}
+
 act_mirror() {
     _url='https://linuxmirrors.cn/main.sh'
     [ -r "$MIRROR_URL_FILE" ] && _url=$(head -1 "$MIRROR_URL_FILE" | tr -d ' \r\n')
@@ -695,7 +778,7 @@ act_doctor() {
     check_deps
     hr
     sect "腳本"
-    for _s in "$SSH_PORT_SH" "$SELFHEAL_SH"; do
+    for _s in "$SSH_PORT_SH" "$SELFHEAL_SH" "$F2B_SH"; do
         if [ -f "$_s" ]; then
             [ -x "$_s" ] && okmsg "$_s" || wmsg "$_s（無執行權限，本選單以 sh/bash 呼叫故仍可用）"
         elif [ "$RUN_MODE" = remote ]; then
@@ -882,6 +965,7 @@ while :; do
         7) act_tail ;;
         8) act_debug ;;
         9) act_mirror ;;
+        b|B) act_f2b_menu ;;
         d|D) act_doctor ;;
         i|I) act_install_deps ;;
         u|U) act_refresh ;;

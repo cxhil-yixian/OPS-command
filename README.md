@@ -1,6 +1,7 @@
 # OPS-command
 
 一組給 Linux 伺服器日常運維用的腳本，重點放在**遠端操作時不要把自己鎖在門外**。
+換 SSH 埠有看門狗自動還原，手動封鎖 IP 會先算會不會封到你自己。
 
 所有工具都能單獨執行，也可以透過 `ops.sh` 的視覺化選單操作。
 
@@ -46,7 +47,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.1
+ OPS-command 運維工具箱  v1.2
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
@@ -64,6 +65,9 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
    6) 一次性取證      完整報告寫入 /var/log/OPS-ssh/
    7) 追蹤認證日誌    即時 tail 登入成功/失敗事件
    8) 解析排查        傾印原始 ss / ps 資料，回報問題時用
+
+ 封鎖管理  (FAIL2BAN/fail2ban.sh)
+   b) 進入封鎖選單    手動封鎖 / 解封 / 白名單 / 排行，底層走 fail2ban
 
  系統
    9) 更換套件來源鏡像 呼叫 linuxmirrors.cn 的外部腳本
@@ -85,6 +89,8 @@ OPS-command/
 ├── SSH/                → 詳見 SSH/README.md
 │   ├── ssh-port.sh     安全變更 SSH 連接埠（雙埠並存 + 看門狗自動還原）
 │   └── selfheal-ssh.sh SSH 連線取證與即時監看（夜鶯 n9e 自愈腳本）
+├── FAIL2BAN/           → 詳見 FAIL2BAN/README.md
+│   └── fail2ban.sh     封鎖管理：手動封鎖 / 解封 / 白名單 / 排行 / 環境檢查
 ├── REPO/
 │   └── URL             換源腳本的來源網址（linuxmirrors.cn，第三方）
 ├── CHANGELOG.md        變更記錄
@@ -143,16 +149,20 @@ bash <(curl -fsSL .../ops.sh) doctor
 
 ## 支援矩陣
 
-| 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh |
-|---|---|---|---|
-| CentOS 7.9 | ✅ | ✅ | ✅ |
-| RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ |
-| Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ |
-| Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ |
-| Ubuntu 18.04 / 20.04 / 22.04 / 24.04 | ✅ | ✅ | ✅ |
-| Alpine (OpenRC + busybox) | ✅ | ✅ | ✅ |
+| 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh | fail2ban.sh |
+|---|---|---|---|---|
+| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ |
+| RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ | ✅ |
+| Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ | ✅ |
+| Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ | ✅ |
+| Ubuntu 18.04 / 20.04 / 22.04 / 24.04 | ✅ | ✅ | ✅ | ✅ |
+| Alpine (OpenRC + busybox) | ✅ | ✅ | ✅ | ✅ |
 
-**三支腳本全部是 POSIX sh，Alpine 的 busybox ash 可以直接執行，不需要安裝 bash。**
+`fail2ban.sh` 相容 fail2ban 0.9（Debian 9 內建）到 1.x：狀態一律解析
+`fail2ban-client status` 的輸出，不依賴 0.10+ 才有的 `get` 子命令；版本能力
+（`banip --time`、`addignoreip`）用「試一次看結果」判斷，不比版本號。
+
+**四支腳本全部是 POSIX sh，Alpine 的 busybox ash 可以直接執行，不需要安裝 bash。**
 唯一需要 bash 的是選單第 9 項呼叫的第三方換源腳本。
 
 外部指令一律「先探測能力再用」，探測不到就降級並在輸出中寫明降級了什麼，不靜默失效：
@@ -190,6 +200,9 @@ bash <(curl -fsSL .../ops.sh) doctor
 
 選單按 `i` 會依偵測結果組出這台機器實際需要的那一行並執行。
 
+`fail2ban.sh` 需要 fail2ban 本身（非必要，缺了不影響其他工具）。封鎖選單按 `i`
+會安裝並啟用；RHEL 系的 fail2ban 在 EPEL，會一併處理 `epel-release`。
+
 ---
 
 ## 安全須知
@@ -203,7 +216,13 @@ bash <(curl -fsSL .../ops.sh) doctor
   `https://linuxmirrors.cn/main.sh`）。本 repo 只記錄網址，不對其內容負責。
   不放心請先自行下載檢視再執行。
 - **`selfheal-ssh.sh` 純取證，不改變系統任何狀態、不封鎖任何 IP**。這是刻意的——
-  自動封鎖腳本誤封跳板機或監控伺服器會讓機器直接失聯，要封請用 fail2ban。
+  自動封鎖腳本誤封跳板機或監控伺服器會讓機器直接失聯。要封鎖請用
+  [`FAIL2BAN/fail2ban.sh`](FAIL2BAN/README.md)（有自鎖防護）或讓 fail2ban 自己判斷。
+- **手動封鎖前先確認會不會封到自己**。`fail2ban.sh` 會擋下涵蓋你目前 SSH 來源、
+  本機位址或 loopback 的目標，CIDR 是真的做網段計算的；要硬幹得加 `--force`。
+- **換過 SSH 埠之後要重跑 `fail2ban.sh enable-sshd`**。jail 的 `port` 沒跟著改的話，
+  fail2ban 照樣記錄、照樣「封鎖成功」，但規則套在舊埠上，等於完全沒有防護。
+  `fail2ban.sh doctor` 會比對這兩個值。
 
 ---
 
