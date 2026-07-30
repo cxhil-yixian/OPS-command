@@ -486,13 +486,30 @@ fail_ips()   { echo "$1" | grep -oE 'from [0-9a-fA-F:.]+' | awk '{print $2}' | s
 fail_users() { echo "$1" | grep -oE 'invalid user [^ ]+|for [^ ]+ from' \
                  | sed -e 's/^invalid user //' -e 's/^for //' -e 's/ from$//' | sort | uniq -c | sort -rn; }
 
+# fail2ban 現況。用 socket 判斷而不是呼叫 fail2ban-client：watch 每秒刷新一次，
+# 而 fail2ban-client 是 python 程式，每秒 fork 一支太貴。
+f2b_state() {
+    for _s in /var/run/fail2ban/fail2ban.sock /run/fail2ban/fail2ban.sock; do
+        [ -S "$_s" ] && { echo running; return 0; }
+    done
+    has fail2ban-client && { echo stopped; return 0; }
+    echo none
+}
+
 # --- 判讀（兩種模式共用同一套邏輯）---
 # fail_cnt 依模式不同：oneshot 用近一小時，watch 用近一分鐘
 judge() {
     fail_cnt="$1"; fail_th="$2"; fail_desc="$3"
     if   [ "$fail_cnt" -ge "$fail_th" ]; then
         VERDICT="暴力破解 (${fail_desc} ${fail_cnt} 次登入失敗)"
-        ADVICE="看失敗來源 IP TOP15。建議安裝 fail2ban，或改用金鑰登入並關閉密碼驗證"
+        # 建議要看 fail2ban 目前的狀態給。它「已經在跑」卻還一直累積失敗數，
+        # 代表封鎖沒有真的擋住封包——最常見的是 jail 的 port 還是預設的 22，
+        # 而 sshd 早就換到別的埠。這時叫人「安裝 fail2ban」等於把真正的問題蓋掉。
+        case "$(f2b_state)" in
+            running) ADVICE="fail2ban 在跑但失敗數仍在累積 = 封鎖沒擋住封包，多半是 jail 的 port 還停在 22。跑 FAIL2BAN/fail2ban.sh doctor" ;;
+            stopped) ADVICE="fail2ban 已安裝但沒在跑。啟動後跑 FAIL2BAN/fail2ban.sh doctor 確認 jail 有涵蓋實際的 SSH 埠" ;;
+            *)       ADVICE="看失敗來源 IP TOP15。建議裝 fail2ban（FAIL2BAN/fail2ban.sh install），或改用金鑰登入並關閉密碼驗證" ;;
+        esac
         LEVEL=crit
     elif [ "$PREAUTH" -ge "$TH_PREAUTH" ] && [ "$AUTHED" -eq 0 ]; then
         VERDICT="疑似爆破/掃描 (${PREAUTH} 條卡在認證階段，0 條完成登入)"
