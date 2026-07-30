@@ -973,9 +973,34 @@ cmd_doctor() {
         ok "封鎖規則  : firewalld 裡找得到 $_one"
     else
         err "有 $_cnt 筆封鎖中，但 $_one 在 iptables / nftables / ipset / firewalld 裡都找不到"
-        info "封鎖清單有它、防火牆沒有 = 封包照樣進得來。看 banaction 是否對應這台的防火牆後端："
-        info "  grep -rE '^ *(banaction|action)' ${F2B_ETC}/jail.conf ${F2B_ETC}/jail.local ${F2B_JAILD}/ 2>/dev/null"
-        info "  ${F2B_SVC} 的錯誤會寫在 $(log_src)（找 'Failed to execute ban jail'）"
+        info "封鎖清單有它、防火牆沒有 = 封包照樣進得來"
+
+        # 到這一步就別再叫人自己去 grep 了，直接把三件該看的東西挖出來
+        _ba=$(grep -hrE '^[[:space:]]*(banaction|action)[[:space:]]*=' \
+              "${F2B_ETC}/jail.conf" "${F2B_ETC}/jail.local" "${F2B_JAILD}" 2>/dev/null |
+              sed 's/^[[:space:]]*//' | sort -u | tr '\n' ';' | sed 's/;$//')
+        [ -n "$_ba" ] && info "設定的 banaction : $_ba"
+
+        if has iptables; then
+            if iptables -S 2>/dev/null | grep -q 'f2b'; then
+                warn "f2b 鏈存在，但裡面沒有這個 IP 的規則"
+                info "多半是防火牆被重啟 / reload 過，把 f2b 鏈的內容沖掉了——fail2ban 不會自己補回去"
+                info "重新套用：systemctl restart $F2B_SVC （重啟時會從資料庫還原封鎖）"
+            else
+                warn "iptables 裡連 f2b 鏈都沒有 = ban 動作從頭到尾沒執行成功"
+                info "常見原因：容器 / VPS 缺 iptables 模組、banaction 指到這台沒有的後端"
+            fi
+        fi
+
+        _errs=$(log_cat 2>/dev/null |
+                grep -iE 'failed to execute (ban|unban)|error banning|iptables.*(no chain|not found|permission)' |
+                tail -3)
+        if [ -n "$_errs" ]; then
+            info "fail2ban 日誌裡的相關錯誤（最後 3 筆）："
+            printf '%s\n' "$_errs" | sed 's/^/      /'
+        else
+            info "fail2ban 日誌裡沒有 ban 失敗的錯誤 — 那就是規則事後被沖掉，不是當下沒套上"
+        fi
     fi
 }
 

@@ -105,8 +105,18 @@ RHEL 系裝完 fail2ban 之後，`jail.conf` 裡全部 `enabled = false`，服�
 
 `doctor` 的驗證方式是**拿一個現在真的被封的 IP，去 iptables / nftables / ipset /
 firewalld 裡實際找**，而不是看規則名稱裡有沒有 `f2b`——後者在 banaction 走 firewalld
-或 ipset 時規則不叫這個名字，會變成誤報。找不到時會一併給出該查哪個設定、
-以及 fail2ban 日誌裡對應的錯誤關鍵字。
+或 ipset 時規則不叫這個名字，會變成誤報。
+
+找不到時它會直接把原因挖出來，不需要你再自己 grep：
+
+| 現象 | 判讀 |
+|---|---|
+| `f2b` 鏈存在，但沒有這個 IP 的規則 | 防火牆被重啟 / reload 過，把鏈的內容沖掉了。**fail2ban 不會自己補回去**，要 `systemctl restart fail2ban`（重啟時會從資料庫還原封鎖） |
+| 連 `f2b` 鏈都沒有 | ban 動作從頭到尾沒執行成功。常見於容器 / VPS 缺 iptables 模組，或 banaction 指到這台沒有的後端 |
+| 日誌裡有 `Failed to execute ban` | 會印出最後 3 筆錯誤原文 |
+| 日誌裡沒有錯誤 | 當下有套上，是事後被沖掉的 |
+
+同時會印出設定裡實際的 `banaction`。
 
 ---
 
