@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.2
+OPS_VERSION=1.3
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -146,8 +146,10 @@ fetch_script() {
     return 0
 }
 
-# 遠端模式的開場下載。一次抓齊，讓選單與 doctor 看到的狀態一致。
-# $1 = force 時強制重抓（選單的 u）
+# 遠端模式的下載。一次抓齊，讓選單與 doctor 看到的狀態一致。
+# $1 = ''      只補下載缺的
+#      force   全部重抓，逐檔顯示（選單的 u）
+#      update  全部重抓，只印一行摘要（開場自動更新）
 assets_sync() {
     [ "$RUN_MODE" = remote ] || return 0
     if ! has curl && ! has wget; then
@@ -157,18 +159,29 @@ assets_sync() {
     fi
     ensure_asset_dir || return 1
 
-    _rc=0
+    _mode="${1:-}"
+    _rc=0; _n=0; _fail=''
     for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL" "$F2B_REL"; do
-        if [ "${1:-}" = force ] || [ ! -f "$ASSET_DIR/$_rel" ]; then
-            printf ' 取得 %s … ' "$_rel"
+        if [ "$_mode" = force ] || [ "$_mode" = update ] || [ ! -f "$ASSET_DIR/$_rel" ]; then
+            [ "$_mode" = update ] || printf ' 取得 %s … ' "$_rel"
             if fetch_script "$_rel"; then
-                printf '%s%s%s\n' "$CG" "$MK_OK" "$C0"
+                _n=$((_n + 1))
+                [ "$_mode" = update ] || printf '%s%s%s\n' "$CG" "$MK_OK" "$C0"
             else
-                printf '%s%s%s  %s\n' "$CR" "$MK_NO" "$C0" "$FETCH_ERR"
-                _rc=1
+                _rc=1; _fail="$_fail $_rel"
+                [ "$_mode" = update ] || printf '%s%s%s  %s\n' "$CR" "$MK_NO" "$C0" "$FETCH_ERR"
             fi
         fi
     done
+    if [ "$_mode" = update ]; then
+        if [ -z "$_fail" ]; then
+            printf ' %s%s%s 工具已更新（%s 支）\n' "$CG" "$MK_OK" "$C0" "$_n"
+        else
+            printf ' %s%s%s 更新失敗：%s\n' "$CY" "$MK_WARN" "$C0" "$_fail"
+            printf '   %s\n' "$FETCH_ERR"
+            printf '   沿用既有快取繼續執行\n'
+        fi
+    fi
     # 換源網址檔沒抓到不影響，act_mirror 會退回內建預設值。
     # 但一定要驗證內容：下載失敗會留下 0 bytes 的檔案，而「檔案存在」會讓
     # act_mirror 拿空字串蓋掉內建預設網址，也會讓這裡以為抓過了不再重試。
@@ -714,6 +727,24 @@ act_f2b_menu() {
     done
 }
 
+# 問一題：$1=提示 $2=預設值，回答放進 REPLY_VAL
+ask_default() {
+    printf ' %s%s%s ' "$CC" "$1" "$C0"
+    [ -n "$2" ] && printf '%s(Enter = %s)%s ' "$CD" "$2" "$C0"
+    read -r REPLY_VAL 2>/dev/null || REPLY_VAL=''
+    [ -z "$REPLY_VAL" ] && REPLY_VAL="$2"
+}
+
+# 問 true/false：$1=提示 $2=預設（true/false）
+ask_bool() {
+    ask_default "$1" "$2"
+    case "$REPLY_VAL" in
+        y|Y|yes|YES|true|TRUE|1|是)  REPLY_VAL=true ;;
+        n|N|no|NO|false|FALSE|0|否)  REPLY_VAL=false ;;
+        *) REPLY_VAL="$2" ;;
+    esac
+}
+
 act_mirror() {
     _url='https://linuxmirrors.cn/main.sh'      # 內建預設，讀不到 REPO/URL 時用這個
     if [ -r "$MIRROR_URL_FILE" ]; then
@@ -755,6 +786,73 @@ act_mirror() {
         return 0
     fi
 
+    # 先把參數問完再執行。那支腳本本來會在跑到一半時逐項互動詢問（協議、內外網、
+    # 要不要覆蓋 EPEL、要不要順便升級套件…），問題散在輸出中間很容易看漏就按下去。
+    # 這裡先一次問完並組成命令列參數，執行前把完整指令攤開來看。
+    sect "參數設定（直接 Enter 用預設值）"
+    _args=''
+
+    printf '\n'
+    row "鏡像站："
+    row "  ${CB}1${C0}) 阿里云      mirrors.aliyun.com"
+    row "  ${CB}2${C0}) 腾讯云      mirrors.tencent.com"
+    row "  ${CB}3${C0}) 华为云      mirrors.huaweicloud.com"
+    row "  ${CB}4${C0}) 网易        mirrors.163.com"
+    row "  ${CB}5${C0}) 清华大学    mirrors.tuna.tsinghua.edu.cn"
+    row "  ${CB}6${C0}) 中科大      mirrors.ustc.edu.cn"
+    row "  ${CB}c${C0}) 自訂網域"
+    row "  ${CD}Enter = 不指定，讓腳本自己列選單讓你挑${C0}"
+    ask_default "選擇：" ""
+    case "$REPLY_VAL" in
+        1) _args="$_args --source mirrors.aliyun.com" ;;
+        2) _args="$_args --source mirrors.tencent.com" ;;
+        3) _args="$_args --source mirrors.huaweicloud.com" ;;
+        4) _args="$_args --source mirrors.163.com" ;;
+        5) _args="$_args --source mirrors.tuna.tsinghua.edu.cn" ;;
+        6) _args="$_args --source mirrors.ustc.edu.cn" ;;
+        c|C) ask_default "鏡像站網域（例如 mirrors.example.com）：" ""
+             [ -n "$REPLY_VAL" ] && _args="$_args --source $REPLY_VAL" ;;
+        *) : ;;
+    esac
+
+    ask_default "連線協議 http / https：" "http"
+    case "$REPLY_VAL" in
+        http|https) _args="$_args --protocol $REPLY_VAL" ;;
+        *) _args="$_args --protocol http" ;;
+    esac
+
+    ask_bool "優先使用內網位址？（雲主機內網通常較快）" "false"
+    _args="$_args --use-intranet-source $REPLY_VAL"
+
+    if [ "$OS_FAMILY" = rhel ]; then
+        ask_bool "安裝 / 覆蓋 EPEL 附加軟體源？" "true"
+        _args="$_args --install-epel $REPLY_VAL"
+    fi
+
+    ask_bool "備份原有的軟體源設定？" "true"
+    _args="$_args --backup $REPLY_VAL"
+    if [ "$REPLY_VAL" = true ]; then
+        ask_bool "已有舊備份時直接覆蓋？（選 false 會在執行中途問你）" "true"
+        [ "$REPLY_VAL" = true ] && _args="$_args --ignore-backup-tips"
+    fi
+
+    ask_bool "換源後順便升級所有軟體包？" "false"
+    _args="$_args --upgrade-software $REPLY_VAL"
+    if [ "$REPLY_VAL" = true ]; then
+        ask_bool "升級後清理下載快取？" "true"
+        _args="$_args --clean-cache $REPLY_VAL"
+    fi
+
+    printf '\n'
+    row "將要執行："
+    if has curl; then
+        row "  ${CB}curl -sSL $_url | bash -s --$_args${C0}"
+    else
+        row "  ${CB}wget -qO- $_url | bash -s --$_args${C0}"
+    fi
+    dim "   （沒指定的項目仍會由該腳本自己詢問）"
+    printf '\n'
+
     case "$_url" in
         http://*|https://*) : ;;
         *) nomsg "取不到合法的來源網址（$MIRROR_URL_FILE 內容異常）"
@@ -768,10 +866,11 @@ act_mirror() {
     [ "$_a" = YES ] || { printf ' 已取消\n'; return 0; }
 
     printf '\n'
+    # shellcheck disable=SC2086
     if has curl; then
-        curl -sSL "$_url" | bash
+        curl -sSL "$_url" | bash -s -- $_args
     else
-        wget -qO- "$_url" | bash
+        wget -qO- "$_url" | bash -s -- $_args
     fi
 }
 
@@ -905,6 +1004,51 @@ act_install_deps() {
 }
 
 # =========================================================
+# 開場：更新快取 + 自檢
+#   選單開出來之前先把「等一下會用到的東西」準備好並確認可用，不要等到選下去
+#   才發現工具是舊的、或封鎖根本寫不進防火牆。
+# =========================================================
+startup_tasks() {
+    _notes=0        # 有東西要講才停下來等 Enter，沒事就直接進選單
+
+    if [ "$RUN_MODE" = remote ]; then
+        if [ "${OPS_NO_UPDATE:-0}" = 1 ]; then
+            dim " 已略過自動更新（OPS_NO_UPDATE=1）"
+        elif [ "$PENDING" = 1 ]; then
+            # 換埠進行中時覆蓋 ssh-port.sh 會影響看門狗的還原行為，跟選單 u 同樣的顧慮
+            wmsg "有未確認的換埠作業，本次略過自動更新（confirm / rollback 之後再更新）"
+            _notes=1
+        else
+            printf ' 更新工具… '
+            if assets_sync update >/dev/null 2>&1; then
+                printf '%s%s%s\n' "$CG" "$MK_OK" "$C0"
+            else
+                printf '%s%s%s 失敗，沿用既有快取\n' "$CY" "$MK_WARN" "$C0"
+                _notes=1
+            fi
+        fi
+    fi
+
+    # 相依：只在有硬缺失時出聲
+    check_deps >/dev/null 2>&1
+    if [ "${DEP_HARD:-0}" = 1 ]; then
+        nomsg "有必要套件缺失，部分功能無法運作（按 d 看細節、i 安裝）"
+        _notes=1
+    fi
+
+    # 封鎖後端：沒問題就完全安靜。判斷邏輯留在 fail2ban.sh 裡，這邊不複製一份。
+    if [ -f "$F2B_SH" ]; then
+        _pf=$(sh "$F2B_SH" preflight 2>/dev/null)
+        [ -n "$_pf" ] && { printf '%s\n' "$_pf"; _notes=1; }
+    fi
+
+    if [ "$_notes" = 1 ]; then
+        printf '\n%s按 Enter 進入選單…%s' "$CD" "$C0"
+        read -r _ignored 2>/dev/null || true
+    fi
+}
+
+# =========================================================
 # 進入點
 # =========================================================
 # 一行指令執行時 $0 是管線 / fd，讀不回自己的註解，所以說明文字直接內嵌。
@@ -924,6 +1068,9 @@ ops.sh — OPS-command 視覺化操作選單  v$OPS_VERSION
     此模式會把各工具腳本下載到 $(cache_dir) 後再呼叫。
     換埠的看門狗會回頭呼叫該路徑做自動還原，確認完成前請勿刪除。
 
+選項
+    --no-update    略過開場的自動更新（等同 OPS_NO_UPDATE=1）
+
 環境變數
     OPS_RAW_BASE   遠端來源前綴（fork / 內網鏡像 / 其他分支）
                    目前：$OPS_RAW_BASE
@@ -938,6 +1085,17 @@ EOF
 
 ui_init
 detect
+
+# 選項可以出現在子命令前後
+for _a in "$@"; do
+    case "$_a" in
+        --no-update) OPS_NO_UPDATE=1 ;;
+    esac
+done
+
+case "${1:-}" in
+    --no-update) shift ;;
+esac
 
 case "${1:-}" in
     -h|--help|help) usage ;;
@@ -970,7 +1128,7 @@ if [ ! -t 0 ]; then
     exit 1
 fi
 
-assets_sync || true                 # 缺哪支腳本，選到時 require_script 會再試一次
+startup_tasks
 
 while :; do
     detect                      # 每輪重測，換完埠後標頭要能立刻反映

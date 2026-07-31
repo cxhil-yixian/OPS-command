@@ -1109,6 +1109,41 @@ cmd_doctor() {
     fi
 }
 
+# 給 ops.sh 開場呼叫：沒問題就完全安靜，有問題才印一行。
+# 刻意做得很輕：不呼叫 fail2ban-client 以外的重東西，也不做任何變更。
+cmd_preflight() {
+    has fail2ban-client || return 0          # 沒裝就不關我們的事
+    [ "$(id -u)" = 0 ] || return 0           # 非 root 讀不到狀態，別亂報
+
+    _fw=$(fw_backend)
+    if [ "$_fw" = none ]; then
+        warn "fail2ban 已安裝，但找不到可用的防火牆後端 — 封鎖不會生效（選 b → d 看細節）"
+        return 0
+    fi
+    if [ "$_fw" = iptables ]; then
+        _probe="f2b-probe-$$"
+        if iptables -w -N "$_probe" 2>/dev/null || iptables -N "$_probe" 2>/dev/null; then
+            iptables -w -X "$_probe" 2>/dev/null || iptables -X "$_probe" 2>/dev/null
+        else
+            warn "iptables 建不了鏈 — fail2ban 的封鎖不會生效（選 b → d 看細節）"
+            return 0
+        fi
+    fi
+
+    f2b_ping || { warn "fail2ban 已安裝但服務沒有回應（選 b → d 看細節）"; return 0; }
+
+    [ -z "$(jails)" ] && {
+        warn "fail2ban 在跑但沒有任何 jail — 不會封任何東西（選 b → e 建立 sshd jail）"
+        return 0
+    }
+
+    _rec=$(banaction_pick); _cur=$(banaction_current)
+    if [ -n "$_cur" ] && [ -n "$_rec" ] && [ "$_cur" != "$_rec" ]; then
+        warn "banaction=$_cur 與這台的防火牆（$_fw）不符，封鎖可能失效（選 b → d 看細節）"
+    fi
+    return 0
+}
+
 usage() {
     cat <<EOF
 fail2ban.sh — fail2ban 封鎖管理  v$F2B_SH_VER
@@ -1200,5 +1235,6 @@ case "$CMD" in
     reload)                cmd_reload ;;
     install)               cmd_install ;;
     doctor|check-env)      cmd_doctor ;;
+    preflight)             cmd_preflight ;;      # ops.sh 開場自檢用，沒事不出聲
     *) printf '%s\n' "未知命令：$CMD（跑 $SELF -h 看用法）" >&2; exit 1 ;;
 esac
