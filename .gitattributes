@@ -1,0 +1,7 @@
+# Windows 腳本一律用 CRLF：在 Linux 上編輯 / git checkout 之後仍要能在
+# 記事本與舊版 PowerShell ISE 正常開啟，.bat 尤其需要 CRLF。
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Linux 腳本一律 LF：CRLF 會讓 shebang 變成 "/bin/sh\r"，直接執行失敗。
+*.sh  text eol=lf

@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.3
+OPS_VERSION=1.4
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)

@@ -1,7 +1,8 @@
 # OPS-command
 
-一組給 Linux 伺服器日常運維用的腳本，重點放在**遠端操作時不要把自己鎖在門外**。
+一組伺服器日常運維用的腳本，重點放在**遠端操作時不要把自己鎖在門外**。
 換 SSH 埠有看門狗自動還原，手動封鎖 IP 會先算會不會封到你自己。
+Linux 以外另附一支 Windows 10/11 的管理工具，換 RDP Port 同樣有看門狗。
 
 所有工具都能單獨執行，也可以透過 `ops.sh` 的視覺化選單操作。
 
@@ -100,6 +101,9 @@ OPS-command/
 │   └── selfheal-ssh.sh SSH 連線取證與即時監看（夜鶯 n9e 自愈腳本）
 ├── FAIL2BAN/           → 詳見 FAIL2BAN/README.md
 │   └── fail2ban.sh     封鎖管理：手動封鎖 / 解封 / 白名單 / 排行 / 環境檢查
+├── WINDOWS/            → 詳見 WINDOWS/README.md
+│   ├── Win_Admin_Tool.bat  進入點（雙擊即可）
+│   └── Win_Admin_Tool.ps1  Windows 10/11 管理選單：RDP / 帳號 / 更新 / 防火牆 / 磁碟
 ├── REPO/
 │   └── URL             換源腳本的來源網址（linuxmirrors.cn，第三方）
 ├── CHANGELOG.md        變更記錄
@@ -168,6 +172,8 @@ bash <(curl -fsSL .../ops.sh) doctor
 | Ubuntu 18.04 / 20.04 / 22.04 / 24.04 | ✅ | ✅ | ✅ | ✅ |
 | Alpine (OpenRC + busybox) | ✅ | ✅ | ✅ | ✅ |
 
+Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的 Linux 工具彼此獨立）。
+
 `fail2ban.sh` 相容 fail2ban 0.9（Debian 9 內建）到 1.x：狀態一律解析
 `fail2ban-client status` 的輸出，不依賴 0.10+ 才有的 `get` 子命令；版本能力
 （`banip --time`、`addignoreip`）用「試一次看結果」判斷，不比版本號。
@@ -225,6 +231,9 @@ bash <(curl -fsSL .../ops.sh) doctor
 - **選單第 9 項會下載並以 root 執行第三方腳本**（`REPO/URL` 記錄的
   `https://linuxmirrors.cn/main.sh`）。本 repo 只記錄網址，不對其內容負責。
   不放心請先自行下載檢視再執行。
+- **Windows 換 RDP Port 一樣走「換 → 另一台測 → 確認」三步**。看門狗是排程工作，
+  腳本關掉、使用者登出、連線中斷都不影響它執行；看門狗建不起來就不做變更。
+  詳見 [WINDOWS/README.md](WINDOWS/README.md)。
 - **`selfheal-ssh.sh` 純取證，不改變系統任何狀態、不封鎖任何 IP**。這是刻意的——
   自動封鎖腳本誤封跳板機或監控伺服器會讓機器直接失聯。要封鎖請用
   [`FAIL2BAN/fail2ban.sh`](FAIL2BAN/README.md)（有自鎖防護）或讓 fail2ban 自己判斷。
