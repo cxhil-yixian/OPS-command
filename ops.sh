@@ -169,10 +169,17 @@ assets_sync() {
             fi
         fi
     done
-    # 換源網址檔沒抓到不影響，act_mirror 會退回內建預設值
-    if [ "${1:-}" = force ] || [ ! -f "$MIRROR_URL_FILE" ]; then
-        mkdir -p "$(dirname "$MIRROR_URL_FILE")" 2>/dev/null &&
-            fetch_url "$OPS_RAW_BASE/$MIRROR_URL_REL" "$MIRROR_URL_FILE" 2>/dev/null || true
+    # 換源網址檔沒抓到不影響，act_mirror 會退回內建預設值。
+    # 但一定要驗證內容：下載失敗會留下 0 bytes 的檔案，而「檔案存在」會讓
+    # act_mirror 拿空字串蓋掉內建預設網址，也會讓這裡以為抓過了不再重試。
+    if [ "${1:-}" = force ] || [ ! -s "$MIRROR_URL_FILE" ]; then
+        if mkdir -p "$(dirname "$MIRROR_URL_FILE")" 2>/dev/null &&
+           fetch_url "$OPS_RAW_BASE/$MIRROR_URL_REL" "${MIRROR_URL_FILE}.part" 2>/dev/null &&
+           grep -qE '^[[:space:]]*https?://' "${MIRROR_URL_FILE}.part" 2>/dev/null; then
+            mv -f "${MIRROR_URL_FILE}.part" "$MIRROR_URL_FILE" 2>/dev/null
+        else
+            rm -f "${MIRROR_URL_FILE}.part" 2>/dev/null
+        fi
     fi
     return $_rc
 }
@@ -708,8 +715,17 @@ act_f2b_menu() {
 }
 
 act_mirror() {
-    _url='https://linuxmirrors.cn/main.sh'
-    [ -r "$MIRROR_URL_FILE" ] && _url=$(head -1 "$MIRROR_URL_FILE" | tr -d ' \r\n')
+    _url='https://linuxmirrors.cn/main.sh'      # 內建預設，讀不到 REPO/URL 時用這個
+    if [ -r "$MIRROR_URL_FILE" ]; then
+        # 取「第一行看起來像網址的」，不是 head -1：那個檔案可能開頭有空行或註解，
+        # head -1 會拿到空字串，然後把空網址丟給 curl（curl: (3) <url> malformed）。
+        _u=$(awk '/^[ \t]*https?:\/\// { gsub(/[ \t\r]/, ""); print; exit }' \
+             "$MIRROR_URL_FILE" 2>/dev/null)
+        case "$_u" in
+            http://*|https://*) _url="$_u" ;;
+            *) wmsg "$MIRROR_URL_FILE 裡找不到網址，改用內建預設" ;;
+        esac
+    fi
 
     printf '\n'
     sect "更換套件來源鏡像"
@@ -738,6 +754,14 @@ act_mirror() {
         row "安裝：$PKG_INSTALL bash"
         return 0
     fi
+
+    case "$_url" in
+        http://*|https://*) : ;;
+        *) nomsg "取不到合法的來源網址（$MIRROR_URL_FILE 內容異常）"
+           row "請重新執行選單的 u 更新快取，或自行執行："
+           row "  curl -sSL https://linuxmirrors.cn/main.sh | bash"
+           return 0 ;;
+    esac
 
     printf ' %s請輸入 %sYES%s%s 以確認執行（其他任何輸入都會取消）：%s ' "$CY" "$CB" "$C0" "$CY" "$C0"
     read -r _a 2>/dev/null || _a=''
