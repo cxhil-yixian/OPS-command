@@ -443,6 +443,63 @@ live_ssh_ports() {
     printf '%s\n' $_p | sort -un
 }
 
+# =========================================================
+# 封鎖後端
+#   「INPUT 鏈裡沒有規則」不等於「不能封鎖」——fail2ban 會自己建 f2b-* 鏈並在
+#   INPUT 插一條 jump，原本空的也照樣生效。真正會讓封鎖失效的是「連鏈都建不起
+#   來」（容器缺 netfilter 模組）或「banaction 指到這台沒有的後端」。
+# =========================================================
+fw_backend() {
+    if has firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then printf 'firewalld\n'; return 0; fi
+    if has ufw && ufw status 2>/dev/null | head -1 | grep -qi active;  then printf 'ufw\n';       return 0; fi
+    if has nft && nft list ruleset 2>/dev/null | grep -q 'hook input'; then printf 'nftables\n';  return 0; fi
+    if has iptables; then printf 'iptables\n'; return 0; fi     # 有指令就算數，不看有沒有規則
+    printf 'none\n'
+}
+
+# 每種後端該用哪個 banaction。firewalld 特別重要：它 reload 時會把 iptables 上的
+# f2b 鏈整個沖掉，用 iptables-* 的話封鎖會靜默失效（清單裡有、防火牆裡沒有）。
+banaction_for() {
+    case "$1" in
+        firewalld) printf 'firewallcmd-rich-rules\n' ;;
+        ufw)       printf 'ufw\n' ;;
+        nftables)  printf 'nftables-multiport\n' ;;
+        iptables)  printf 'iptables-multiport\n' ;;
+        *)         printf '\n' ;;
+    esac
+}
+
+# 選一個「這個 fail2ban 版本真的有」的 banaction。action.d 裡沒有對應檔案就回空，
+# 讓 fail2ban 用發行版預設值，而不是寫一個會讓服務起不來的名字進去。
+banaction_pick() {
+    _w=$(banaction_for "$(fw_backend)")
+    [ -n "$_w" ] || return 0
+    [ -f "${F2B_ETC}/action.d/${_w}.conf" ] && printf '%s\n' "$_w"
+}
+
+# 目前設定檔裡實際生效的 banaction（取最後一個，載入順序越後面越優先）
+banaction_current() {
+    _files=''
+    for _f in "${F2B_ETC}/jail.conf" "${F2B_ETC}/jail.local" \
+              "${F2B_JAILD}"/*.conf "${F2B_JAILD}"/*.local; do
+        [ -f "$_f" ] && _files="$_files $_f"
+    done
+    [ -n "$_files" ] || return 0
+    # shellcheck disable=SC2086
+    grep -hE '^[[:space:]]*banaction[[:space:]]*=' $_files 2>/dev/null |
+        sed 's/^[^=]*=[[:space:]]*//' | tr -d ' \t\r' | grep -v '^$' | tail -1
+}
+
+container_kind() {
+    _k=$(systemd-detect-virt -c 2>/dev/null)      # 非容器時會印 none 且回傳非 0
+    [ -n "$_k" ] || _k=none
+    if [ "$_k" = none ]; then
+        [ -f /.dockerenv ] && _k=docker
+        grep -qa 'container=lxc' /proc/1/environ 2>/dev/null && _k=lxc
+    fi
+    printf '%s\n' "$_k"
+}
+
 # 從設定檔裡挖出 [sshd] 區塊的 port（區塊感知，不會抓到別的 jail 的值）
 #
 # 檔案清單要先濾掉不存在的：awk 開不了檔是 fatal，會整個中止，後面的檔案
@@ -784,10 +841,20 @@ cmd_enable_sshd() {
         _backend=systemd
     fi
 
+    _fw=$(fw_backend)
+    _ba=$(banaction_pick)
+
     step "將建立 sshd jail"
     info "檔案      : $SSHD_JAIL_FILE"
     info "監控埠    : $_ports   （取自實際生效的 sshd 設定）"
     info "backend   : $_backend"
+    if [ -n "$_ba" ]; then
+        info "banaction : $_ba   （依偵測到的防火牆 $_fw 選的）"
+    else
+        info "banaction : 不寫入，沿用發行版預設"
+        [ "$_fw" = none ] && warn "這台偵測不到可用的防火牆，封鎖會寫不進去（先跑 doctor）"
+        [ "$_fw" != none ] && info "（這個 fail2ban 版本沒有 $(banaction_for "$_fw") 這個 action 檔）"
+    fi
     info "門檻      : maxretry=5 findtime=600 bantime=3600"
     [ -f "$SSHD_JAIL_FILE" ] && warn "檔案已存在，會被覆寫"
     [ "$DRY" = 1 ] && { info "（乾跑，不實際執行）"; return 0; }
@@ -803,6 +870,12 @@ cmd_enable_sshd() {
         printf '%s\n' "enabled  = true"
         printf '%s\n' "backend  = $_backend"
         printf '%s\n' "port     = $_ports"
+        if [ -n "$_ba" ]; then
+            printf '%s\n' "# banaction 依偵測到的防火牆（$_fw）選。用錯的話封鎖會靜默失效："
+            printf '%s\n' "# firewalld 每次 reload 都會把 iptables 上的 f2b 鏈沖掉，變成清單裡有、"
+            printf '%s\n' "# 防火牆裡沒有。換過防火牆方案之後重跑 enable-sshd 即可。"
+            printf '%s\n' "banaction = $_ba"
+        fi
         printf '%s\n' "maxretry = 5"
         printf '%s\n' "findtime = 600"
         printf '%s\n' "bantime  = 3600"
@@ -949,6 +1022,40 @@ cmd_doctor() {
         ok "日誌來源  : $_src"
     fi
 
+    # ban 動作到底有沒有地方可以寫（規則是空的不影響，重點是能不能建鏈）
+    _fw=$(fw_backend)
+    _ct=$(container_kind)
+    info "防火牆後端 : $_fw$([ "$_ct" != none ] && printf ' （容器：%s）' "$_ct")"
+    case "$_fw" in
+        none)
+            err "找不到任何可用的防火牆工具 — fail2ban 沒有地方可以寫封鎖規則"
+            info "封鎖清單會一直長大，但封包照樣進得來。安裝 iptables 或 firewalld 再說" ;;
+        iptables)
+            # 建一條臨時空鏈再刪掉：這是唯一能證明「ban 動作真的能執行」的方式。
+            # 空鏈不掛在任何地方，不影響現有規則。
+            _probe="f2b-probe-$$"
+            if iptables -w -N "$_probe" 2>/dev/null || iptables -N "$_probe" 2>/dev/null; then
+                iptables -w -X "$_probe" 2>/dev/null || iptables -X "$_probe" 2>/dev/null
+                ok "iptables 可建鏈 — ban 動作有地方可寫（INPUT 現在有沒有規則都不影響）"
+            else
+                err "iptables 存在但建不了鏈 — fail2ban 的封鎖不會生效"
+                [ "$_ct" != none ] && info "這台是 $_ct 容器，多半是缺 netfilter 模組，宿主機沒開就無解"
+                info "只能改用雲端安全群組 / 上層設備擋，或改用金鑰登入並關閉密碼驗證"
+            fi ;;
+        *)  ok "$_fw 可用 — ban 動作有地方可寫" ;;
+    esac
+
+    # banaction 對不對得上這台的後端
+    _rec=$(banaction_pick)
+    _cur=$(banaction_current)
+    [ -n "$_cur" ] && info "設定的 banaction : $_cur"
+    if [ -n "$_cur" ] && [ -n "$_rec" ] && [ "$_cur" != "$_rec" ]; then
+        warn "banaction 是 $_cur，但這台的防火牆後端是 $_fw — 建議改成 $_rec"
+        [ "$_fw" = firewalld ] && \
+            info "firewalld 每次 reload 都會把 iptables 上的 f2b 鏈沖掉，封鎖會靜默失效"
+        info "修正：$SELF enable-sshd（會依偵測到的後端寫入）"
+    fi
+
     # 封鎖到底有沒有落到防火牆裡
     #
     # 不能用「規則名稱裡有沒有 f2b」判斷：banaction 走 firewalld 或 ipset 時，
@@ -976,10 +1083,8 @@ cmd_doctor() {
         info "封鎖清單有它、防火牆沒有 = 封包照樣進得來"
 
         # 到這一步就別再叫人自己去 grep 了，直接把三件該看的東西挖出來
-        _ba=$(grep -hrE '^[[:space:]]*(banaction|action)[[:space:]]*=' \
-              "${F2B_ETC}/jail.conf" "${F2B_ETC}/jail.local" "${F2B_JAILD}" 2>/dev/null |
-              sed 's/^[[:space:]]*//' | sort -u | tr '\n' ';' | sed 's/;$//')
-        [ -n "$_ba" ] && info "設定的 banaction : $_ba"
+        _ba=$(banaction_current)
+        [ -n "$_ba" ] && info "生效中的 banaction : $_ba"
 
         if has iptables; then
             if iptables -S 2>/dev/null | grep -q 'f2b'; then

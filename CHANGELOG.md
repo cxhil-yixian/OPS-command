@@ -9,6 +9,20 @@
 
 ## [1.2.2] - 2026-07-31
 
+### 新增
+
+- **`doctor` 事前檢查封鎖後端能不能用。** 起因是另一台機器顯示「防火牆 none」——
+  但那只代表 INPUT 鏈裡沒有規則，不代表 fail2ban 不能運作（它會自己建 `f2b-*` 鏈
+  並在 INPUT 插 jump）。真正會讓封鎖失效的是「連鏈都建不起來」，常見於 OpenVZ /
+  LXC 容器缺 netfilter 模組。現在會：偵測後端（firewalld / ufw / nftables /
+  iptables / none）、判斷是不是容器、對 iptables 實際建一條臨時空鏈再刪掉來驗證
+  能力（空鏈不掛在任何地方，不影響現有規則）。
+- **`enable-sshd` 依偵測到的後端寫 `banaction`**：firewalld → `firewallcmd-rich-rules`、
+  ufw → `ufw`、nftables → `nftables-multiport`、iptables → `iptables-multiport`。
+  firewalld 那條最重要：它每次 reload 都會把 iptables 上的 f2b 鏈沖掉，用錯的話
+  封鎖會靜默失效。`action.d/` 沒有對應檔案就不寫，沿用發行版預設，而不是寫一個
+  會讓服務起不來的名字進去。`doctor` 也會比對現行值與建議值，不一致時警告。
+
 ### 修正
 
 - **選單第 9 項（換源）把空網址丟給 curl**，畫面上「來源：」是空的，確認後只得到

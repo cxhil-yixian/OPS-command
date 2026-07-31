@@ -71,6 +71,32 @@ $ ./fail2ban.sh ban 61.219.0.0/16
 
 ---
 
+## 封鎖後端
+
+`doctor` 會先確認「ban 動作到底有沒有地方可以寫」，這跟「這台有沒有防火牆規則」是兩回事：
+
+- **INPUT 鏈是空的不影響封鎖。** fail2ban 會自己建 `f2b-*` 鏈並在 INPUT 插一條 jump，
+  原本沒有任何規則也照樣生效。`ops.sh` 標頭顯示「防火牆 none」只是說這台沒有防火牆
+  政策，不代表 fail2ban 不能用。
+- **真正會讓它失效的是「連鏈都建不起來」。** 常見於 OpenVZ / LXC 容器缺 netfilter
+  模組。`doctor` 會實際建一條臨時空鏈再刪掉來驗證——這是唯一能證明 ban 動作真的
+  能執行的方式，空鏈不掛在任何地方，不影響現有規則。
+
+`enable-sshd` 會依偵測到的後端寫入對應的 `banaction`：
+
+| 偵測到的後端 | 寫入的 banaction | 為什麼 |
+|---|---|---|
+| firewalld | `firewallcmd-rich-rules` | firewalld 每次 reload 都會把 iptables 上的 f2b 鏈沖掉，用 `iptables-*` 會變成「清單裡有、防火牆裡沒有」 |
+| ufw | `ufw` | |
+| nftables | `nftables-multiport` | |
+| iptables | `iptables-multiport` | |
+
+`action.d/` 底下沒有對應檔案時（舊版 fail2ban 可能沒有）就不寫，沿用發行版預設，
+而不是寫一個會讓服務起不來的名字進去。`doctor` 另外會比對「現在生效的 banaction」
+與「這台後端該用的」，不一致時警告。**換過防火牆方案之後重跑一次 `enable-sshd`。**
+
+---
+
 ## 三種「設了但不會生效」
 
 `doctor` 專門在抓這些。它們的共同點是：fail2ban 服務看起來好好的、`systemctl status`
