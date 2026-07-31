@@ -9,3 +9,9 @@
 *.log
 OPS-ssh/
 n9e-selfheal/
+
+# 壓測產物：報告落在「執行時所在目錄」底下的 logs/，從 repo 目錄跑就會生在這裡。
+# fio 測試檔正常會被 trap 清掉，.fio-test.* 這行是為了 kill -9 之後的殘骸——
+# 那可能是個 4GB 的檔案，絕對不能不小心 commit 進來。
+logs/
+.fio-test.*

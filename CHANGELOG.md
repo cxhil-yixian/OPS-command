@@ -7,6 +7,50 @@
 
 ---
 
+## [1.5.0] - 2026-07-31
+
+納入壓力測試工具。
+
+### 新增
+
+- **`STRESS/`** — 壓力測試腳本（原本是獨立的 repo
+  [cxhil-yixian/stress-test](https://github.com/cxhil-yixian/stress-test)）。
+  本機壓測 CPU / 記憶體 / 磁碟 / SWAP / NTP，網路測試 `baseline` / `traffic` / `mixed`
+  （主機扛下載流量時網站還通不通）。跑測試的同時持續輸出系統監看數據，每次執行產生
+  一份報告。除了用法說明裡的網址改指到本 repo 之外，內容與上游相同，仍可單獨執行。
+- **主選單第 `s` 項：壓測子選單**。持續秒數、輸出目錄、`URL` / `DL_URL` / 下載程序數
+  先問完，接著把「這一項會做什麼」印出來才問要不要開始——SWAP 的 OOM 風險、NTP 會動
+  系統時鐘、磁碟測試檔最大 4GB、`wrk` 打別人的站等同 DoS，都寫在確認之前。
+  - **缺工具在按下去的當下就擋**，並依這台機器的套件管理器組出安裝指令；`i` 一次補齊，
+    RHEL 系會一併處理 `stress-ng` / `wrk` 需要的 `epel-release`。
+  - **壓測相依刻意不併進主選單的 `i`**：缺 `fio` / `stress-ng` 只影響壓力測試，不該讓
+    「安裝缺少的相依套件」順手裝一堆壓測工具。`doctor` 只列出現況供參考。
+  - 底層腳本把報告寫進「當下工作目錄」底下的 `logs/`、不吃路徑參數，所以選單是用
+    子 shell `cd` 過去再呼叫（選單自己的工作目錄不變）。輸出目錄預設為執行 `ops.sh`
+    時所在的目錄，可用 `OPS_STRESS_DIR` 或選單的 `o` 改。
+  - `WRK_THREADS` / `WRK_CONNS` / `HOST_HEADER` / `UA` / `INSECURE` / `DISK_DIR` 選單不問，
+    在執行 `ops.sh` 前設成環境變數即可，會被子腳本原封不動繼承。
+- **`STRESS/README.md`** — 各項目實際做了什麼、數據怎麼判讀（尾端延遲、steal、KVM host
+  cache 汙染）、網路測試的目標怎麼給、報告長什麼樣。
+
+### 變更
+
+- `stress-test.sh` 是 repo 內**唯一需要 bash 的腳本**（用到 `local`、`pipefail`），
+  其餘仍是 POSIX sh。壓測選單進入前會檢查 bash，缺了就擋下並提示安裝——Alpine
+  最小安裝真的沒有。README 的「四支腳本全部是 POSIX sh」一句同步改寫。
+- 遠端模式的自動更新與 `u` 會一併抓 `STRESS/stress-test.sh`；`doctor` 的腳本清單加上它，
+  並多一行壓測工具現況（`stress-ng` / `fio` / `mpstat` / `vmstat` / `chronyc` / `wrk` / `curl`）。
+- `.gitignore` 增加 `logs/` 與 `.fio-test.*`：從 repo 目錄直接跑壓測時報告會生在
+  `./logs/`，而被 `kill -9` 留下的 fio 殘骸可能是個 4GB 的檔案。
+
+### 已知限制
+
+- 壓測腳本只在 CentOS 7.9 / KVM 上驗證過，其他發行版未實測。
+- 本次整合的驗證做到「選單流程 + 參數傳遞 + 缺工具攔截」（含用替身腳本確認 `cd`
+  與環境變數確實有帶進去），**沒有在缺少 `fio` / `stress-ng` 的環境上實際跑完一輪壓測**。
+
+---
+
 ## [1.4.0] - 2026-07-31
 
 納入 Windows 工具並補上還原機制。

@@ -2,7 +2,8 @@
 
 一組伺服器日常運維用的腳本，重點放在**遠端操作時不要把自己鎖在門外**。
 換 SSH 埠有看門狗自動還原，手動封鎖 IP 會先算會不會封到你自己。
-Linux 以外另附一支 Windows 10/11 的管理工具，換 RDP Port 同樣有看門狗。
+另附一組壓力測試（CPU / 記憶體 / 磁碟 / SWAP / NTP / 網路），跑之前先把會發生什麼攤開來問。
+Linux 以外還有一支 Windows 10/11 的管理工具，換 RDP Port 同樣有看門狗。
 
 所有工具都能單獨執行，也可以透過 `ops.sh` 的視覺化選單操作。
 
@@ -48,7 +49,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.2
+ OPS-command 運維工具箱  v1.5
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
@@ -70,6 +71,9 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
  封鎖管理  (FAIL2BAN/fail2ban.sh)
    b) 進入封鎖選單    手動封鎖 / 解封 / 白名單 / 排行，底層走 fail2ban
 
+ 壓力測試  (STRESS/stress-test.sh)
+   s) 進入壓測選單    CPU / 記憶體 / 磁碟 / SWAP / NTP / 網路，會把機器操到滿載
+
  系統
    9) 更換套件來源鏡像 呼叫 linuxmirrors.cn 的外部腳本
    d) 環境自我診斷     檢查相依套件與已知相容性問題
@@ -89,6 +93,11 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 順便升級軟體包。那支第三方腳本本來是跑到一半才逐項詢問，問題散在輸出中間很容易
 看漏就按下去；現在一次問完、把完整命令列攤開來，確認後才跑。
 
+壓測（`s`）同樣是**先問完參數再攤開來確認**：持續秒數、報告輸出目錄、網路測試的
+`URL` / `DL_URL` / 下載程序數，接著印出這一項會做什麼（SWAP 的 OOM 風險、NTP 會動
+系統時鐘、磁碟測試檔最大 4GB）才問你要不要開始。缺工具會在按下去的當下就講明缺哪幾個，
+不會跑到報告開頭才失敗。細節見 [STRESS/README.md](STRESS/README.md)。
+
 ---
 
 ## 目錄結構
@@ -101,6 +110,8 @@ OPS-command/
 │   └── selfheal-ssh.sh SSH 連線取證與即時監看（夜鶯 n9e 自愈腳本）
 ├── FAIL2BAN/           → 詳見 FAIL2BAN/README.md
 │   └── fail2ban.sh     封鎖管理：手動封鎖 / 解封 / 白名單 / 排行 / 環境檢查
+├── STRESS/             → 詳見 STRESS/README.md
+│   └── stress-test.sh  壓力測試：CPU / 記憶體 / 磁碟 / SWAP / NTP + 網路（wrk + curl）
 ├── WINDOWS/            → 詳見 WINDOWS/README.md
 │   ├── Win_Admin_Tool.bat  進入點（雙擊即可）
 │   └── Win_Admin_Tool.ps1  Windows 10/11 管理選單：RDP / 帳號 / 更新 / 防火牆 / 磁碟
@@ -135,6 +146,7 @@ bash <(curl -fsSL .../ops.sh) doctor
 | `OPS_RAW_BASE` | 遠端來源前綴（fork / 內網鏡像 / 其他分支），預設指向本 repo 的 `main` |
 | `OPS_NO_UPDATE` | 設為 1 時略過開場的自動更新（也可用 `--no-update`） |
 | `OPS_SSH_DIR` | `SSH/` 腳本的產出目錄，預設 `/var/log/OPS-ssh`；`ops.sh` 會傳給子腳本 |
+| `OPS_STRESS_DIR` | 壓測報告的輸出目錄（報告落在它底下的 `logs/`），預設是執行 `ops.sh` 時所在的目錄，選單 `s` -> `o` 也能改 |
 | `NO_COLOR` | 關閉顏色 |
 
 `SSH/` 底下兩支腳本產出的東西（換埠狀態、設定檔備份、看門狗、操作日誌、取證報告、
@@ -163,14 +175,18 @@ bash <(curl -fsSL .../ops.sh) doctor
 
 ## 支援矩陣
 
-| 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh | fail2ban.sh |
-|---|---|---|---|---|
-| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ |
-| RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ | ✅ |
-| Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ | ✅ |
-| Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ | ✅ |
-| Ubuntu 18.04 / 20.04 / 22.04 / 24.04 | ✅ | ✅ | ✅ | ✅ |
-| Alpine (OpenRC + busybox) | ✅ | ✅ | ✅ | ✅ |
+| 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh | fail2ban.sh | stress-test.sh |
+|---|---|---|---|---|---|
+| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
+| Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
+| Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
+| Ubuntu 18.04 / 20.04 / 22.04 / 24.04 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
+| Alpine (OpenRC + busybox) | ✅ | ✅ | ✅ | ✅ | ❌ 需 bash |
+
+`stress-test.sh` 是針對 CentOS 7.9 / KVM 寫的，其他 systemd + Linux 發行版應該也能跑但
+未實測；它是 repo 內唯一需要 **bash** 的腳本（用到 `local`、`pipefail`），沒有 bash 的
+機器選單會直接擋下來。
 
 Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的 Linux 工具彼此獨立）。
 
@@ -178,8 +194,9 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 `fail2ban-client status` 的輸出，不依賴 0.10+ 才有的 `get` 子命令；版本能力
 （`banip --time`、`addignoreip`）用「試一次看結果」判斷，不比版本號。
 
-**四支腳本全部是 POSIX sh，Alpine 的 busybox ash 可以直接執行，不需要安裝 bash。**
-唯一需要 bash 的是選單第 9 項呼叫的第三方換源腳本。
+**`ops.sh` 與 SSH / FAIL2BAN 底下的三支腳本全部是 POSIX sh，Alpine 的 busybox ash 可以
+直接執行，不需要安裝 bash。** 需要 bash 的只有兩處：選單第 9 項呼叫的第三方換源腳本，
+以及壓測用的 `STRESS/stress-test.sh`——兩者都會在執行前檢查，缺 bash 就擋下並提示安裝。
 
 外部指令一律「先探測能力再用」，探測不到就降級並在輸出中寫明降級了什麼，不靜默失效：
 
@@ -197,7 +214,8 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 
 ## 相依套件
 
-三支腳本都能在最小化安裝上跑起來，下表是**想要完整功能**時建議補的：
+`SSH/` 與 `FAIL2BAN/` 這三支腳本都能在最小化安裝上跑起來，下表是**想要完整功能**時
+建議補的（壓測的相依另列在本節最後）：
 
 | 系統 | 安裝指令 |
 |---|---|
@@ -219,6 +237,19 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 `fail2ban.sh` 需要 fail2ban 本身（非必要，缺了不影響其他工具）。封鎖選單按 `i`
 會安裝並啟用；RHEL 系的 fail2ban 在 EPEL，會一併處理 `epel-release`。
 
+壓測的相依**刻意不併進上面那份清單**——缺了只影響壓力測試，主選單的 `i` 不該因此
+去裝 `fio` / `stress-ng`。要裝走壓測選單的 `i`（RHEL 系會一併處理 EPEL）：
+
+| 項目 | 需要 | 套件 |
+|---|---|---|
+| cpu | `stress-ng`、`mpstat` | stress-ng（EPEL）、sysstat |
+| ram | `stress-ng` | stress-ng（EPEL） |
+| disk | `fio` | fio |
+| swap | `stress-ng`、`vmstat` | stress-ng（EPEL）、procps-ng |
+| ntp | `chronyc` | chrony |
+| baseline / mixed | `wrk` | wrk（EPEL，或自行編譯 [wg/wrk](https://github.com/wg/wrk)） |
+| traffic / mixed | `curl` | curl |
+
 ---
 
 ## 安全須知
@@ -237,6 +268,12 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 - **`selfheal-ssh.sh` 純取證，不改變系統任何狀態、不封鎖任何 IP**。這是刻意的——
   自動封鎖腳本誤封跳板機或監控伺服器會讓機器直接失聯。要封鎖請用
   [`FAIL2BAN/fail2ban.sh`](FAIL2BAN/README.md)（有自鎖防護）或讓 fail2ban 自己判斷。
+- **壓力測試會真的把機器操到滿載，不要在正式環境跑**。`swap` 有觸發 OOM killer 的風險
+  （sshd 會先被設成 `oom_score_adj=-1000`，其他程序不保證）；`ntp` 會把系統時鐘往前撥
+  2 分鐘，雖然正常結束與 Ctrl-C 都會還原，觀察期間這台機器的時間是錯的。
+- **壓測的 `URL` 只能填你自己有權壓測的網站**（通常是 `127.0.0.1`）。`wrk` 產生的是真實
+  高併發請求，打別人的站等同一次小型 DoS。`DL_URL` 建議用你自己控制的來源，公開測速檔
+  只適合短時間驗證工具能動。這兩個值都沒有預設，缺了就擋下——不會幫你決定要打誰。
 - **手動封鎖前先確認會不會封到自己**。`fail2ban.sh` 會擋下涵蓋你目前 SSH 來源、
   本機位址或 loopback 的目標，CIDR 是真的做網段計算的；要硬幹得加 `--force`。
 - **換過 SSH 埠之後要重跑 `fail2ban.sh enable-sshd`**。jail 的 `port` 沒跟著改的話，

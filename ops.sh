@@ -1,7 +1,7 @@
 #!/bin/sh
 # ops.sh — OPS-command 視覺化操作選單
 #
-# 一支入口把 SSH/ 與 FAIL2BAN/ 底下的工具包起來，用選單操作，不必記參數。
+# 一支入口把 SSH/、FAIL2BAN/ 與 STRESS/ 底下的工具包起來，用選單操作，不必記參數。
 #
 # 支援：CentOS 7.9 / RHEL 7-10 / Rocky / AlmaLinux
 #       Ubuntu 18.04-24.04 / Debian 9-12 / Alpine (OpenRC + busybox)
@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.4
+OPS_VERSION=1.5
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -39,11 +39,18 @@ BASE=$(dirname "$SELF")
 SSH_PORT_REL='SSH/ssh-port.sh'
 SELFHEAL_REL='SSH/selfheal-ssh.sh'
 F2B_REL='FAIL2BAN/fail2ban.sh'
+STRESS_REL='STRESS/stress-test.sh'
 MIRROR_URL_REL='REPO/URL'
 
 # 各工具腳本產出的東西統一收在這裡；export 讓它們沿用同一個值
 OPS_SSH_DIR="${OPS_SSH_DIR:-/var/log/OPS-ssh}"
 export OPS_SSH_DIR
+
+# 壓測報告的輸出目錄。stress-test.sh 是「寫進當下工作目錄底下的 logs/」，
+# 不吃路徑參數，所以選單的做法是 cd 過去再呼叫（見 stress_run）。
+# 預設用啟動 ops.sh 時所在的目錄，跟直接執行那支腳本的行為一致。
+OPS_STRESS_DIR="${OPS_STRESS_DIR:-$PWD}"
+STRESS_DUR=60
 
 PORT_STATE="$OPS_SSH_DIR/ssh-port/state"
 LEGACY_PORT_STATE=/var/lib/ssh-port/state    # 1.1.0 之前的位置，換埠進行中時仍會用
@@ -92,6 +99,7 @@ SSH_DIR="$ASSET_DIR/SSH"
 SSH_PORT_SH="$ASSET_DIR/$SSH_PORT_REL"
 SELFHEAL_SH="$ASSET_DIR/$SELFHEAL_REL"
 F2B_SH="$ASSET_DIR/$F2B_REL"
+STRESS_SH="$ASSET_DIR/$STRESS_REL"
 MIRROR_URL_FILE="$ASSET_DIR/$MIRROR_URL_REL"
 
 FETCH_ERR=''
@@ -161,7 +169,7 @@ assets_sync() {
 
     _mode="${1:-}"
     _rc=0; _n=0; _fail=''
-    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL" "$F2B_REL"; do
+    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL" "$F2B_REL" "$STRESS_REL"; do
         if [ "$_mode" = force ] || [ "$_mode" = update ] || [ ! -f "$ASSET_DIR/$_rel" ]; then
             [ "$_mode" = update ] || printf ' 取得 %s … ' "$_rel"
             if fetch_script "$_rel"; then
@@ -515,6 +523,9 @@ menu() {
     sect "封鎖管理  (FAIL2BAN/fail2ban.sh)"
     row "b) 進入封鎖選單    ${CD}手動封鎖 / 解封 / 白名單 / 排行，底層走 fail2ban${C0}"
     printf '\n'
+    sect "壓力測試  (STRESS/stress-test.sh)"
+    row "s) 進入壓測選單    ${CD}CPU / 記憶體 / 磁碟 / SWAP / NTP / 網路，會把機器操到滿載${C0}"
+    printf '\n'
     sect "系統"
     row "9) 更換套件來源鏡像 ${CD}呼叫 linuxmirrors.cn 的外部腳本${C0}"
     row "d) 環境自我診斷     ${CD}檢查相依套件與已知相容性問題${C0}"
@@ -727,6 +738,290 @@ act_f2b_menu() {
     done
 }
 
+# =========================================================
+# 壓力測試（stress-test.sh）
+#   跟其他工具的差別有三個，都直接影響這裡怎麼包：
+#   1. 它是 bash 腳本（local / pipefail / {1..78}），不是 POSIX sh，要用 bash 呼叫。
+#   2. 報告一律寫進「當下工作目錄」底下的 logs/，不吃路徑參數 —— 所以是 cd 過去
+#      再呼叫，而不是傳參數進去。
+#   3. 參數全部走環境變數（DUR / URL / DL_URL …），選單先問完再組起來執行。
+#   這些測試會真的把機器操到滿載，每一項執行前都先把「會發生什麼」攤開來再問。
+# =========================================================
+stress_guard() {
+    require_script "$STRESS_SH" "$STRESS_REL" || return 1
+    # 這支是唯一需要 bash 的自家腳本，Alpine 最小安裝上真的可能沒有
+    if ! has bash; then
+        nomsg "stress-test.sh 需要 bash（用到 local / pipefail 等 bash 語法）"
+        row "安裝：$PKG_INSTALL bash"
+        return 1
+    fi
+    return 0
+}
+
+# 各項目需要的工具。缺工具時 stress-test.sh 自己也會擋，但那是報告開頭才擋，
+# 這裡先講可以省掉一次「跑起來才發現沒裝」。
+stress_tools_of() {
+    case "$1" in
+        cpu)      echo "stress-ng mpstat" ;;
+        ram)      echo "stress-ng" ;;
+        disk)     echo "fio" ;;
+        swap)     echo "stress-ng vmstat" ;;
+        ntp)      echo "chronyc" ;;
+        all)      echo "stress-ng mpstat fio vmstat" ;;
+        baseline) echo "wrk" ;;
+        traffic)  echo "curl" ;;
+        mixed)    echo "wrk curl" ;;
+    esac
+}
+
+# 工具 -> 套件名。發行版之間差在 procps 系列與 wrk 的來源。
+stress_pkg_for() {
+    case "$1" in
+        stress-ng) echo stress-ng ;;
+        mpstat)    echo sysstat ;;
+        fio)       echo fio ;;
+        chronyc)   echo chrony ;;
+        curl)      echo curl ;;
+        wrk)       echo wrk ;;
+        vmstat)    case "$PKG" in apk|apt) echo procps ;; *) echo procps-ng ;; esac ;;
+        *)         echo "$1" ;;
+    esac
+}
+
+# $1 = 項目，缺的工具印到 stdout（空字串代表齊了）
+stress_missing() {
+    _miss=''
+    for _t in $(stress_tools_of "$1"); do
+        has "$_t" || _miss="$_miss $_t"
+    done
+    printf '%s' "${_miss# }"
+}
+
+# 選單標頭那行「工具 …」的內容
+stress_tool_status() {
+    _out=''
+    for _t in stress-ng fio mpstat vmstat chronyc wrk curl; do
+        if has "$_t"; then _out="$_out $_t $CG$MK_OK$C0 "
+        else               _out="$_out $CD$_t$C0 $CR$MK_NO$C0 "
+        fi
+    done
+    printf '%s' "${_out# }"
+}
+
+# 缺工具就印出缺什麼與怎麼補，回傳 1（呼叫端據此放棄執行）
+stress_check_deps() {
+    _miss=$(stress_missing "$1")
+    [ -z "$_miss" ] && return 0
+    nomsg "$1 需要的工具還沒裝：$_miss"
+    row "按 i 安裝，或自行執行：$PKG_INSTALL $(for _t in $_miss; do stress_pkg_for "$_t"; done | sort -u | tr '\n' ' ')"
+    case " $_miss " in
+        *' wrk '*) row "wrk 不在 RHEL 系的 base repo，需要 EPEL 或自行編譯 https://github.com/wg/wrk" ;;
+    esac
+    return 1
+}
+
+stress_install() {
+    printf '\n'
+    sect "安裝壓測相依套件"
+
+    # 把七項工具缺的全部湊齊一次裝完，而不是每個項目跑到才裝一次
+    _miss=''
+    for _t in stress-ng fio mpstat vmstat chronyc wrk curl; do
+        has "$_t" || _miss="$_miss $_t"
+    done
+    _miss="${_miss# }"
+    if [ -z "$_miss" ]; then
+        okmsg "壓測工具都在，不用裝"
+        return 0
+    fi
+    if [ "$PKG" = none ]; then
+        nomsg "找不到套件管理器，請自行安裝：$_miss"
+        return 0
+    fi
+
+    _pkgs=$(for _t in $_miss; do stress_pkg_for "$_t"; done | sort -u | tr '\n' ' ' | sed 's/ *$//')
+    # RHEL 系的 stress-ng 與 wrk 都在 EPEL，沒先開就會是「找不到套件」
+    _epel=0
+    if [ "$OS_FAMILY" = rhel ]; then
+        case " $_miss " in
+            *' stress-ng '*|*' wrk '*) _epel=1 ;;
+        esac
+    fi
+
+    row "缺少：${CB}${_miss}${C0}"
+    [ "$_epel" = 1 ] && row "將先安裝 ${CB}epel-release${C0}（stress-ng / wrk 在 EPEL）"
+    row "將要執行：${CB}${PKG_INSTALL} ${_pkgs}${C0}"
+    case " $_miss " in
+        *' wrk '*) dim "   wrk 在部分發行版沒有現成套件，裝不起來就自行編譯 https://github.com/wg/wrk" ;;
+    esac
+    printf '\n'
+    need_root || return 0
+    confirm "要執行嗎？" || return 0
+    printf '\n'
+    [ "$PKG" = apt ] && apt-get update
+    [ "$_epel" = 1 ] && $PKG_INSTALL epel-release
+    # shellcheck disable=SC2086
+    $PKG_INSTALL $_pkgs
+}
+
+stress_set_dir() {
+    printf '\n'
+    row "報告與 fio 測試檔會寫進 ${CB}<目錄>/logs/${C0}"
+    dim "   磁碟測試的測試檔最大 4GB，跑完（含 Ctrl-C）會自動刪除"
+    ask_default "輸出目錄：" "$OPS_STRESS_DIR"
+    [ -z "$REPLY_VAL" ] && return 0
+    if ! mkdir -p "$REPLY_VAL" 2>/dev/null; then
+        nomsg "建不出 $REPLY_VAL"
+        return 0
+    fi
+    if [ ! -w "$REPLY_VAL" ]; then
+        nomsg "$REPLY_VAL 不可寫"
+        return 0
+    fi
+    OPS_STRESS_DIR=$(cd "$REPLY_VAL" 2>/dev/null && pwd) || OPS_STRESS_DIR="$REPLY_VAL"
+    okmsg "輸出目錄改為 $OPS_STRESS_DIR"
+}
+
+stress_set_dur() {
+    printf '\n'
+    dim " 每個項目的持續秒數。disk 會把這個值平分給隨機讀 / 隨機寫 / 循序讀 / 循序寫。"
+    ask_default "每項持續幾秒？" "$STRESS_DUR"
+    case "$REPLY_VAL" in
+        ''|*[!0-9]*) nomsg "要是正整數：$REPLY_VAL"; return 0 ;;
+    esac
+    [ "$REPLY_VAL" -ge 1 ] || { nomsg "要 >= 1"; return 0; }
+    STRESS_DUR="$REPLY_VAL"
+    okmsg "每項持續 $STRESS_DUR 秒"
+}
+
+# 執行一個項目。$1 = cpu/ram/disk/swap/ntp/all/baseline/traffic/mixed
+stress_run() {
+    _cmd=$1
+    stress_guard || return 0
+    need_root || return 0
+    stress_check_deps "$_cmd" || return 0
+
+    _url=''; _dl=''; _workers=4
+
+    printf '\n'
+    sect "壓力測試：$_cmd"
+    case "$_cmd" in
+        cpu)  row "把所有核心拉滿，每 3 秒記一次 loadavg 與 mpstat（含 steal）" ;;
+        ram)  row "吃掉總記憶體的 80%，觀察 MemAvailable 與 SwapFree" ;;
+        disk) row "隨機讀 / 隨機寫 / 循序讀 / 循序寫各跑一輪，測試檔最大 4GB，跑完自動刪除"
+              row "輸出目錄可用空間：$(df -h "$OPS_STRESS_DIR" 2>/dev/null | awk 'NR==2{print $4}')" ;;
+        swap) wmsg "吃到 RAM 的 95% + swap 的 50%，逼出換頁 —— 有觸發 OOM killer 的風險"
+              row "開始前會把所有 sshd 的 oom_score_adj 設成 -1000（結束或中斷都會還原），"
+              row "但 sshd 以外的程序仍可能被殺。建議另開一個視窗跑 dmesg -w 看著" ;;
+        ntp)  wmsg "會停掉 chronyd 並把系統時鐘往前撥 2 分鐘，觀察 $STRESS_DUR 秒後還原"
+              row "還原是先 date -s \"-2 minutes\" 確定性扣回，再讓 chronyd makestep 修殘差；"
+              row "正常結束與 Ctrl-C 都會還原，但觀察期間這台機器的時間是錯的" ;;
+        all)  row "依序跑 cpu -> ram -> disk -> swap，寫在同一份報告裡（不含 ntp）"
+              row "預估耗時：約 $(( STRESS_DUR * 4 / 60 + 1 )) 分鐘" ;;
+    esac
+
+    # 網路測試的目標是「你授權要打的東西」，沒有預設值，一定要問
+    case "$_cmd" in
+        baseline|mixed)
+            row "wrk 會對目標產生真實高併發請求（預設 2 執行緒 / 50 連線）"
+            nomsg "只能填你自己有權壓測的網站，打別人的站等同一次小型 DoS"
+            ask_default "壓測目標 URL（例 http://127.0.0.1/）：" "${URL:-}"
+            _url="$REPLY_VAL"
+            case "$_url" in
+                http://*|https://*) : ;;
+                '') printf ' 已取消\n'; return 0 ;;
+                *)  nomsg "URL 要以 http:// 或 https:// 開頭"; return 0 ;;
+            esac ;;
+    esac
+    case "$_cmd" in
+        traffic|mixed)
+            row "curl 會反覆下載到測試結束，內容丟 /dev/null，不落磁碟"
+            row "建議用你自己控制的來源；公開測速檔只適合短時間驗證，別長時間連續灌"
+            ask_default "下載來源 DL_URL（逗號分隔可多個）：" "${DL_URL:-}"
+            _dl="$REPLY_VAL"
+            case "$_dl" in
+                http://*|https://*) : ;;
+                '') printf ' 已取消\n'; return 0 ;;
+                *)  nomsg "DL_URL 要以 http:// 或 https:// 開頭"; return 0 ;;
+            esac
+            ask_default "同時幾個下載程序？" "${DL_WORKERS:-4}"
+            _workers="$REPLY_VAL"
+            case "$_workers" in
+                ''|*[!0-9]*) nomsg "下載程序數要是正整數：$_workers"; return 0 ;;
+            esac
+            [ "$_workers" -ge 1 ] || { nomsg "下載程序數要 >= 1"; return 0; } ;;
+    esac
+
+    printf '\n'
+    row "每項持續 ${CB}${STRESS_DUR}${C0} 秒"
+    row "報告寫入 ${CB}${OPS_STRESS_DIR}/logs/${_cmd}-<時間戳>.log${C0}"
+    [ -n "$_url" ] && row "壓測目標 ${CB}${_url}${C0}"
+    [ -n "$_dl" ]  && row "下載來源 ${CB}${_dl}${C0}（$_workers 個程序）"
+    dim "   Ctrl-C 中斷仍會輸出摘要並清乾淨，前面跑完的項目不會白費"
+    printf '\n'
+    wmsg "這會真的把機器操到滿載，不要在正式環境跑"
+    confirm "要開始嗎？" || return 0
+    printf '\n'
+
+    # cd 過去再跑：那支腳本把報告與 fio 測試檔寫在「當下工作目錄」底下的 logs/。
+    # 用子 shell 包起來，選單本身的工作目錄不會被換掉。
+    ( cd "$OPS_STRESS_DIR" 2>/dev/null || { nomsg "進不去 $OPS_STRESS_DIR"; exit 1; }
+      DUR="$STRESS_DUR" URL="$_url" DL_URL="$_dl" DL_WORKERS="$_workers" \
+          bash "$STRESS_SH" "$_cmd" )
+}
+
+act_stress_menu() {
+    stress_guard || return 0
+    while :; do
+        clear 2>/dev/null || printf '\n\n'
+        hr
+        printf '%s 壓力測試%s  %sSTRESS/stress-test.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
+        hr
+        printf ' 輸出   %s%s/logs/%s\n' "$CB" "$OPS_STRESS_DIR" "$C0"
+        printf ' 參數   每項持續 %s%s%s 秒\n' "$CB" "$STRESS_DUR" "$C0"
+        printf ' 工具   %s\n' "$(stress_tool_status)"
+        hr
+        sect "本機壓測"
+        row "1) CPU             ${CD}所有核心拉滿，看 bogo ops 與 steal${C0}"
+        row "2) 記憶體          ${CD}吃掉總記憶體 80%${C0}"
+        row "3) 磁碟讀寫        ${CD}隨機/循序 各讀寫一輪，重點在 p99 尾端延遲${C0}"
+        row "4) SWAP            ${CD}逼出換頁，有 OOM 風險，會先保護 sshd${C0}"
+        row "5) NTP 時間偏移    ${CD}時鐘往前撥 2 分鐘再還原，要單獨跑${C0}"
+        row "6) 全部            ${CD}cpu -> ram -> disk -> swap，同一份報告（不含 ntp）${C0}"
+        printf '\n'
+        sect "網路測試  (主機扛下載流量時網站還通不通)"
+        row "7) baseline        ${CD}只壓網站建立基準，需要 URL${C0}"
+        row "8) traffic         ${CD}只灌下載流量，需要 DL_URL${C0}"
+        row "9) mixed           ${CD}下載流量 + 網站壓測同時，兩者都要${C0}"
+        printf '\n'
+        sect "設定"
+        row "t) 每項持續秒數    ${CD}目前 $STRESS_DUR${C0}"
+        row "o) 輸出目錄        ${CD}目前 $OPS_STRESS_DIR${C0}"
+        row "i) 安裝壓測相依套件"
+        row "b) 返回主選單"
+        printf '\n 請選擇：'
+        read -r _c 2>/dev/null || return 0
+        printf '\n'
+        case "$_c" in
+            1) stress_run cpu ;;
+            2) stress_run ram ;;
+            3) stress_run disk ;;
+            4) stress_run swap ;;
+            5) stress_run ntp ;;
+            6) stress_run all ;;
+            7) stress_run baseline ;;
+            8) stress_run traffic ;;
+            9) stress_run mixed ;;
+            t|T) stress_set_dur ;;
+            o|O) stress_set_dir ;;
+            i|I) stress_install ;;
+            b|B|q|Q|'') return 0 ;;
+            *) nomsg "無此選項：$_c" ;;
+        esac
+        pause
+    done
+}
+
 # 問一題：$1=提示 $2=預設值，回答放進 REPLY_VAL
 ask_default() {
     printf ' %s%s%s ' "$CC" "$1" "$C0"
@@ -901,7 +1196,7 @@ act_doctor() {
     check_deps
     hr
     sect "腳本"
-    for _s in "$SSH_PORT_SH" "$SELFHEAL_SH" "$F2B_SH"; do
+    for _s in "$SSH_PORT_SH" "$SELFHEAL_SH" "$F2B_SH" "$STRESS_SH"; do
         if [ -f "$_s" ]; then
             [ -x "$_s" ] && okmsg "$_s" || wmsg "$_s（無執行權限，本選單以 sh/bash 呼叫故仍可用）"
         elif [ "$RUN_MODE" = remote ]; then
@@ -910,6 +1205,12 @@ act_doctor() {
             nomsg "$_s 不存在"
         fi
     done
+    hr
+    # 壓測工具刻意不併進上面的相依檢查：缺了只影響壓力測試，主選單的 i
+    # 不該因此去裝 fio / stress-ng。要裝走壓測選單的 i。
+    sect "壓測工具（缺了只影響壓力測試，選單 s -> i 安裝）"
+    row "$(stress_tool_status)"
+    row "壓測報告輸出：$OPS_STRESS_DIR/logs/"
     hr
 
     if [ "$DEP_HARD" = 1 ]; then
@@ -1076,6 +1377,8 @@ ops.sh — OPS-command 視覺化操作選單  v$OPS_VERSION
                    目前：$OPS_RAW_BASE
     OPS_SSH_DIR    SSH/ 腳本的產出目錄（狀態、備份、看門狗、日誌、取證報告）
                    目前：$OPS_SSH_DIR
+    OPS_STRESS_DIR 壓測報告的輸出目錄（報告落在它底下的 logs/）
+                   預設是執行 ops.sh 時所在的目錄，目前：$OPS_STRESS_DIR
     NO_COLOR       關閉顏色
 
 目前模式：$RUN_MODE（工具路徑 $ASSET_DIR）
@@ -1124,6 +1427,7 @@ if [ ! -t 0 ]; then
     printf '%s\n' "非互動場合請直接呼叫底層腳本，例如："
     printf '%s\n' "    sh $SSH_PORT_SH status"
     printf '%s\n' "    sh $SELFHEAL_SH oneshot"
+    printf '%s\n' "    DUR=60 bash $STRESS_SH cpu"
     printf '%s\n' "或執行 ops.sh doctor 做環境檢查。"
     exit 1
 fi
@@ -1148,6 +1452,7 @@ while :; do
         8) act_debug ;;
         9) act_mirror ;;
         b|B) act_f2b_menu ;;
+        s|S) act_stress_menu ;;
         d|D) act_doctor ;;
         i|I) act_install_deps ;;
         u|U) act_refresh ;;
