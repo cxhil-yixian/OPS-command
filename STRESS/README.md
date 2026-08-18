@@ -31,7 +31,7 @@
 
 ```
  輸出   /root/logs/
- 參數   每項持續 60 秒
+ 參數   每項持續 60 秒，記憶體配置 80%
  工具   stress-ng ✓  fio ✓  mpstat ✓  vmstat ✓  chronyc ✓  wrk ✗  curl ✓
 ────────────────────────────────────────────────────────────────────
  本機壓測
@@ -49,6 +49,7 @@
 
  設定
    t) 每項持續秒數    目前 60
+   p) 記憶體配置比例  目前 80%，>90 會狂換頁
    o) 輸出目錄        目前 /root
    i) 安裝壓測相依套件
    b) 返回主選單
@@ -178,10 +179,12 @@ cd /var/tmp/bench
 |---|---|---|
 | `DUR` | `60` | 每個項目持續秒數。disk 會把這個值平分給四種讀寫模式 |
 | `DISK_DIR` | `./logs` | fio 測試檔的位置，測完自動刪除 |
+| `RAM_PCT` | `80` | ram 要吃掉「總記憶體」的百分之幾（1-100），選單的 `p` 也能改 |
 
 ```bash
 DUR=300 ./stress-test.sh all
 DISK_DIR=/data ./stress-test.sh disk
+RAM_PCT=95 ./stress-test.sh ram      # 壓更兇，先看下面「能不能撐到 100%」
 ```
 
 `DISK_DIR` 是唯一會跑出 `logs/` 之外的東西 —— 要測的是特定那顆磁碟時才需要指定，否則 fio 只會量到 `logs/` 所在的檔案系統。
@@ -197,6 +200,23 @@ DISK_DIR=/data ./stress-test.sh disk
 ### ram
 
 吃掉總記憶體的 80%，分 2 個 worker（`--vm-keep` 讓記憶體維持佔用而非反覆配置釋放）。每 3 秒輸出 MemTotal / MemAvailable / SwapFree。
+
+注意這是**總記憶體**的 80%，不是可用記憶體的 80%。機器上已經有服務佔著記憶體時，配置量會超過剩下的量，換頁之後 OOM killer 就可能出手 —— 所以這一項跟 `swap` 一樣，開始前會把所有 sshd 的 `oom_score_adj` 設成 -1000（結束或中斷都還原），配置量超過目前可用時會先警告，跑完也會從 `dmesg` 撈 OOM 記錄。
+
+比例可以用 `RAM_PCT` 調（1-100，選單的 `p`）：
+
+```bash
+RAM_PCT=95 ./stress-test.sh ram
+```
+
+**能不能撐到 100%？** 可以填，但那不是一個停得住的狀態，也很少是你真正想量的東西：
+
+1. user space 本來就拿不到 100% —— kernel 自己要用（page table、slab、網路緩衝）；
+2. 往上逼的過程中 page cache 會先被回收光，之後所有檔案存取都要重讀磁碟；
+3. **有 swap 的機器多半停在「狂換頁」而不是乾脆 OOM**：機器不會死，但會慢到近乎沒有回應，load 飆高、SSH 打字都會卡。`oom_score_adj` 那道保險對這種卡死完全沒有用；
+4. swap 也吃完才輪到 OOM killer，而第一個被挑中的通常是 stress-ng worker 自己（RSS 最大），測試會自己斷掉；stress-ng 預設還會把被殺的 stressor 重生，變成「被殺 → 重開 → 再被殺」的迴圈，數字沒有意義。
+
+所以預設 80 是「壓得有感、但還留得住收尾與報告」的線。真正想看的如果是換頁與 OOM 行為，`swap` 那一項就是為此設計的（RAM 的 95% + swap 的 50%，附 `si`/`so` 監看與 dmesg 撈取），比把 ram 拉到 100% 有用得多。超過 90 時腳本與選單都會先把上面這些後果列出來再問。
 
 ### disk
 
@@ -219,7 +239,7 @@ VM 內的讀取數據普遍不可信（guest 的 `direct=1` 繞不過 hypervisor
 
 沒有設定 swap 的機器會直接跳過此項目。
 
-> OOM killer 仍有可能出手，建議另開一個 terminal 跑 `dmesg -w` 觀察。
+> OOM killer 仍有可能出手，建議另開一個 terminal 跑 `dmesg -w` 觀察。`ram` 也有同一組保險。
 
 ### ntp
 
@@ -373,7 +393,7 @@ URL=http://127.0.0.1/ DL_URL=https://ash-speed.hetzner.com/1GB.bin DUR=60 ./stre
 ==============================================================================
 
   CPU    933.17 bogo ops/s (4 核)，steal 峰值 0.00%
-  RAM    85689.24 bogo ops/s，配置 3030MB，最低可用 178MB
+  RAM    85689.24 bogo ops/s，配置 3030MB (總記憶體 80%)，最低可用 178MB
   DISK   隨機讀  99.5k    IOPS  389MiB/s     p99 0.6ms
          隨機寫  69.2k    IOPS  270MiB/s     p99 0.8ms
          循序讀  9        IOPS  9411KiB/s    p99 3473.0ms   !! 無效 (host cache)
@@ -391,7 +411,7 @@ URL=http://127.0.0.1/ DL_URL=https://ash-speed.hetzner.com/1GB.bin DUR=60 ./stre
 
 摘要的百分位數一律換算成 ms。fio 會依數值大小自己換單位，原始輸出裡的 `848`（微秒）和 `3473`（毫秒）長得一模一樣卻差 1000 倍，所以報告本文也會一併保留 `clat percentiles (usec):` 這種標明單位的行。
 
-Ctrl-C 中斷時仍會輸出摘要，標記為「已中斷」，前面跑完的項目不會白費。
+Ctrl-C 中斷時仍會輸出摘要，標記為「已中斷」，前面跑完的項目不會白費。中斷是**立即生效**的：不只終端機的 Ctrl-C，`kill` / `timeout` / systemd 送來的訊號也一樣，不會等當前項目跑完才停（1.5.1 之前會被延後最多 `DUR` 秒）。停下時背景的下載程序、監看、fio 測試檔、時鐘與 `oom_score_adj` 都會一起收乾淨。
 
 從這個 repo 的目錄直接跑的話，`logs/` 與 fio 殘骸都已列在 `.gitignore` 裡，不會混進版控。
 
@@ -399,6 +419,6 @@ Ctrl-C 中斷時仍會輸出摘要，標記為「已中斷」，前面跑完的�
 
 - 這會真的把機器操到滿載，**不要在正式環境跑**
 - `ntp` 會修改系統時鐘，雖然有還原保險，但觀察期間該機器的時間是錯的
-- `swap` 有觸發 OOM killer 的風險，除了 sshd 之外的程序都可能被殺
+- `ram` 與 `swap` 都有觸發 OOM killer 的風險，除了 sshd 之外的程序都可能被殺
 - `DISK_DIR` 與 `/tmp` 在同一個檔案系統時，換路徑量出來的數據不會有差別
 - 從唯讀或空間吃緊的目錄執行時，disk 測試會因為算不出足夠的測試檔大小而放棄（低於 512MB 即中止）

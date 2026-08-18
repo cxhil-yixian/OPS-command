@@ -34,6 +34,8 @@ usage() {
 通用參數:
   DUR=60            每項持續秒數
   DISK_DIR=./logs   fio 測試檔位置 (測完自動刪除)
+  RAM_PCT=80        ram 要吃掉「總記憶體」的百分之幾 (1-100)
+                    >90 會先回收 page cache、接著狂換頁，機器可能卡到連不進去
 
 網路測試參數 (URL/DL_URL 沒有預設，必須自己給授權的目標):
   URL=http://127.0.0.1/            wrk 壓測目標，只能是你自己的網站
@@ -60,7 +62,9 @@ usage() {
 
 每次執行產生一份報告 logs/<項目>-<時間戳>.log，內容依序寫在同一個檔案裡。
 EOF
-    echo "這次的輸出會寫到: ${LOGDIR:-<尚未建立>}"
+    # 參數是在建立 logs/ 之前驗的，所以打錯字時 LOGDIR 還沒設 -- 這裡自己算，
+    # 印出「本來會寫到哪」但不真的建目錄。
+    echo "這次的輸出會寫到: ${LOGDIR:-$PWD/logs}"
 }
 
 # 先驗身分再建目錄，不然非 root 執行會留下一個空的 logs/ 才跟你說不能跑
@@ -70,6 +74,13 @@ DUR="${DUR:-60}"
 # DUR 會進到算術展開跟 fio --runtime，非數字的話錯誤訊息會很難懂，先擋掉
 case "$DUR" in ''|*[!0-9]*) echo "DUR 要是正整數，收到: $DUR"; exit 2 ;; esac
 [ "$DUR" -ge 1 ] || { echo "DUR 要 >= 1"; exit 2; }
+
+# ram 要吃掉總記憶體的百分之幾。預設 80 是「壓得有感、但還留得住收尾與報告」的線。
+# 上限就是 100：user space 本來就拿不到 100% (kernel 自己要用 page table / slab /
+# 網路緩衝)，寫更大的數字只是讓它更早開始換頁，沒有額外意義。
+RAM_PCT="${RAM_PCT:-80}"
+case "$RAM_PCT" in ''|*[!0-9]*) echo "RAM_PCT 要是 1-100 的整數，收到: $RAM_PCT"; exit 2 ;; esac
+{ [ "$RAM_PCT" -ge 1 ] && [ "$RAM_PCT" -le 100 ]; } || { echo "RAM_PCT 要在 1-100 之間，收到: $RAM_PCT"; exit 2; }
 
 # ---------- 網路測試參數 (baseline / traffic / mixed 用) ----------
 # URL / DL_URL 沒有預設值，因為它們是「你授權的目標」，寫死等於幫使用者決定
@@ -90,6 +101,24 @@ done
 # INSECURE 統一收斂成 curl 要不要加 -k。只有明確 =1 才關驗證，
 # 寫成 ${INSECURE:+-k} 會連 INSECURE=0 都觸發 (非空即展開)，這是常見的坑。
 CURL_K=""; [ "$INSECURE" = "1" ] && CURL_K="-k"
+
+# ---------- 參數解析 ----------
+# 一定要在建立 logs/ 之前驗完：打錯字或缺 URL 就結束的話，不該在使用者的目錄
+# 留下一個空的 logs/。SUITE 也在這裡決定 (local / net 兩套摘要)。
+case "${1:-}" in
+    cpu|ram|disk|swap|ntp|all) CMD="$1"; SUITE="local" ;;
+    baseline|traffic|mixed)    CMD="$1"; SUITE="net" ;;
+    *) usage; exit 2 ;;
+esac
+
+# 網路模式的目標是必填 -- 缺了就明講缺哪個環境變數，不要跑到報告開頭才失敗
+if [ "$SUITE" = "net" ]; then
+    case "$CMD" in
+        baseline) [ -n "$URL" ] || { echo "baseline 需要 URL，例: URL=https://你的網站/ ... baseline"; exit 2; } ;;
+        traffic)  [ -n "$DL_URL" ] || { echo "traffic 需要 DL_URL，例: DL_URL=https://授權來源/big.bin ... traffic"; exit 2; } ;;
+        mixed)    { [ -n "$URL" ] && [ -n "$DL_URL" ]; } || { echo "mixed 需要 URL 與 DL_URL 兩者"; exit 2; } ;;
+    esac
+fi
 
 # 相對於 CWD 建立，再轉成絕對路徑存起來。
 # 轉絕對路徑有兩個好處：報告裡印出的路徑不會有「這是相對誰」的疑問，
@@ -118,11 +147,15 @@ OOM_SAVED=""
 # 中斷時要收乾淨。
 DL_PIDS=""
 NET_TMP=""
+# 目前正在跑的前景工作 (stress-ng / fio / wrk / sleep)。它們一律丟背景再 wait，
+# 中斷時由 work_stop 連同子程序一起收掉 -- 原因見 isleep 上面那段。
+WORK_PID=""
+# cap_run 用來接輸出的暫存檔與內容
+CAP_FILE=""
+CAP_OUT=""
 
 # ---------- 摘要用的全域 ----------
-# SUITE 決定摘要長哪一套：local (cpu/ram/disk/swap/ntp) 或 net (baseline/traffic/mixed)。
-# 兩套的判讀完全不同，硬塞在一起只會互相干擾。
-SUITE="local"
+# SUITE (local / net) 在上面的參數解析就決定了，兩套摘要的判讀完全不同。
 
 # 本機壓測。每個 t_* 跑完自己填。沒跑到的維持「未執行」，摘要才會永遠列滿五項，
 # 讓人一眼看出「這項沒測」而不是「這項沒問題」-- 兩者差很多。
@@ -141,9 +174,10 @@ WARNINGS=""
 
 # 腳本被 Ctrl-C / kill 時：收掉背景監看 + curl workers + 還原 oom_score_adj + 清測試檔，
 # 然後把已經跑完的部分做成摘要 -- 中斷不該讓前面的結果白跑
-trap 'mon_stop 2>/dev/null; [ -n "$DL_PIDS" ] && kill $DL_PIDS 2>/dev/null
+trap 'work_stop 2>/dev/null; mon_stop 2>/dev/null; dl_kill 2>/dev/null
       oom_restore 2>/dev/null
-      [ -n "$FIO_FILE" ] && rm -f "$FIO_FILE"; [ -n "$NET_TMP" ] && rm -rf "$NET_TMP"
+      [ -n "$FIO_FILE" ] && rm -f "$FIO_FILE"; [ -n "$CAP_FILE" ] && rm -f "$CAP_FILE"
+      [ -n "$NET_TMP" ] && rm -rf "$NET_TMP"
       echo; echo "已中斷，已清理"; [ -n "$LOG" ] && report_summary "已中斷"; exit 130' INT TERM
 
 # 掃掉上次沒清乾淨的殘骸 (例如被 kill -9)
@@ -344,6 +378,72 @@ mon_stop() {
     MON_PID=""
 }
 
+# ---------- 前景工作 (會吃掉整個 DUR 的那些) ----------
+# 為什麼不直接寫 sleep / stress-ng / fio，而要丟背景再 wait：
+# bash 在等前景子程序時收到訊號，會壓著不處理，等子程序結束才跑 trap。
+# 終端機 Ctrl-C 沒事 (整個 process group 一起收到)，但訊號只送給腳本本身時
+# -- timeout、kill、systemd 停服務、選單以外的任何非互動呼叫 --
+# 中斷會被延後最多 DUR 秒。實測 kill -TERM 之後還要再等 13 秒 trap 才動，
+# 這段期間機器繼續滿載、下載繼續灌、ntp 的時鐘也繼續錯著。
+# 丟背景之後主流程停在 wait，wait 會被訊號立刻打斷，trap 馬上就跑得到。
+#
+# 代價：背景工作在非互動 shell 底下 SIGINT 是 ignored，而且會被子程序繼承，
+# 所以 Ctrl-C 不再「順便」殺掉 stress-ng/fio/curl -- 一律由 work_stop 明確
+# _killtree 掉。這樣兩種訊號來源的行為反而一致了。
+work_stop() {
+    [ -n "$WORK_PID" ] || return 0
+    _killtree "$WORK_PID"
+    # 跟 dl_kill 一樣要自己收屍，否則 bash 會補一行
+    #   stress-test.sh: line 2: 3100 Killed  "$@" > "$CAP_FILE" 2>&1
+    # 到 stderr。輸出丟掉，這裡不在乎它怎麼死的。
+    wait "$WORK_PID" 2>/dev/null
+    WORK_PID=""
+}
+
+# 可被中斷的 sleep
+isleep() {
+    sleep "$1" &
+    WORK_PID=$!
+    wait "$WORK_PID" 2>/dev/null
+    WORK_PID=""
+}
+
+# run_fg <指令...> -- 輸出即時進報告 (原本的 `指令 | tee -a "$LOG"`)。
+# 整條 pipeline 包在子殼裡再丟背景，$! 才會是子殼本身而不是 tee；
+# _killtree 會把子殼連同 tee 與真正的工具一起收掉。
+run_fg() {
+    ( "$@" 2>&1 | tee -a "$LOG" ) &
+    WORK_PID=$!
+    wait "$WORK_PID" 2>/dev/null
+    WORK_PID=""
+}
+
+# cap_run <指令...> -- 輸出要整份留著解析 (fio / wrk)，存進 $CAP_OUT。
+# 這裡不能用 out=$(...)：命令替換是前景子程序，一樣會把中斷壓到它結束為止。
+cap_run() {
+    CAP_OUT=""
+    CAP_FILE=$(mktemp "${TMPDIR:-/tmp}/st-cap.XXXXXX") || { log "無法建立暫存檔"; return 1; }
+    "$@" >"$CAP_FILE" 2>&1 &
+    WORK_PID=$!
+    wait "$WORK_PID" 2>/dev/null
+    WORK_PID=""
+    CAP_OUT=$(cat "$CAP_FILE" 2>/dev/null)
+    rm -f "$CAP_FILE"; CAP_FILE=""
+}
+
+# 收掉下載程序。一定要用 _killtree：DL_PIDS 是 _dl_worker 的 bash 外殼，
+# 只 kill 外殼的話底下那個 curl 會被 init 收養繼續下載 (實測還會再灌到
+# --max-time 30 秒為止)，畫面卻已經印了「已清理」。
+dl_kill() {
+    local p
+    [ -n "$DL_PIDS" ] || return 0
+    # 殺完要自己 wait 一次 (輸出丟掉)：不收屍的話 bash 會在下一個指令前補一行
+    #   stress-test.sh: line 2: 30887 Killed  _dl_worker ...
+    # 到 stderr，中斷時的畫面會很難看。
+    for p in $DL_PIDS; do _killtree "$p"; wait "$p" 2>/dev/null; done
+    DL_PIDS=""
+}
+
 # 取得目前報告的行數，之後用 tail -n +N 就能只撈這一段的監看數據。
 # 報告現在是單一檔案，不記位置的話會把前面項目的數據也算進來。
 mark() { wc -l < "$LOG"; }
@@ -364,6 +464,38 @@ oom_restore() {
     # 印出來才有辦法確認保險真的有生效，不然只能自己去 cat /proc/<pid>/oom_score_adj
     [ "$n" -gt 0 ] && log "已還原 $n 個 sshd 的 oom_score_adj"
     return 0
+}
+
+# 把 sshd 拉出 OOM killer 的名單 (-1000 = 永久豁免)，原值存進 OOM_SAVED。
+# ram 與 swap 都要：兩者都可能吃到核心開始殺程序，而被殺的若是 sshd，
+# 遠端機器當場斷線 -- 那時候連進去看 dmesg 都做不到。
+# 呼叫端記得掛 trap 'oom_restore' RETURN，中斷則走頂層 INT/TERM。
+oom_protect_sshd() {
+    local p old
+    OOM_SAVED=""
+    for p in $(pgrep -x sshd 2>/dev/null); do
+        old=$(cat "/proc/$p/oom_score_adj" 2>/dev/null) || continue
+        echo -1000 > "/proc/$p/oom_score_adj" 2>/dev/null && OOM_SAVED="$OOM_SAVED $p:$old"
+    done
+    [ -n "$OOM_SAVED" ] && log "已把 sshd 的 oom_score_adj 設成 -1000 (測完還原)"
+    return 0
+}
+
+# 把 dmesg 裡的 OOM 記錄印進報告。有記錄回 0、沒有回 1。
+# 先 grep 再 tail：反過來的話 OOM 之後只要再多幾行 kernel 訊息，記錄就被 tail 切掉了。
+# dmesg 沒辦法只看「這次測試」，撈到的可能是開機以來的舊記錄，所以警告文字
+# 一律寫成「出現 OOM 記錄」，請人自己看時間與被殺的程序。
+oom_dmesg() {
+    local oom
+    echo "$THIN" | tee -a "$LOG"
+    log "OOM 記錄"
+    oom=$(dmesg | grep -iE 'oom|killed process' | tail -30)
+    if [ -n "$oom" ]; then
+        printf '%s\n' "$oom" | sed 's/^/  /' | tee -a "$LOG"
+        return 0
+    fi
+    log "  (無 OOM)"
+    return 1
 }
 
 # ---------- CPU ----------
@@ -410,7 +542,7 @@ t_cpu() {
     log "拉滿 $n 核，${DUR}s，方法 all"
     m=$(mark)
     mon_start _mon_cpu
-    stress-ng --cpu "$n" --cpu-method all -t "${DUR}s" --metrics-brief 2>&1 | tee -a "$LOG"
+    run_fg stress-ng --cpu "$n" --cpu-method all -t "${DUR}s" --metrics-brief
     mon_stop
 
     # stress-ng --metrics-brief 的資料行:
@@ -437,18 +569,40 @@ t_ram() {
     sec "2/5" "RAM"
     need stress-ng || { SUM_RAM="跳過 (缺工具)"; return 1; }
     # 總記憶體的 80%，分 2 個 worker
-    local total_mb per_mb m ops minavail
+    local total_mb per_mb avail_mb want_mb m ops minavail
     total_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
-    per_mb=$(( total_mb * 80 / 100 / 2 ))
-    log "總 ${total_mb}MB，2 worker x ${per_mb}MB = $(( per_mb*2 ))MB (80%)"
+    avail_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+    per_mb=$(( total_mb * RAM_PCT / 100 / 2 ))
+    want_mb=$(( per_mb * 2 ))
+    log "總 ${total_mb}MB，2 worker x ${per_mb}MB = ${want_mb}MB (RAM_PCT=${RAM_PCT}%)"
+    # 吃的是「總記憶體」的百分比，不是「可用」的 -- 機器上已經有服務佔著記憶體時，
+    # 配置量會超過剩下的量，換頁之後 OOM killer 就可能出手。這一項原本沒有任何保險，
+    # 現在跟 swap 一樣先把 sshd 保護起來，並在事前把數字攤開。
+    if [ "$want_mb" -gt "${avail_mb:-0}" ]; then
+        warn "要配置 ${want_mb}MB，但目前只剩 ${avail_mb}MB 可用 -> 會換頁，OOM killer 可能出手"
+        log "!! 另開一個 terminal 跑 dmesg -w 可以即時看到"
+    fi
+    # 拉高比例的代價要在跑之前講，不是事後看報告才知道
+    if [ "$RAM_PCT" -gt 90 ]; then
+        warn "RAM_PCT=${RAM_PCT}% -> page cache 會被回收光，之後多半是狂換頁而不是乾脆 OOM"
+        log "!! 這台有 swap 的話機器會慢到近乎沒有回應 (SSH 也會卡)，oom_score_adj 保險對這種卡死沒有用"
+        log "!! 真的 OOM 時第一個被挑中的通常是 stress-ng worker 自己 (RSS 最大)，測試會自己斷掉"
+    fi
+    oom_protect_sshd
+    trap 'oom_restore' RETURN
+
     m=$(mark)
     mon_start _mon_ram
-    stress-ng --vm 2 --vm-bytes "${per_mb}M" --vm-keep -t "${DUR}s" --metrics-brief 2>&1 | tee -a "$LOG"
+    run_fg stress-ng --vm 2 --vm-bytes "${per_mb}M" --vm-keep -t "${DUR}s" --metrics-brief
     mon_stop
 
     ops=$(since "$m" | awk '$4=="vm" && $5 ~ /^[0-9]+$/ {print $(NF-1)}' | tail -1)
     minavail=$(since "$m" | grep -oE 'MemAvailable=[0-9]+' | cut -d= -f2 | sort -n | head -1)
-    SUM_RAM="${ops:-?} bogo ops/s，配置 $(( per_mb*2 ))MB，最低可用 ${minavail:-?}MB"
+    SUM_RAM="${ops:-?} bogo ops/s，配置 ${want_mb}MB (總記憶體 ${RAM_PCT}%)，最低可用 ${minavail:-?}MB"
+    if oom_dmesg; then
+        warn "RAM 測試期間出現 OOM 記錄，請確認被殺掉的是哪些程序"
+        SUM_RAM="$SUM_RAM，!! 有 OOM 記錄"
+    fi
     # bogo ops 為 0 不是壞掉，是 DUR 太短跑不完一輪 -- 講清楚免得被當成故障
     if [ "${ops:-1}" = "0" ] || [ "${ops:-1}" = "0.00" ]; then
         SUM_RAM="$SUM_RAM
@@ -471,7 +625,7 @@ _mon_swap() {
 t_swap() {
     sec "4/5" "SWAP"
     need stress-ng vmstat || { SUM_SWAP="跳過 (缺工具)"; return 1; }
-    local total_mb swap_mb target_mb m p old maxso minavail oom
+    local total_mb swap_mb target_mb m maxso minavail
     total_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
     swap_mb=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo)
     swap_mb="${swap_mb:-0}"
@@ -482,32 +636,21 @@ t_swap() {
     log "!! OOM killer 可能出手。另開一個 terminal 跑 dmesg -w 可以即時看到"
 
     # 保護 sshd 不被 OOM 殺掉。先存原值，測完由 oom_restore 還原。
-    OOM_SAVED=""
-    for p in $(pgrep -x sshd 2>/dev/null); do
-        old=$(cat "/proc/$p/oom_score_adj" 2>/dev/null) || continue
-        echo -1000 > "/proc/$p/oom_score_adj" 2>/dev/null && OOM_SAVED="$OOM_SAVED $p:$old"
-    done
-    [ -n "$OOM_SAVED" ] && log "已把 sshd 的 oom_score_adj 設成 -1000 (測完還原)"
+    oom_protect_sshd
     trap 'oom_restore' RETURN
 
     m=$(mark)
     mon_start _mon_swap
-    stress-ng --vm 1 --vm-bytes "${target_mb}M" --vm-keep -t "${DUR}s" --metrics-brief 2>&1 | tee -a "$LOG"
+    run_fg stress-ng --vm 1 --vm-bytes "${target_mb}M" --vm-keep -t "${DUR}s" --metrics-brief
     mon_stop
 
     maxso=$(since "$m" | grep -oE 'so=[0-9]+' | cut -d= -f2 | sort -rn | head -1)
     minavail=$(since "$m" | grep -oE 'MemAvailable=[0-9]+' | cut -d= -f2 | sort -n | head -1)
 
-    echo "$THIN" | tee -a "$LOG"
-    log "OOM 記錄"
-    # 先 grep 再 tail。反過來的話 OOM 之後只要再多幾行 kernel 訊息，記錄就被 tail 切掉了。
-    oom=$(dmesg | grep -iE 'oom|killed process' | tail -30)
-    if [ -n "$oom" ]; then
-        printf '%s\n' "$oom" | sed 's/^/  /' | tee -a "$LOG"
+    if oom_dmesg; then
         warn "SWAP 測試期間出現 OOM 記錄，請確認被殺掉的是哪些程序"
         SUM_SWAP="換出峰值 ${maxso:-?} KB/s，最低可用 ${minavail:-?}MB，!! 有 OOM 記錄"
     else
-        log "  (無 OOM)"
         SUM_SWAP="換出峰值 ${maxso:-?} KB/s，最低可用 ${minavail:-?}MB，無 OOM"
     fi
 }
@@ -545,10 +688,11 @@ t_disk() {
         set -- $mode
         echo "$THIN" | tee -a "$LOG"
         log "$2 ($1)"
-        out=$(fio --name="$1" --filename="$FIO_FILE" --size="${size}M" \
+        cap_run fio --name="$1" --filename="$FIO_FILE" --size="${size}M" \
             --rw="$1" --bs=$([ "${1#rand}" = "$1" ] && echo 1M || echo 4k) \
             --ioengine=libaio --iodepth=32 --direct=1 \
-            --runtime="$rt" --time_based --group_reporting 2>&1)
+            --runtime="$rt" --time_based --group_reporting
+        out="$CAP_OUT"
 
         # 收 IOPS/BW、平均延遲、以及 p95/p99/p99.99 尾端延遲。
         # 尾端才是重點：共享雲端磁碟的平均值好看，p99 會差兩個數量級。
@@ -647,7 +791,7 @@ t_ntp() {
     echo "$THIN" | tee -a "$LOG"
     log "觀察 ${DUR}s -- 這期間去看你的應用有沒有異常"
     log "  TLS 憑證驗證 / cron / DB replication / log 時序都可能出事"
-    sleep "$DUR"
+    isleep "$DUR"
     # trap RETURN 會自動呼叫 restore_ntp
 }
 
@@ -802,7 +946,8 @@ _wrk_run() {
     local args=(-t"$WRK_THREADS" -c"$WRK_CONNS" -d"${dur}s" --latency -H "User-Agent: $UA")
     [ -n "$HOST_HEADER" ] && args+=(-H "Host: $HOST_HEADER")
     log "wrk -t${WRK_THREADS} -c${WRK_CONNS} -d${dur}s --latency $URL"
-    out=$(wrk "${args[@]}" "$URL" 2>&1)
+    cap_run wrk "${args[@]}" "$URL"
+    out="$CAP_OUT"
     printf '%s\n' "$out" | sed 's/^/  /' | tee -a "$LOG"
 
     rps=$(printf '%s\n'  "$out" | awk '/^Requests\/sec/{print $2}')
@@ -829,7 +974,7 @@ _net_setup() {
 }
 # 統一的網路測試清理 trap 內容。t_* 用 trap "$NET_CLEANUP" RETURN 掛上。
 # 正常返回收乾淨；中斷走頂層 INT/TERM (同樣清 DL_PIDS 與 NET_TMP)。
-NET_CLEANUP='kill $DL_PIDS 2>/dev/null; DL_PIDS=""; rm -rf "$NET_TMP"; NET_TMP=""'
+NET_CLEANUP='dl_kill; rm -rf "$NET_TMP"; NET_TMP=""'
 
 # ---------- baseline: 只跑 wrk，建立無干擾基準 ----------
 t_baseline() {
@@ -857,7 +1002,7 @@ t_traffic() {
     set -- $(_nic_bytes); rxs=$1; t0=$(date +%s)
     mon_start _mon_net
     _dl_start "$DUR" || { mon_stop; SUM_DL="失敗 (下載程序沒起來)"; return 1; }
-    sleep "$DUR"
+    isleep "$DUR"
     _dl_stop
     mon_stop
     _net_finish "$rxs" "$t0"
@@ -886,22 +1031,7 @@ t_mixed() {
 }
 
 # ---------- 主 ----------
-# 先驗參數再決定報告檔名，打錯字不該留下一個空報告
-case "${1:-}" in
-    cpu|ram|disk|swap|ntp|all) CMD="$1"; SUITE="local" ;;
-    baseline|traffic|mixed)    CMD="$1"; SUITE="net" ;;
-    *) usage; exit 2 ;;
-esac
-
-# 網路模式的目標是必填 -- 缺了就明講缺哪個環境變數，不要跑到報告開頭才失敗
-if [ "$SUITE" = "net" ]; then
-    case "$CMD" in
-        baseline) [ -n "$URL" ] || { echo "baseline 需要 URL，例: URL=https://你的網站/ ... baseline"; exit 2; } ;;
-        traffic)  [ -n "$DL_URL" ] || { echo "traffic 需要 DL_URL，例: DL_URL=https://授權來源/big.bin ... traffic"; exit 2; } ;;
-        mixed)    { [ -n "$URL" ] && [ -n "$DL_URL" ]; } || { echo "mixed 需要 URL 與 DL_URL 兩者"; exit 2; } ;;
-    esac
-fi
-
+# 參數與 SUITE 在檔案上半部就驗完了 (見「參數解析」)，這裡直接開報告。
 LOG="$LOGDIR/$CMD-$TS.log"
 report_head "$CMD"
 

@@ -51,6 +51,8 @@ export OPS_SSH_DIR
 # 預設用啟動 ops.sh 時所在的目錄，跟直接執行那支腳本的行為一致。
 OPS_STRESS_DIR="${OPS_STRESS_DIR:-$PWD}"
 STRESS_DUR=60
+# ram 要吃掉總記憶體的百分之幾（選單的 p 可改）。底層腳本預設也是 80。
+STRESS_RAM_PCT="${RAM_PCT:-80}"
 
 PORT_STATE="$OPS_SSH_DIR/ssh-port/state"
 LEGACY_PORT_STATE=/var/lib/ssh-port/state    # 1.1.0 之前的位置，換埠進行中時仍會用
@@ -894,6 +896,31 @@ stress_set_dur() {
     okmsg "每項持續 $STRESS_DUR 秒"
 }
 
+stress_set_ram_pct() {
+    printf '\n'
+    dim " 記憶體壓測要吃掉「總記憶體」的百分之幾（不是可用記憶體的百分比）。"
+    dim " 預設 80 是壓得有感、但還留得住收尾與報告的線。"
+    ask_default "配置比例（1-100）：" "$STRESS_RAM_PCT"
+    case "$REPLY_VAL" in
+        ''|*[!0-9]*) nomsg "要是 1-100 的整數：$REPLY_VAL"; return 0 ;;
+    esac
+    if [ "$REPLY_VAL" -lt 1 ] || [ "$REPLY_VAL" -gt 100 ]; then
+        nomsg "要在 1-100 之間：$REPLY_VAL"
+        return 0
+    fi
+    # 90 以上的後果要在設定的當下就講，不是等按下去才發現機器沒回應
+    if [ "$REPLY_VAL" -gt 90 ]; then
+        printf '\n'
+        wmsg "超過 90% 之後 page cache 會被回收光，接著多半是狂換頁而不是乾脆 OOM"
+        row "有 swap 的機器會慢到近乎沒有回應（SSH 也會卡），sshd 的 oom_score_adj 保險對這種卡死沒有用"
+        row "真的 OOM 時第一個被挑中的通常是 stress-ng worker 自己（RSS 最大），測試會自己斷掉"
+        printf '\n'
+        confirm "還是要設成 ${REPLY_VAL}% 嗎？" || return 0
+    fi
+    STRESS_RAM_PCT="$REPLY_VAL"
+    okmsg "記憶體配置比例改為 ${STRESS_RAM_PCT}%"
+}
+
 # 執行一個項目。$1 = cpu/ram/disk/swap/ntp/all/baseline/traffic/mixed
 stress_run() {
     _cmd=$1
@@ -907,7 +934,9 @@ stress_run() {
     sect "壓力測試：$_cmd"
     case "$_cmd" in
         cpu)  row "把所有核心拉滿，每 3 秒記一次 loadavg 與 mpstat（含 steal）" ;;
-        ram)  row "吃掉總記憶體的 80%，觀察 MemAvailable 與 SwapFree" ;;
+        ram)  wmsg "吃掉總記憶體的 ${STRESS_RAM_PCT}%（是「總共」不是「可用」）—— 這台已經有服務佔著記憶體時會換頁，有 OOM 風險"
+              row "開始前會把所有 sshd 的 oom_score_adj 設成 -1000（結束或中斷都會還原）"
+              row "配置量超過目前可用時會先警告，測完會撈 dmesg 看有沒有 OOM 記錄" ;;
         disk) row "隨機讀 / 隨機寫 / 循序讀 / 循序寫各跑一輪，測試檔最大 4GB，跑完自動刪除"
               row "輸出目錄可用空間：$(df -h "$OPS_STRESS_DIR" 2>/dev/null | awk 'NR==2{print $4}')" ;;
         swap) wmsg "吃到 RAM 的 95% + swap 的 50%，逼出換頁 —— 有觸發 OOM killer 的風險"
@@ -917,6 +946,7 @@ stress_run() {
               row "還原是先 date -s \"-2 minutes\" 確定性扣回，再讓 chronyd makestep 修殘差；"
               row "正常結束與 Ctrl-C 都會還原，但觀察期間這台機器的時間是錯的" ;;
         all)  row "依序跑 cpu -> ram -> disk -> swap，寫在同一份報告裡（不含 ntp）"
+              wmsg "其中 ram 與 swap 都會把記憶體吃滿，有觸發 OOM killer 的風險（sshd 會先保護起來）"
               row "預估耗時：約 $(( STRESS_DUR * 4 / 60 + 1 )) 分鐘" ;;
     esac
 
@@ -939,11 +969,27 @@ stress_run() {
             row "建議用你自己控制的來源；公開測速檔只適合短時間驗證，別長時間連續灌"
             ask_default "下載來源 DL_URL（逗號分隔可多個）：" "${DL_URL:-}"
             _dl="$REPLY_VAL"
-            case "$_dl" in
-                http://*|https://*) : ;;
-                '') printf ' 已取消\n'; return 0 ;;
-                *)  nomsg "DL_URL 要以 http:// 或 https:// 開頭"; return 0 ;;
-            esac
+            [ -z "$_dl" ] && { printf ' 已取消\n'; return 0; }
+            # 逗號分隔可以給多個來源，所以要逐段驗：只比對整串開頭的話，
+            # http://a,ftp://b 會過關，要等 curl 跑起來才發作
+            _bad=''; _rest="$_dl"
+            while [ -n "$_rest" ]; do
+                case "$_rest" in
+                    *,*) _one="${_rest%%,*}"; _rest="${_rest#*,}" ;;
+                    *)   _one="$_rest"; _rest='' ;;
+                esac
+                # "a, b" 這種寫法底層腳本吃得下（它自己會 trim），這裡也照做
+                _one=$(printf '%s' "$_one" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+                case "$_one" in
+                    http://*|https://*) : ;;
+                    '') _bad="$_bad 〈空白〉" ;;
+                    *)  _bad="$_bad $_one" ;;
+                esac
+            done
+            if [ -n "$_bad" ]; then
+                nomsg "每個來源都要以 http:// 或 https:// 開頭，這些不合格：$_bad"
+                return 0
+            fi
             ask_default "同時幾個下載程序？" "${DL_WORKERS:-4}"
             _workers="$REPLY_VAL"
             case "$_workers" in
@@ -966,7 +1012,7 @@ stress_run() {
     # cd 過去再跑：那支腳本把報告與 fio 測試檔寫在「當下工作目錄」底下的 logs/。
     # 用子 shell 包起來，選單本身的工作目錄不會被換掉。
     ( cd "$OPS_STRESS_DIR" 2>/dev/null || { nomsg "進不去 $OPS_STRESS_DIR"; exit 1; }
-      DUR="$STRESS_DUR" URL="$_url" DL_URL="$_dl" DL_WORKERS="$_workers" \
+      DUR="$STRESS_DUR" RAM_PCT="$STRESS_RAM_PCT" URL="$_url" DL_URL="$_dl" DL_WORKERS="$_workers" \
           bash "$STRESS_SH" "$_cmd" )
 }
 
@@ -978,12 +1024,12 @@ act_stress_menu() {
         printf '%s 壓力測試%s  %sSTRESS/stress-test.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
         hr
         printf ' 輸出   %s%s/logs/%s\n' "$CB" "$OPS_STRESS_DIR" "$C0"
-        printf ' 參數   每項持續 %s%s%s 秒\n' "$CB" "$STRESS_DUR" "$C0"
+        printf ' 參數   每項持續 %s%s%s 秒，記憶體配置 %s%s%%%s\n' "$CB" "$STRESS_DUR" "$C0" "$CB" "$STRESS_RAM_PCT" "$C0"
         printf ' 工具   %s\n' "$(stress_tool_status)"
         hr
         sect "本機壓測"
         row "1) CPU             ${CD}所有核心拉滿，看 bogo ops 與 steal${C0}"
-        row "2) 記憶體          ${CD}吃掉總記憶體 80%${C0}"
+        row "2) 記憶體          ${CD}吃掉總記憶體 ${STRESS_RAM_PCT}%${C0}"
         row "3) 磁碟讀寫        ${CD}隨機/循序 各讀寫一輪，重點在 p99 尾端延遲${C0}"
         row "4) SWAP            ${CD}逼出換頁，有 OOM 風險，會先保護 sshd${C0}"
         row "5) NTP 時間偏移    ${CD}時鐘往前撥 2 分鐘再還原，要單獨跑${C0}"
@@ -996,6 +1042,7 @@ act_stress_menu() {
         printf '\n'
         sect "設定"
         row "t) 每項持續秒數    ${CD}目前 $STRESS_DUR${C0}"
+        row "p) 記憶體配置比例  ${CD}目前 ${STRESS_RAM_PCT}%，>90 會狂換頁${C0}"
         row "o) 輸出目錄        ${CD}目前 $OPS_STRESS_DIR${C0}"
         row "i) 安裝壓測相依套件"
         row "b) 返回主選單"
@@ -1013,6 +1060,7 @@ act_stress_menu() {
             8) stress_run traffic ;;
             9) stress_run mixed ;;
             t|T) stress_set_dur ;;
+            p|P) stress_set_ram_pct ;;
             o|O) stress_set_dir ;;
             i|I) stress_install ;;
             b|B|q|Q|'') return 0 ;;
