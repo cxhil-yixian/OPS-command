@@ -9,6 +9,22 @@
 
 ---
 
+## [1.10.4] - 2026-08-19
+
+文件：Windows 的第一次執行順序，以及 `ntp` 對 chronyd 的態度。
+
+### 變更
+
+- **`WINDOWS/README.md` 加一節「第一次在 Windows 上跑：建議的順序」。** 這支從來沒有
+  在 Windows 上實際執行過，第一次跑的順序很重要：一般帳號 → `S` 檢查現況 → 提權流程
+  → **最後**才碰換 RDP Port。附上三種常見失敗的長相（TLS 1.2、執行原則、提權視窗一閃
+  就沒），以及「只能透過 RDP 連進去又沒有主控台的機器，做到第 3 步就停」。
+- **根 `README.md` 的安全須知補上 chronyd 的行為**：`ntp` 測完不會順手啟動原本沒在跑的
+  chronyd（1.10.3 的修正），並附上那個實測案例——一台 chronyd 停用、時鐘快 8 小時的 VM，
+  順手啟動它會讓時間直接跳 8 小時。
+
+---
+
 ## [1.10.3] - 2026-08-19
 
 `ntp` 不再順手幫你把 chronyd 打開。
@@ -809,6 +825,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.10.4]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.3...v1.10.4
 [1.10.3]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.2...v1.10.3
 [1.10.2]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.0...v1.10.1

@@ -304,7 +304,8 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
   的風險（兩者開始前都會把 sshd 設成 `oom_score_adj=-1000`，其他程序不保證）；`RAM_PCT`
   拉到 90 以上時更可能變成「狂換頁到沒有回應」而不是乾脆 OOM，那種卡死連 sshd 保險也救不了。
   `ntp` 會把系統時鐘往前撥 2 分鐘，雖然正常結束與 Ctrl-C 都會還原，觀察期間這台機器的
-  時間是錯的。
+  時間是錯的。**chronyd 原本是什麼狀態，測完就是什麼狀態**——本來沒在跑的不會被順手
+  打開（實測過一台 chronyd 停用、時鐘快 8 小時的 VM，順手啟動它會讓時間直接跳 8 小時）。
 - **手動封鎖前先確認會不會封到自己**。`fail2ban.sh` 會擋下涵蓋你目前 SSH 來源、
   本機位址或 loopback 的目標，CIDR 是真的做網段計算的；要硬幹得加 `--force`。
 - **換過 SSH 埠之後要重跑 `fail2ban.sh enable-sshd`**。jail 的 `port` 沒跟著改的話，
