@@ -559,7 +559,7 @@ cmd_list() {
 }
 
 cmd_ban() {
-    [ $# -ge 1 ] || die "請給要封鎖的 IP，例如：$SELF ban 1.2.3.4"
+    [ $# -ge 1 ] || die "請給要封鎖的 IP，例如：$SELF ban 203.0.113.5"
     require_f2b
     _js=$(target_jails)
     [ -n "$_js" ] || die "沒有可用的 jail（$SELF enable-sshd 可建立 sshd jail）"
@@ -612,7 +612,7 @@ cmd_ban() {
 }
 
 cmd_unban() {
-    [ $# -ge 1 ] || die "請給要解除封鎖的 IP，例如：$SELF unban 1.2.3.4"
+    [ $# -ge 1 ] || die "請給要解除封鎖的 IP，例如：$SELF unban 203.0.113.5"
     require_f2b
     for _ip in "$@"; do
         valid_target "$_ip" || die "不是合法的 IP / CIDR：$_ip"
@@ -663,7 +663,7 @@ cmd_unban_all() {
 }
 
 cmd_check() {
-    [ $# -ge 1 ] || die "請給要查詢的 IP，例如：$SELF check 1.2.3.4"
+    [ $# -ge 1 ] || die "請給要查詢的 IP，例如：$SELF check 203.0.113.5"
     _ip="$1"
     valid_target "$_ip" || die "不是合法的 IP / CIDR：$_ip"
     require_f2b
@@ -705,7 +705,7 @@ cmd_check() {
 }
 
 cmd_allow() {
-    [ $# -ge 1 ] || die "請給要加白名單的 IP，例如：$SELF allow 1.2.3.4"
+    [ $# -ge 1 ] || die "請給要加白名單的 IP，例如：$SELF allow 203.0.113.5"
     need_root
     for _ip in "$@"; do
         valid_target "$_ip" || die "不是合法的 IP / CIDR：$_ip"

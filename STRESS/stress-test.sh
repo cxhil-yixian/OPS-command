@@ -676,7 +676,7 @@ t_swap() {
 t_disk() {
     sec "3/5" "DISK"
     need fio || { SUM_DISK="跳過 (缺工具)"; return 1; }
-    local avail_mb size mem_mb rt mode out iops bw_str bw p99 punit p99ms line extra
+    local avail_mb size mem_mb want_mb2 rt mode out iops bw_str bw p99 punit p99ms line extra
     avail_mb=$(df -Pm "$DISK_DIR" | awk 'NR==2{print $4}')
     if [ -n "$DISK_SIZE_MB" ]; then
         size="$DISK_SIZE_MB"
@@ -697,8 +697,20 @@ t_disk() {
 
     mem_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
     if [ "$size" -lt "$mem_mb" ]; then
-        warn "測試檔 ${size}MB < RAM ${mem_mb}MB，讀取數據會被 cache 汙染"
-        log "   要壓過 cache 就把檔案開大: DISK_SIZE_MB=$(( mem_mb * 2 )) (需要同等的可用空間)"
+        # 記憶體大的機器上這件事「每次都成立」(自動大小的上限是 4096MB)，
+        # 無條件 warn 的話每份報告都掛著同一條，久了就沒人看了。
+        # 原則：警告區只放「你這次可以動手處理」的事，其餘降級成報告本文的註記。
+        want_mb2=$(( mem_mb * 2 ))
+        if [ -n "$DISK_SIZE_MB" ]; then
+            log "註: 測試檔 ${size}MB < RAM ${mem_mb}MB，讀取那兩輪仍會被 cache 影響 (大小是你指定的)"
+        elif [ "$want_mb2" -le "$avail_mb" ]; then
+            warn "測試檔 ${size}MB < RAM ${mem_mb}MB -> 讀取數據會被 cache 汙染 (卡在自動大小的 4096MB 上限)"
+            log "   這台空間夠 (可用 ${avail_mb}MB)，要壓過 cache 就指定 DISK_SIZE_MB=${want_mb2}"
+        else
+            log "註: 測試檔 ${size}MB < RAM ${mem_mb}MB，讀取數據會被 cache 汙染"
+            log "   要壓過 cache 約需 ${want_mb2}MB，但 $DISK_DIR 只剩 ${avail_mb}MB"
+            log "   -> 要量乾淨的讀取，把 DISK_DIR 指到空間夠的檔案系統"
+        fi
     fi
 
     # DUR < 5 時整數除法會得到 0，而 fio 的 --runtime=0 是「不設限」，
