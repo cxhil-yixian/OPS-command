@@ -7,7 +7,7 @@ Windows 10 / 11 的系統管理工具箱，PowerShell 寫的分類選單。跟 L
 |---|---|
 | `ops-win.ps1` | 一行指令的進入點：下載主腳本到 `%ProgramData%\OPS-command\` 再執行 |
 | `Win_Admin_Tool.bat` | 本機進入點，雙擊即可（設好編碼並用 `-ExecutionPolicy Bypass` 呼叫 .ps1） |
-| `Win_Admin_Tool.ps1` | 本體，1090 行的 PowerShell 分類選單 |
+| `Win_Admin_Tool.ps1` | 本體，1091 行的 PowerShell 分類選單 |
 
 ## 兩種跑法
 
