@@ -643,9 +643,12 @@ t_cpu() {
 
 # ---------- RAM ----------
 _mon_ram() {
+    local mem
     while :; do
-        awk '/MemTotal|MemAvailable|SwapFree/{sub(/:$/,"",$1); printf "  %s=%dMB",$1,$2/1024} END{print ""}' \
-            /proc/meminfo | tee -a "$LOG"
+        # 跟 _mon_cpu 一樣帶時間戳：跑 120s 會有四十幾行，沒有時間就沒辦法跟
+        # dmesg / 應用的日誌對時間。
+        mem=$(awk '/MemTotal|MemAvailable|SwapFree/{sub(/:$/,"",$1); printf "  %s=%dMB",$1,$2/1024}' /proc/meminfo)
+        printf '  %s%s\n' "$(date +%H:%M:%S)" "$mem" | tee -a "$LOG"
         sleep "$MON_SEC"
     done
 }
@@ -653,7 +656,7 @@ t_ram() {
     sec "2/5" "RAM"
     need stress-ng || { SUM_RAM="跳過 (缺工具)"; return 1; }
     # 總記憶體的 80%，分 2 個 worker
-    local total_mb per_mb avail_mb want_mb need_s m ops minavail
+    local total_mb per_mb avail_mb want_mb need_s m ops minavail minswap
     total_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
     avail_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
     per_mb=$(( total_mb * RAM_PCT / 100 / 2 ))
@@ -691,6 +694,13 @@ t_ram() {
     ops=$(since "$m" | awk '$4=="vm" && $5 ~ /^[0-9]+$/ {print $(NF-1)}' | tail -1)
     minavail=$(since "$m" | grep -oE 'MemAvailable=[0-9]+' | cut -d= -f2 | sort -n | head -1)
     SUM_RAM="${ops:-?} bogo ops/s，配置 ${want_mb}MB (總記憶體 ${RAM_PCT}%)，最低可用 ${minavail:-?}MB (壓力前 ${BASE_AVAIL:-?}MB)"
+    # 這一項的目標是「吃記憶體」，不是「逼出換頁」——真的換到 swap 就表示
+    # RAM_PCT 對這台來說太貪心了。監看本來就在印 SwapFree，順手算出來講清楚。
+    minswap=$(since "$m" | grep -oE 'SwapFree=[0-9]+' | cut -d= -f2 | sort -n | head -1)
+    if [ -n "$minswap" ] && [ -n "${BASE_SWAPFREE:-}" ] && [ "$(( BASE_SWAPFREE - minswap ))" -gt 32 ]; then
+        SUM_RAM="$SUM_RAM，測試期間吃掉 $(( BASE_SWAPFREE - minswap ))MB swap"
+        warn "RAM 測試期間已經換頁 (SwapFree ${BASE_SWAPFREE} -> ${minswap}MB) -> RAM_PCT=${RAM_PCT}% 對這台偏高，bogo ops 含了換頁的代價"
+    fi
     if oom_dmesg; then
         warn "RAM 測試期間出現 OOM 記錄，請確認被殺掉的是哪些程序"
         SUM_RAM="$SUM_RAM，!! 有 OOM 記錄"
@@ -710,7 +720,7 @@ _mon_swap() {
     while :; do
         mem=$(awk '/SwapTotal|SwapFree|MemAvailable/{sub(/:$/,"",$1); printf "  %s=%dMB",$1,$2/1024}' /proc/meminfo)
         swp=$(vmstat 1 2 2>/dev/null | awk 'NR==4{printf "  si=%s so=%s",$7,$8}')
-        printf '%s%s\n' "$mem" "$swp" | tee -a "$LOG"
+        printf '  %s%s%s\n' "$(date +%H:%M:%S)" "$mem" "$swp" | tee -a "$LOG"
         # vmstat 1 2 自己已經吃掉一秒，扣掉才會是 MON_SEC 的節奏
         sleep $(( MON_SEC > 1 ? MON_SEC - 1 : 1 ))
     done
@@ -892,6 +902,9 @@ t_disk() {
         if [ -n "$bw" ] && [ "$bw" -gt 2000 ]; then
             if [ "$IS_VM" = 1 ]; then
                 warn "$2 ${bw}MiB/s 超出實體磁碟合理範圍 -> 這是 hypervisor 的 cache，此數據無效"
+                # 「測試檔 > guest RAM」不代表壓得過 host 的 cache -- host 的記憶體
+                # 通常比 guest 大得多。這裡直接給一個可以照做的值。
+                log "   要量到真的磁碟，測試檔得大過 host 那層 cache: 從 DISK_SIZE_MB=$(( mem_mb * 2 )) 開始試"
                 line="$line   !! 無效 (host cache)"
             else
                 # 實體機上 2GB/s 以上是 NVMe / RAID 卡的正常值，不能一律判無效，

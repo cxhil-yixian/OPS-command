@@ -9,6 +9,33 @@
 
 ---
 
+## [1.10.2] - 2026-08-19
+
+第二台實機（Hyper-V VM）跑完之後的三個補強。
+
+### 變更
+
+- **`ram` / `swap` 的監看列補上時間戳**，跟 `cpu` 一致。`DUR=120` 會印四十幾行，
+  沒有時間就沒辦法跟 `dmesg` 或應用的日誌對時間。
+- **`ram` 摘要會講「測試期間吃掉多少 swap」。** 這一項的目標是吃記憶體而不是逼出換頁，
+  真的換到 swap 就表示 `RAM_PCT` 對這台太貪心，`bogo ops` 裡混了換頁的代價。
+  實測一台 RAM 3.7GB 的 VM，80% 就已經把 SwapFree 從 1774MB 吃到 1282MB。
+- **`>2GB/s 判無效` 的警告現在直接給你該用多大的測試檔。** 同一台 VM 用 4096MB 測試檔
+  （已經大過 guest 的 3789MB RAM）跑循序讀，還是量出 5813MiB/s —— 因為要壓過的是
+  **host** 那層 cache，host 的記憶體通常比 guest 大得多。警告後面補一行
+  `DISK_SIZE_MB=<guest RAM × 2> 開始試`，跟其他警告一樣「能處理才叫警告」。
+
+### 已驗證
+
+- 這一輪是走 `ops.sh` 選單跑的（`t` 改 120 秒 → `6` 全部），完整驗到選單這條路徑：
+  參數帶進子腳本、預估耗時（顯示 9 分鐘、實際 8 分 13 秒）、執行前的攤開與確認。
+- **`swap` 這次真的逼出換頁了**：34 次取樣有 32 次在換頁，換出峰值 346188 KB/s、
+  平均 105479 KB/s，最低可用 11MB 且沒有觸發 OOM——sshd 的保護與還原都正常。
+- 虛擬機分支（1.10.1 新加的 `IS_VM`）確認可用：報告印
+  `繞不過 hypervisor (microsoft) 的`，循序讀取被正確判成 `!! 無效 (host cache)`。
+
+---
+
 ## [1.10.1] - 2026-08-19
 
 第一次實機跑壓測抓到的三件事。
@@ -750,6 +777,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.10.2]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.8.1...v1.9.0
