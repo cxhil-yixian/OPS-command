@@ -9,6 +9,38 @@
 
 ---
 
+## [1.10.3] - 2026-08-19
+
+`ntp` 不再順手幫你把 chronyd 打開。
+
+### 修正
+
+- **`ntp` 測完會啟動 chronyd，即使它本來就沒在跑。** 還原邏輯寫的是「不管怎樣都把
+  chronyd 拉回來」，前提是「它本來在跑」——對停用 chronyd 的機器來說，那是壓測順手
+  改了系統狀態，而且後果可能很大：實測一台 chronyd 停用、**時鐘快 8 小時**的 VM，
+  測試結束時啟動 chronyd，`makestep` 直接把時間跳了 8 小時（報告上還印著「已還原
+  (現在 21:05:51)」，實際時鐘已經是 13:05:5x）。
+
+  現在測試前先記 `NTP_WAS_ACTIVE`，兩條路徑對稱：
+
+  | 測試前 chronyd | 測試中 | 測試後 |
+  |---|---|---|
+  | `active` | 停掉再撥時鐘 | 啟動 + `makestep` 修殘差 |
+  | `inactive` | 不用停 | **維持停用**，時鐘由 `date -s` 確定性扣回 |
+
+  chronyd 沒在跑時另外警告一句「這台的時鐘沒有人在校正」——那通常是該處理的問題，
+  但不該由壓測替你決定。
+- **摘要的「現在 XX:XX:XX」可能不是最終時間。** `chronyc makestep` 回的 `200 OK` 只代表
+  指令收到了，真正的跳躍要等 chronyd 拿到有效測量；偏差大時會在報告印完之後才跳。
+  報告補一行註記講這件事（`inactive` 那條路徑沒有這個問題，時間是 `date -s` 直接扣的）。
+
+### 變更
+
+- 支援矩陣的 `stress-test.sh` × CentOS 7.9 改成純 **✅**：五項在兩台互補的環境上全部
+  實機驗過（一台實體機、一台 Hyper-V VM，後者走 `ops.sh` 選單），`ntp` 是最後一項。
+
+---
+
 ## [1.10.2] - 2026-08-19
 
 第二台實機（Hyper-V VM）跑完之後的三個補強。
@@ -777,6 +809,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.10.3]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.2...v1.10.3
 [1.10.2]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.1...v1.10.2
 [1.10.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.9.0...v1.10.0

@@ -194,7 +194,7 @@ bash <(curl -fsSL .../ops.sh) doctor
 
 | 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh | fail2ban.sh | stress-test.sh |
 |---|---|---|---|---|---|
-| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ✅ 除 `ntp` |
+| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
 | Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
 | Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
@@ -205,12 +205,13 @@ bash <(curl -fsSL .../ops.sh) doctor
 未實測；它是 repo 內唯一需要 **bash** 的腳本（用到 `local`、`pipefail`），沒有 bash 的
 機器選單會直接擋下來。
 
-> **`stress-test.sh` 的驗證狀態。** 1.10.1 在 CentOS 7.9 實機（Xeon E3-1231 v3、
-> RAM 32GB / swap 50GB、非虛擬機）跑過一輪 `all`：`cpu` / `ram` / `disk` / `swap` 四項
-> 都正常，磁碟第五輪的 `psync + --sync=1 + --direct=1` 確認 fio 吃得下，`stress-ng` 的
-> bogo ops 解析、sshd 的 `oom_score_adj` 保護與還原也都對。
-> **只有 `ntp` 還沒實跑**（它會停 chronyd 並把系統時鐘往前撥 2 分鐘），所以那一格是
-> 「除 `ntp`」而不是純 ✅。其他發行版仍未驗證。
+> **`stress-test.sh` 在 CentOS 7.9 上五項全部實機驗過**，兩台環境互補：
+> 一台實體機（Xeon E3-1231 v3、RAM 32GB / swap 50GB）、一台 Hyper-V VM
+> （4 核、RAM 3.7GB / swap 2GB，後者是走 `ops.sh` 選單跑的）。驗到的包括：
+> 磁碟第五輪的 `psync + --sync=1 + --direct=1` fio 吃得下、`stress-ng` 的 bogo ops
+> 解析、sshd 的 `oom_score_adj` 保護與還原、`swap` 真的逼出換頁（32/34 次取樣在換頁
+> 且沒觸發 OOM）、實體機與虛擬機兩條 cache 判讀分支、以及 `ntp` 的撥快與還原。
+> 其他發行版仍未驗證。
 
 Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的 Linux 工具彼此獨立）：
 

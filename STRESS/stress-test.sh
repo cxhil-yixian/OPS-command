@@ -919,13 +919,25 @@ t_disk() {
 
 # ---------- NTP 時間偏移 ----------
 NTP_SHIFTED=0
+# 測試開始前 chronyd 是不是在跑。這決定還原時要不要把它拉回來 --
+# 本來就沒在跑的機器，硬幫它啟動等於「順手改了系統狀態」，而且後果可能很大：
+# 實測一台 chronyd 停用、時鐘快 8 小時的 VM，啟動 chronyd 之後 makestep 直接把
+# 時間跳了 8 小時。壓力測試不該有這種副作用。
+NTP_WAS_ACTIVE=0
 t_ntp() {
     sec "5/5" "NTP"
     need chronyc || { SUM_NTP="跳過 (缺工具)"; return 1; }
-    local before after
+    local before after state
     before=$(date '+%F %T')
+    state=$(systemctl is-active chronyd 2>/dev/null)
+    [ "$state" = "active" ] && NTP_WAS_ACTIVE=1
     log "現在時間: $before"
-    log "chronyd 狀態: $(systemctl is-active chronyd)"
+    log "chronyd 狀態: ${state:-未知}"
+    if [ "$NTP_WAS_ACTIVE" = 0 ]; then
+        warn "chronyd 本來就沒在跑 -> 這台的時鐘沒有人在校正"
+        log "   測完只會用 date -s 把撥掉的 2 分鐘扣回來，不會幫你啟動 chronyd"
+        log "   (啟動它會讓時鐘跳到真正的時間；那個落差可能是好幾小時，不該由壓測順手決定)"
+    fi
 
     # 一定要有還原保險：腳本被 Ctrl-C 也要把時鐘拉回來
     restore_ntp() {
@@ -938,16 +950,26 @@ t_ntp() {
             NTP_SHIFTED=0
             date -s "-2 minutes" > /dev/null
         fi
-        # 不管有沒有撥過時鐘都要把 chronyd 拉回來 -- 上面撥時鐘失敗而提早 return 時，
-        # chronyd 已經是停的了。
-        systemctl start chronyd 2>/dev/null
-        sleep 2
-        # 再讓 chronyd 修掉剩下的殘差
-        chronyc makestep 2>&1 | sed 's/^/  /' | tee -a "$LOG"
-        sleep 3
-        log "還原後: $(date '+%F %T')"
-        chronyc tracking 2>&1 | grep -E 'System time|Last offset' | sed 's/^/  /' | tee -a "$LOG"
-        SUM_NTP="偏移 +2min 觀察 ${DUR}s 後已還原 (現在 $(date '+%T'))"
+        if [ "$NTP_WAS_ACTIVE" = 1 ]; then
+            # 本來就在跑才拉回來 (上面撥時鐘失敗而提早 return 時它也已經是停的了)，
+            # 再讓 chronyd 修掉殘差。
+            systemctl start chronyd 2>/dev/null
+            sleep 2
+            chronyc makestep 2>&1 | sed 's/^/  /' | tee -a "$LOG"
+            sleep 3
+            log "還原後: $(date '+%F %T')"
+            chronyc tracking 2>&1 | grep -E 'System time|Last offset' | sed 's/^/  /' | tee -a "$LOG"
+            # makestep 是非同步的：chronyc 回 "200 OK" 只代表指令收到了，真正的跳躍要等
+            # chronyd 拿到有效測量才發生。偏差很大時 (時鐘本來就差好幾小時) 會在這行印完
+            # 之後才跳，所以這裡的「現在」不保證是最終時間。
+            log "註: makestep 是非同步的，偏差很大時實際跳躍會在這之後才發生"
+            SUM_NTP="偏移 +2min 觀察 ${DUR}s 後已還原 (現在 $(date '+%T')，chronyd 已拉回)"
+        else
+            # 本來就沒在跑：時鐘由上面的 date -s 確定性地扣回來，不碰 chronyd。
+            log "chronyd 原本就沒在跑，維持停用 -- 時鐘已用 date -s 扣回撥掉的 2 分鐘"
+            log "還原後: $(date '+%F %T')"
+            SUM_NTP="偏移 +2min 觀察 ${DUR}s 後已還原 (現在 $(date '+%T')，chronyd 維持原本的停用狀態)"
+        fi
     }
     # RETURN 管正常結束。INT/TERM 要自己收尾：先關掉 RETURN trap 避免還原跑兩次
     # (Ctrl-C 會中斷 sleep -> 跑 INT handler -> 函式繼續往下 return -> RETURN trap 又觸發)，
@@ -955,9 +977,11 @@ t_ntp() {
     trap 'restore_ntp' RETURN
     trap 'trap - RETURN; restore_ntp; echo; echo "已中斷，已還原"; report_summary "已中斷"; exit 130' INT TERM
 
-    log "停掉 chronyd (不停的話兩秒後就被拉回，你會以為沒生效)"
-    systemctl stop chronyd
-    sleep 1
+    if [ "$NTP_WAS_ACTIVE" = 1 ]; then
+        log "停掉 chronyd (不停的話兩秒後就被拉回，你會以為沒生效)"
+        systemctl stop chronyd
+        sleep 1
+    fi
 
     log "把系統時鐘往前撥 2 分鐘"
     if date -s "+2 minutes" | sed 's/^/  /' | tee -a "$LOG"; then
