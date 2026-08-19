@@ -194,7 +194,7 @@ bash <(curl -fsSL .../ops.sh) doctor
 
 | 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh | fail2ban.sh | stress-test.sh |
 |---|---|---|---|---|---|
-| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ⚠️ 只有 1.5.0 |
+| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ✅ 除 `ntp` |
 | RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
 | Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
 | Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
@@ -205,12 +205,12 @@ bash <(curl -fsSL .../ops.sh) doctor
 未實測；它是 repo 內唯一需要 **bash** 的腳本（用到 `local`、`pipefail`），沒有 bash 的
 機器選單會直接擋下來。
 
-> **`stress-test.sh` 的驗證狀態要看版本。** 1.5.0（納進本 repo 那一版）在 CentOS 7.9 / KVM
-> 上實機跑過；**1.6.0 之後的每一版都只用替身腳本驗過流程**——開發機上沒有 `fio` /
-> `stress-ng` / `mpstat`，能驗的是參數怎麼組、輸出怎麼解析、中斷與清理對不對，驗不到的是
-> 真工具的實際行為。這期間的改動不小：移除網路測試、磁碟多一輪同步寫延遲（`psync` +
-> `--sync=1`）、壓力前基準、`RAM_PCT` / `DISK_SIZE_MB` / `DISK_QD` / `MON_SEC` 幾個參數。
-> 在真機跑過一輪 `DUR=60 all` 與單獨的 `ntp` 之前，這一格不會改回 ✅。
+> **`stress-test.sh` 的驗證狀態。** 1.10.1 在 CentOS 7.9 實機（Xeon E3-1231 v3、
+> RAM 32GB / swap 50GB、非虛擬機）跑過一輪 `all`：`cpu` / `ram` / `disk` / `swap` 四項
+> 都正常，磁碟第五輪的 `psync + --sync=1 + --direct=1` 確認 fio 吃得下，`stress-ng` 的
+> bogo ops 解析、sshd 的 `oom_score_adj` 保護與還原也都對。
+> **只有 `ntp` 還沒實跑**（它會停 chronyd 並把系統時鐘往前撥 2 分鐘），所以那一格是
+> 「除 `ntp`」而不是純 ✅。其他發行版仍未驗證。
 
 Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的 Linux 工具彼此獨立）：
 

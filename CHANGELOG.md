@@ -9,6 +9,40 @@
 
 ---
 
+## [1.10.1] - 2026-08-19
+
+第一次實機跑壓測抓到的三件事。
+
+### 修正
+
+- **實體機的「虛擬化」那行會印成兩行。** `systemd-detect-virt` 在非虛擬機上會印 `none`
+  但 **exit 1**，而報告寫的是 `$(systemd-detect-virt 2>/dev/null || echo '未知')` ——
+  兩邊都執行，於是報告變成 `none` 換行 `未知`。改成只有「沒有輸出」才退回未知，
+  回傳碼不管。這台是 KVM，所以開發時完全踩不到。
+- **磁碟的 cache 判讀在實體機上是錯的。** 「測試檔要大過 RAM」「頻寬 >2GB/s 就是
+  host cache、此數據無效」這兩條的前提都是「guest 的 `direct=1` 繞不過 hypervisor 的
+  cache」，實體機的 `direct=1` 是真的直達裝置。現在用 `systemd-detect-virt` 分流：
+  - 實體機不再警告測試檔小於 RAM（無關）
+  - 實體機的 >2GB/s 不判「無效」，改成提醒確認是不是量到 RAID 卡 / 裝置快取
+    （NVMe 本來就跑得到）
+  - 報告開頭的註記與摘要的判讀提示都跟著換成對應版本
+
+### 新增
+
+- **`ram` / `swap` 事前就估「`DUR` 夠不夠」。** 實機跑 `DUR=10 all` 的結果：`ram` 的
+  bogo ops 是 0（25578MB 在 10 秒內碰不完一輪）、`swap` 整段沒有任何換出（RAM 都還沒
+  吃滿）。兩者原本都只在跑完之後才補一句，事前講才來得及改 `DUR`：
+  - `ram`：配置量 ÷ 2GB/s（實測 25578MB / 11.9s ≈ 2.1GB/s）就是至少需要的秒數
+  - `swap`：先估填滿 RAM 要多久，`DUR` 不到它的兩倍就警告，並建議一個值
+
+### 變更
+
+- 支援矩陣的 `stress-test.sh` × CentOS 7.9 從「⚠️ 只有 1.5.0」改成「✅ 除 `ntp`」，
+  並把實機驗到什麼寫清楚（`cpu` / `ram` / `disk` / `swap` 都正常，磁碟第五輪的
+  `psync + --sync=1 + --direct=1` 確認 fio 吃得下）。`ntp` 仍未實跑。
+
+---
+
 ## [1.10.0] - 2026-08-19
 
 Windows 也有一行指令了。
@@ -716,6 +750,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.10.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.0...v1.10.1
 [1.10.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.8.1...v1.9.0
 [1.8.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.8.0...v1.8.1

@@ -223,7 +223,7 @@ report_head() {
       echo "  主機          $(hostname)"
       echo "  作業系統      $(sed -n '1p' /etc/redhat-release 2>/dev/null || uname -o)"
       echo "  核心版本      $(uname -r)"
-      echo "  虛擬化        $(systemd-detect-virt 2>/dev/null || echo '未知')"
+      echo "  虛擬化        $VIRT"
       echo "  CPU           ${model:-未知}"
       echo "  核心數        $(getconf _NPROCESSORS_ONLN)"
       echo "  記憶體        $(awk '/MemTotal/{printf "%d MB", $2/1024}' /proc/meminfo)"
@@ -275,8 +275,13 @@ report_summary() {
       echo "$THIN"
       echo "  * steal 持續 >0 代表 CPU 被 hypervisor 拿去給別的 VM，"
       echo "    此時 bogo ops 低是 host 超賣，不是這台機器的問題。"
-      echo "  * VM 內的磁碟「讀取」數據普遍不可信 -- guest 的 direct=1 繞不過"
-      echo "    hypervisor 的 cache。以「寫入的 p99 尾端延遲」為準。"
+      if [ "$IS_VM" = 1 ]; then
+          echo "  * VM 內的磁碟「讀取」數據普遍不可信 -- guest 的 direct=1 繞不過"
+          echo "    hypervisor 的 cache。以「寫入的 p99 尾端延遲」為準。"
+      else
+          echo "  * 這台不是虛擬機，direct=1 直達裝置，讀寫數據都可以當真；"
+          echo "    p99 仍然比平均值有意義，共享儲存的平均值往往很好看。"
+      fi
       echo "  * 平均延遲會把快慢兩群混在一起。p99 才是你的服務真正會遇到的。"
       echo "  * 先看「基準」那一列：壓力還沒開始就有 steal、就在換頁、可用記憶體就"
       echo "    很低的話，後面量到的東西有一部分根本不是你壓出來的。"
@@ -476,6 +481,18 @@ _peak_rate() {
         END { printf "%d", x+0 }'
 }
 
+# ---------- 虛擬化 ----------
+# systemd-detect-virt 在「實體機」上會印 none 但 exit 1 -- 寫成
+#   $(systemd-detect-virt || echo 未知)
+# 的話兩邊都會執行，報告上就變成兩行 (實機跑出來就是 "none" 換行 "未知")。
+# 只有「指令不存在 / 沒有輸出」才該退回未知，回傳碼不管。
+VIRT=$(systemd-detect-virt 2>/dev/null)
+[ -n "$VIRT" ] || VIRT="未知"
+# 磁碟那一節的判讀完全取決於這個：VM 的 direct=1 繞不過 hypervisor 的 cache，
+# 實體機則是真的直達裝置，讀取數據可以當真。
+IS_VM=1
+case "$VIRT" in none|未知) IS_VM=0 ;; esac
+
 # ---------- 壓力前基準 ----------
 # 只有「壓力下」的數字，回答不了「這是壓出來的，還是它本來就長這樣」。
 # 所以開跑前先取一段閒置樣本，後面每一項的摘要都拿它當對照。
@@ -636,7 +653,7 @@ t_ram() {
     sec "2/5" "RAM"
     need stress-ng || { SUM_RAM="跳過 (缺工具)"; return 1; }
     # 總記憶體的 80%，分 2 個 worker
-    local total_mb per_mb avail_mb want_mb m ops minavail
+    local total_mb per_mb avail_mb want_mb need_s m ops minavail
     total_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
     avail_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
     per_mb=$(( total_mb * RAM_PCT / 100 / 2 ))
@@ -655,6 +672,14 @@ t_ram() {
         log "!! 這台有 swap 的話機器會慢到近乎沒有回應 (SSH 也會卡)，oom_score_adj 保險對這種卡死沒有用"
         log "!! 真的 OOM 時第一個被挑中的通常是 stress-ng worker 自己 (RSS 最大)，測試會自己斷掉"
     fi
+    # 事前粗估「碰得完一輪嗎」。stress-ng 的 vm stressor 觸碰記憶體大約 2GB/s
+    # (實測 CentOS 7 / Xeon E3：25578MB 花了 11.9s，約 2.1GB/s)，配置量除以它就是
+    # 至少需要的秒數。碰不完一輪的話 bogo ops 會是 0 -- 那不是故障，是白跑。
+    # 這件事本來只在跑完的摘要裡補一句，事前講才來得及改 DUR。
+    need_s=$(( want_mb / 2000 + 1 ))
+    [ "$DUR" -lt "$need_s" ] && \
+        warn "DUR=${DUR}s 對 ${want_mb}MB 來說太短，粗估至少要 ${need_s}s 才碰得完一輪 (bogo ops 會是 0)"
+
     oom_protect_sshd
     trap 'oom_restore' RETURN
 
@@ -693,7 +718,7 @@ _mon_swap() {
 t_swap() {
     sec "4/5" "SWAP"
     need stress-ng vmstat || { SUM_SWAP="跳過 (缺工具)"; return 1; }
-    local total_mb swap_mb target_mb m maxso avgso nso nsample sostat minavail
+    local total_mb swap_mb target_mb fill_s m maxso avgso nso nsample sostat minavail
     total_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
     swap_mb=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo)
     swap_mb="${swap_mb:-0}"
@@ -702,6 +727,13 @@ t_swap() {
     target_mb=$(( total_mb * 95 / 100 + swap_mb / 2 ))
     log "RAM=${total_mb}MB swap=${swap_mb}MB -> 吃 ${target_mb}MB，逼出換頁"
     log "!! OOM killer 可能出手。另開一個 terminal 跑 dmesg -w 可以即時看到"
+    # 換頁不是一開始就有：要先把 RAM 吃滿，之後配置的部分才會被換出去。
+    # 以 2GB/s 粗估填滿 RAM 的時間，DUR 沒有它的兩倍就幾乎不可能看到 si/so。
+    # (實測：這台 RAM 32GB + swap 50GB，DUR=10 跑完 SwapFree 一格都沒動)
+    fill_s=$(( total_mb * 95 / 100 / 2000 )); [ "$fill_s" -lt 1 ] && fill_s=1
+    if [ "$DUR" -lt "$(( fill_s * 2 ))" ]; then
+        warn "DUR=${DUR}s 太短：粗估要 ${fill_s}s 才把 RAM 吃滿、之後才開始換頁，建議 DUR>=$(( fill_s * 3 ))"
+    fi
 
     # 保護 sshd 不被 OOM 殺掉。先存原值，測完由 oom_restore 還原。
     oom_protect_sshd
@@ -757,14 +789,20 @@ t_disk() {
         [ "$size" -lt 512 ] && { log "$DISK_DIR 只剩 ${avail_mb}MB，空間不足"; SUM_DISK="跳過 (空間不足，只剩 ${avail_mb}MB)"; return 1; }
         log "$DISK_DIR 可用 ${avail_mb}MB -> 測試檔 ${size}MB"
     fi
-    log "註: direct=1 繞過 guest 的 page cache，但繞不過 KVM host 的"
+    if [ "$IS_VM" = 1 ]; then
+        log "註: direct=1 繞過 guest 的 page cache，但繞不過 hypervisor ($VIRT) 的"
+    else
+        log "註: 這台不是虛擬機，direct=1 是真的直達裝置，讀取數據可以當真"
+    fi
 
     # 存全域而不是 local，頂層的 INT/TERM trap 才清得到同一個檔案
     FIO_FILE="$DISK_DIR/.fio-test.$$"
     trap 'rm -f "$FIO_FILE"; FIO_FILE=""; log "已清掉測試檔"' RETURN
 
     mem_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
-    if [ "$size" -lt "$mem_mb" ]; then
+    # 「測試檔要大過 RAM」只在虛擬機上成立：那是為了壓過 hypervisor 那層 cache。
+    # 實體機的 direct=1 本來就繞過 page cache，檔案多大跟讀取可不可信無關。
+    if [ "$IS_VM" = 1 ] && [ "$size" -lt "$mem_mb" ]; then
         # 記憶體大的機器上這件事「每次都成立」(自動大小的上限是 4096MB)，
         # 無條件 warn 的話每份報告都掛著同一條，久了就沒人看了。
         # 原則：警告區只放「你這次可以動手處理」的事，其餘降級成報告本文的註記。
@@ -852,8 +890,14 @@ t_disk() {
               if (/KiB/) v /= 1024; else if (/GiB/) v *= 1024; else if (/TiB/) v *= 1048576
               printf "%d", v }')
         if [ -n "$bw" ] && [ "$bw" -gt 2000 ]; then
-            warn "$2 ${bw}MiB/s 超出實體磁碟合理範圍 -> 這是 KVM host 的 cache，此數據無效"
-            line="$line   !! 無效 (host cache)"
+            if [ "$IS_VM" = 1 ]; then
+                warn "$2 ${bw}MiB/s 超出實體磁碟合理範圍 -> 這是 hypervisor 的 cache，此數據無效"
+                line="$line   !! 無效 (host cache)"
+            else
+                # 實體機上 2GB/s 以上是 NVMe / RAID 卡的正常值，不能一律判無效，
+                # 但還是提醒一下有沒有可能是量到控制器的快取。
+                warn "$2 ${bw}MiB/s -> 確認一下是裝置本身的實力，還是量到 RAID 卡 / 裝置快取"
+            fi
         fi
         SUM_DISK="${SUM_DISK:+$SUM_DISK
 }$line"
