@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.8
+OPS_VERSION=1.9
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -746,7 +746,7 @@ act_f2b_menu() {
 #   1. 它是 bash 腳本（local / pipefail / {1..78}），不是 POSIX sh，要用 bash 呼叫。
 #   2. 報告一律寫進「當下工作目錄」底下的 logs/，不吃路徑參數 —— 所以是 cd 過去
 #      再呼叫，而不是傳參數進去。
-#   3. 參數全部走環境變數（DUR / RAM_PCT / DISK_DIR / DISK_SIZE_MB），選單先問完再帶進去。
+#   3. 參數全部走環境變數（DUR / RAM_PCT / DISK_* / MON_SEC），選單先問完再帶進去。
 #   這些測試會真的把機器操到滿載，每一項執行前都先把「會發生什麼」攤開來再問。
 # =========================================================
 stress_guard() {
@@ -920,12 +920,14 @@ stress_run() {
     printf '\n'
     sect "壓力測試：$_cmd"
     case "$_cmd" in
-        cpu)  row "把所有核心拉滿，每 3 秒記一次 loadavg 與 mpstat（含 steal）" ;;
+        cpu)  row "把所有核心拉滿，每 3 秒記一次 loadavg、mpstat（含 steal）與網卡收發"
+              row "測試期間網卡流量大到會分掉 CPU 的話會直接警告（bogo ops 偏低就有解釋了）" ;;
         ram)  wmsg "吃掉總記憶體的 ${STRESS_RAM_PCT}%（是「總共」不是「可用」）—— 這台已經有服務佔著記憶體時會換頁，有 OOM 風險"
               row "開始前會把所有 sshd 的 oom_score_adj 設成 -1000（結束或中斷都會還原）"
               row "配置量超過目前可用時會先警告，測完會撈 dmesg 看有沒有 OOM 記錄" ;;
         disk) row "循序寫 / 隨機寫 / 循序讀 / 隨機讀 各一輪，再加一輪同步延遲（iodepth=1 + O_SYNC）"
               row "測試檔預設取可用空間的一半、上限 4GB，跑完自動刪除；要壓過 host cache 就先設 DISK_SIZE_MB"
+              row "前四輪的佇列深度預設 32，要看不同深度就先設 DISK_QD"
               row "輸出目錄可用空間：$(df -h "$OPS_STRESS_DIR" 2>/dev/null | awk 'NR==2{print $4}')" ;;
         swap) wmsg "吃到 RAM 的 95% + swap 的 50%，逼出換頁 —— 有觸發 OOM killer 的風險"
               row "開始前會把所有 sshd 的 oom_score_adj 設成 -1000（結束或中斷都會還原），"

@@ -31,6 +31,7 @@ usage() {
   DISK_DIR=./logs   fio 測試檔位置 (測完自動刪除)
   DISK_SIZE_MB=     fio 測試檔大小 MB (空 = 可用空間的一半，上限 4096)
                     要讓「讀取」數據可信就得大過 KVM host 的 cache，通常 8192 起跳
+  DISK_QD=32        磁碟前四輪的佇列深度 (1-256)。第五輪「同步延遲」固定 1
   MON_SEC=3         監看的取樣間隔秒數 (1-60)，調小可以抓到更短的谷底
   RAM_PCT=80        ram 要吃掉「總記憶體」的百分之幾 (1-100)
                     >90 會先回收 page cache、接著狂換頁，機器可能卡到連不進去
@@ -74,6 +75,13 @@ case "${1:-}" in
     cpu|ram|disk|swap|ntp|all) CMD="$1" ;;
     *) usage; exit 2 ;;
 esac
+# 磁碟前四輪的佇列深度。32 是「把盤餵飽、量得到吞吐上限」的常見值，但那也表示
+# 單一 IO 的延遲被藏在佇列後面 -- 想看不同深度下的樣子就調它 (第五輪的同步延遲
+# 固定 iodepth=1，那正是它存在的理由，不受這個參數影響)。
+DISK_QD="${DISK_QD:-32}"
+case "$DISK_QD" in ''|*[!0-9]*) echo "DISK_QD 要是 1-256 的整數，收到: $DISK_QD"; exit 2 ;; esac
+{ [ "$DISK_QD" -ge 1 ] && [ "$DISK_QD" -le 256 ]; } || { echo "DISK_QD 要在 1-256 之間，收到: $DISK_QD"; exit 2; }
+
 # 監看的取樣間隔。預設 3 秒是「夠密又不會把報告灌爆」的折衷，但短促的谷底
 # (MemAvailable 一瞬間掉到底、換頁只噴一兩秒) 就可能整個被跳過。要抓那種就調小。
 MON_SEC="${MON_SEC:-3}"
@@ -128,6 +136,8 @@ BASE_LOAD=""      # 壓力前的 1 分鐘 loadavg
 BASE_AVAIL=""     # 壓力前的 MemAvailable MB
 BASE_SWAPFREE=""  # 壓力前的 SwapFree MB
 BASE_SO=""        # 壓力前的換出速率 KB/s
+BASE_RX=0         # 壓力前的網卡接收 bytes/s
+BASE_TX=0         # 壓力前的網卡傳送 bytes/s
 
 # ---------- 摘要用的全域 ----------
 # 每個 t_* 跑完自己填。沒跑到的維持「未執行」，摘要才會永遠列滿五項，
@@ -427,6 +437,45 @@ oom_dmesg() {
     return 1
 }
 
+# ---------- 網卡流量 ----------
+# 這幾個函式原本是網路測試的一部分，1.6.0 隨那組一起刪掉。1.9.0 放回來的理由不同：
+# CPU 壓測期間如果有人在灌流量，bogo ops 會被軟中斷吃掉一塊，而報告上完全看不出來。
+# 現在監看列與壓力前基準都會帶上網卡收發，流量大到會影響結果時 t_cpu 會直接警告。
+
+# 全網卡 (排除 lo) 的累計收發位元組。/proc/net/dev 的 "eth0:12345" 冒號可能黏著
+# 數字，先把冒號換成空白再切欄。$2=接收、$10=傳送。
+# 一定要「永遠輸出兩個數字」-- 呼叫端是 set -- $(_nic_bytes)，空輸出會讓 set -u 炸掉。
+_nic_bytes() {
+    [ -r /proc/net/dev ] || { echo "0 0"; return; }
+    awk '{sub(/:/," ")} NR>2 && $1!="lo" {rx+=$2; tx+=$10} END{print rx+0, tx+0}' /proc/net/dev
+}
+
+# bytes/s -> 人看得懂的單位
+_hr() {
+    awk -v b="${1:-0}" 'BEGIN{ if(b<0)b=0
+        if(b>=1048576) printf "%.1fMB/s",b/1048576
+        else if(b>=1024) printf "%.0fKB/s",b/1024
+        else printf "%dB/s",b }'
+}
+
+# _peak_rate <rx|tx> -- 從 stdin 的報告片段撈該欄的峰值，回傳 bytes/s。
+# 監看列印的是人看的單位 (101KB/s)，這裡換回數字再取最大 -- 跟 fio 那個 BW
+# 換算是同一招：只比對數字不看單位的話，MB 與 KB 會被當成同一個量級。
+_peak_rate() {
+    awk -v k="$1" '
+        {
+            if (match($0, k "=[0-9.]+[A-Z]*B/s")) {
+                t = substr($0, RSTART, RLENGTH); sub(k "=", "", t)
+                v = t + 0
+                if (t ~ /KB\/s/)      v *= 1024
+                else if (t ~ /MB\/s/) v *= 1048576
+                else if (t ~ /GB\/s/) v *= 1073741824
+                if (v > x) x = v
+            }
+        }
+        END { printf "%d", x+0 }'
+}
+
 # ---------- 壓力前基準 ----------
 # 只有「壓力下」的數字，回答不了「這是壓出來的，還是它本來就長這樣」。
 # 所以開跑前先取一段閒置樣本，後面每一項的摘要都拿它當對照。
@@ -434,7 +483,7 @@ oom_dmesg() {
 # 換頁速率直接從 /proc/vmstat 的 pswpin/pswpout 前後相減算出來，不另外開 vmstat：
 # 整段基準只花 mpstat 那一次取樣的時間，也不會多一個工具相依。
 snapshot_idle() {
-    local secs="$BASE_SECS" pin0 pout0 pin1 pout1 cpu usr sys total_mb
+    local secs="$BASE_SECS" pin0 pout0 pin1 pout1 rx0 tx0 rx1 tx1 cpu usr sys total_mb
     # DUR 比基準還短時不要喧賓奪主 (DUR=3 的冒煙測試不該卡在 5 秒基準上)
     [ "$DUR" -lt "$secs" ] && secs="$DUR"
     sec "0/5" "壓力前基準"
@@ -442,6 +491,7 @@ snapshot_idle() {
 
     set -- $(awk '/^pswpin |^pswpout /{print $2}' /proc/vmstat 2>/dev/null; echo 0 0)
     pin0=$1; pout0=$2
+    set -- $(_nic_bytes); rx0=$1; tx0=$2
 
     if command -v mpstat >/dev/null 2>&1; then
         # 欄位取法跟 _mon_cpu 一樣：以資料行自己的 "all" 當基準往後數，
@@ -466,6 +516,9 @@ snapshot_idle() {
 
     set -- $(awk '/^pswpin |^pswpout /{print $2}' /proc/vmstat 2>/dev/null; echo 0 0)
     pin1=$1; pout1=$2
+    set -- $(_nic_bytes); rx1=$1; tx1=$2
+    BASE_RX=$(( (rx1 - rx0) / secs )); [ "$BASE_RX" -lt 0 ] && BASE_RX=0
+    BASE_TX=$(( (tx1 - tx0) / secs )); [ "$BASE_TX" -lt 0 ] && BASE_TX=0
     # 頁數 -> KB/s。一頁 4KB，這在 x86_64 是固定的。
     BASE_SO=$(awk -v a="$pout0" -v b="$pout1" -v s="$secs" 'BEGIN{ d=(b-a); if(d<0)d=0; printf "%d", d*4/s }')
 
@@ -481,8 +534,9 @@ snapshot_idle() {
     fi
     log "  記憶體  可用 ${BASE_AVAIL}MB / 共 ${total_mb}MB，SwapFree ${BASE_SWAPFREE}MB"
     log "  換頁   換出 ${BASE_SO} KB/s"
+    log "  網卡   收 $(_hr "$BASE_RX") / 發 $(_hr "$BASE_TX")"
 
-    SUM_BASE="steal ${BASE_STEAL:-?}%，load ${BASE_LOAD}，可用 ${BASE_AVAIL}MB，換出 ${BASE_SO} KB/s"
+    SUM_BASE="steal ${BASE_STEAL:-?}%，load ${BASE_LOAD}，可用 ${BASE_AVAIL}MB，換出 ${BASE_SO} KB/s，網卡 收 $(_hr "$BASE_RX") 發 $(_hr "$BASE_TX")"
 
     # 這三件事會讓後面所有數字失真，一開始就要講
     if [ -n "${BASE_STEAL:-}" ] && awk -v s="$BASE_STEAL" 'BEGIN{exit !(s > 5)}'; then
@@ -503,7 +557,8 @@ snapshot_idle() {
 #   load=... stress-ng: info: [22075] dispatching hogs
 #   usr=97% sys=2%
 _mon_cpu() {
-    local ts load cpu
+    local ts load cpu prx ptx pt nrx ntx nt d
+    set -- $(_nic_bytes); prx=$1; ptx=$2; pt=$(date +%s)
     while :; do
         ts=$(date +%H:%M:%S)
         load=$(cut -d' ' -f1-3 /proc/loadavg)
@@ -528,7 +583,13 @@ _mon_cpu() {
                 if (!a) next
                 printf "usr=%s%% sys=%s%% steal=%s%% idle=%s%%", $(a+1), $(a+3), $(a+7), $NF
             }')
-        printf '  %s  load=%s  %s\n' "$ts" "$load" "$cpu" | tee -a "$LOG"
+        # 網卡收發：跟上一輪相減再除以實際經過的秒數 (不是假設 MON_SEC，
+        # 因為 mpstat 那一秒與排程誤差都算在裡面)。
+        set -- $(_nic_bytes); nrx=$1; ntx=$2; nt=$(date +%s)
+        d=$(( nt - pt )); [ "$d" -lt 1 ] && d=1
+        printf '  %s  load=%s  %s  rx=%s tx=%s\n' "$ts" "$load" "$cpu" \
+            "$(_hr $(( (nrx - prx) / d )))" "$(_hr $(( (ntx - ptx) / d )))" | tee -a "$LOG"
+        prx=$nrx; ptx=$ntx; pt=$nt
         # mpstat 1 1 自己已經吃掉一秒，扣掉才會是 MON_SEC 的節奏
         sleep $(( MON_SEC > 1 ? MON_SEC - 1 : 1 ))
     done
@@ -536,7 +597,7 @@ _mon_cpu() {
 t_cpu() {
     sec "1/5" "CPU"
     need stress-ng mpstat || { SUM_CPU="跳過 (缺工具)"; return 1; }
-    local n m ops steal
+    local n m ops steal rxpeak txpeak
     n=$(getconf _NPROCESSORS_ONLN)
     log "拉滿 $n 核，${DUR}s，方法 all"
     m=$(mark)
@@ -549,6 +610,13 @@ t_cpu() {
     #   $4=stressor $5=bogo ops ...      $(NF-1)=bogo ops/s (real time)
     ops=$(since "$m" | awk '$4=="cpu" && $5 ~ /^[0-9]+$/ {print $(NF-1)}' | tail -1)
     steal=$(since "$m" | grep -oE 'steal=[0-9.]+' | cut -d= -f2 | sort -rn | head -1)
+    # 有人在灌流量的話，軟中斷會吃掉一塊 CPU，bogo ops 就不是這台的真實算力。
+    # 平常機器閒著時這段完全安靜，只有真的有量才會講。
+    rxpeak=$(since "$m" | _peak_rate rx)
+    txpeak=$(since "$m" | _peak_rate tx)
+    if [ "${rxpeak:-0}" -ge 10485760 ] || [ "${txpeak:-0}" -ge 10485760 ]; then
+        warn "測試期間網卡峰值 收 $(_hr "$rxpeak") / 發 $(_hr "$txpeak") -> 這台不是閒著的，軟中斷會分掉 CPU，bogo ops 偏低是正常的"
+    fi
     SUM_CPU="${ops:-?} bogo ops/s (${n} 核)，steal 峰值 ${steal:-?}% (壓力前 ${BASE_STEAL:-?}%)"
     # steal 超過幾個百分點就代表 host 上有人在跟你搶 CPU
     if [ -n "$steal" ] && awk -v s="$steal" 'BEGIN{exit !(s > 5)}'; then
@@ -716,7 +784,10 @@ t_disk() {
     # DUR < 5 時整數除法會得到 0，而 fio 的 --runtime=0 是「不設限」，
     # 配上 --time_based 就永遠跑不完。至少留 1 秒。
     rt=$(( DUR / 5 )); [ "$rt" -lt 1 ] && rt=1
-    log "每個模式跑 ${rt}s (DUR 五等分)"
+    log "每個模式跑 ${rt}s (DUR 五等分)，前四輪 iodepth=${DISK_QD}，同步延遲那輪固定 1"
+    # 深度開太大只是讓 IO 在佇列裡排隊：IOPS 早就到頂，延遲卻線性往上加，
+    # 於是「p99 很難看」變成是自己造成的，不是磁碟的問題。
+    [ "$DISK_QD" -gt 64 ] && warn "DISK_QD=${DISK_QD} -> 多數雲端磁碟在 qd>64 之後 IOPS 不再增加，只有延遲線性上升"
     # 太短的話 iodepth=32 只發得出幾十個 IO，百分位數純粹是雜訊。
     # 不講的話它會安靜地產出看起來很正常、實際沒意義的數字。
     [ "$rt" -lt 5 ] && warn "每個模式只有 ${rt}s，IO 樣本太少，百分位數不具參考價值 (建議 DUR>=240)"
@@ -733,10 +804,10 @@ t_disk() {
     SUM_DISK=""
     # 標籤一律四個字：摘要那幾列是 printf 對齊的，而 bash 的 %-Ns 是按 byte 補空白、
     # 中文字卻佔兩欄，長度不一致的話整排會歪掉。
-    for mode in "write 循序寫入 1M libaio 32 0" \
-                "randwrite 隨機寫入 4k libaio 32 0" \
-                "read 循序讀取 1M libaio 32 0" \
-                "randread 隨機讀取 4k libaio 32 0" \
+    for mode in "write 循序寫入 1M libaio $DISK_QD 0" \
+                "randwrite 隨機寫入 4k libaio $DISK_QD 0" \
+                "read 循序讀取 1M libaio $DISK_QD 0" \
+                "randread 隨機讀取 4k libaio $DISK_QD 0" \
                 "randwrite 同步延遲 4k psync 1 1"; do
         set -- $mode
         echo "$THIN" | tee -a "$LOG"
