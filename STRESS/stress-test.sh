@@ -31,6 +31,7 @@ usage() {
   DISK_DIR=./logs   fio 測試檔位置 (測完自動刪除)
   DISK_SIZE_MB=     fio 測試檔大小 MB (空 = 可用空間的一半，上限 4096)
                     要讓「讀取」數據可信就得大過 KVM host 的 cache，通常 8192 起跳
+  MON_SEC=3         監看的取樣間隔秒數 (1-60)，調小可以抓到更短的谷底
   RAM_PCT=80        ram 要吃掉「總記憶體」的百分之幾 (1-100)
                     >90 會先回收 page cache、接著狂換頁，機器可能卡到連不進去
 
@@ -73,6 +74,12 @@ case "${1:-}" in
     cpu|ram|disk|swap|ntp|all) CMD="$1" ;;
     *) usage; exit 2 ;;
 esac
+# 監看的取樣間隔。預設 3 秒是「夠密又不會把報告灌爆」的折衷，但短促的谷底
+# (MemAvailable 一瞬間掉到底、換頁只噴一兩秒) 就可能整個被跳過。要抓那種就調小。
+MON_SEC="${MON_SEC:-3}"
+case "$MON_SEC" in ''|*[!0-9]*) echo "MON_SEC 要是 1-60 的整數，收到: $MON_SEC"; exit 2 ;; esac
+{ [ "$MON_SEC" -ge 1 ] && [ "$MON_SEC" -le 60 ]; } || { echo "MON_SEC 要在 1-60 之間，收到: $MON_SEC"; exit 2; }
+
 # fio 測試檔大小。留空 = 沿用「可用空間的一半、上限 4096MB」的自動算法。
 # 會想手動指定通常只有一個原因：自動算出來的檔案比 host 的 cache 小，
 # 讀取數據等於在量 host RAM。要壓過 cache 就得把它開大 (見 t_disk 的註解)。
@@ -112,6 +119,16 @@ WORK_PID=""
 CAP_FILE=""
 CAP_OUT=""
 
+# ---------- 壓力前基準 ----------
+# 只有壓力下的數字，回答不了「這是壓出來的，還是它本來就這樣」。
+# 開跑前先取一段閒置樣本，後面每一項的摘要都拿它當對照。
+BASE_SECS=5
+BASE_STEAL=""     # 壓力前的 CPU steal %
+BASE_LOAD=""      # 壓力前的 1 分鐘 loadavg
+BASE_AVAIL=""     # 壓力前的 MemAvailable MB
+BASE_SWAPFREE=""  # 壓力前的 SwapFree MB
+BASE_SO=""        # 壓力前的換出速率 KB/s
+
 # ---------- 摘要用的全域 ----------
 # 每個 t_* 跑完自己填。沒跑到的維持「未執行」，摘要才會永遠列滿五項，
 # 讓人一眼看出「這項沒測」而不是「這項沒問題」-- 兩者差很多。
@@ -120,6 +137,7 @@ SUM_RAM="未執行"
 SUM_DISK="未執行"
 SUM_SWAP="未執行"
 SUM_NTP="未執行 (需單獨執行 ntp)"
+SUM_BASE="未取得"
 
 WARNINGS=""
 
@@ -225,6 +243,10 @@ report_summary() {
       echo "  摘要${1:+  ($1)}"
       echo "$RULE"
       echo
+      # 標籤補兩個空白：sum_row 用 %-6s 對齊，而那是按 byte 補的 --
+      # 「基準」兩個中文字剛好 6 bytes 卻只佔 4 欄，不補的話這一列會比下面短兩格。
+      sum_row "基準  " "$SUM_BASE"
+      echo
       sum_row "CPU"  "$SUM_CPU"
       sum_row "RAM"  "$SUM_RAM"
       sum_row "DISK" "$SUM_DISK"
@@ -246,6 +268,8 @@ report_summary() {
       echo "  * VM 內的磁碟「讀取」數據普遍不可信 -- guest 的 direct=1 繞不過"
       echo "    hypervisor 的 cache。以「寫入的 p99 尾端延遲」為準。"
       echo "  * 平均延遲會把快慢兩群混在一起。p99 才是你的服務真正會遇到的。"
+      echo "  * 先看「基準」那一列：壓力還沒開始就有 steal、就在換頁、可用記憶體就"
+      echo "    很低的話，後面量到的東西有一部分根本不是你壓出來的。"
       echo
       echo "  結束時間      $(date '+%F %T %Z')"
       echo "  完整報告      $LOG"
@@ -403,6 +427,75 @@ oom_dmesg() {
     return 1
 }
 
+# ---------- 壓力前基準 ----------
+# 只有「壓力下」的數字，回答不了「這是壓出來的，還是它本來就長這樣」。
+# 所以開跑前先取一段閒置樣本，後面每一項的摘要都拿它當對照。
+#
+# 換頁速率直接從 /proc/vmstat 的 pswpin/pswpout 前後相減算出來，不另外開 vmstat：
+# 整段基準只花 mpstat 那一次取樣的時間，也不會多一個工具相依。
+snapshot_idle() {
+    local secs="$BASE_SECS" pin0 pout0 pin1 pout1 cpu usr sys total_mb
+    # DUR 比基準還短時不要喧賓奪主 (DUR=3 的冒煙測試不該卡在 5 秒基準上)
+    [ "$DUR" -lt "$secs" ] && secs="$DUR"
+    sec "0/5" "壓力前基準"
+    log "取樣 ${secs}s -- 壓力還沒開始，這組數字是後面所有比較的對照"
+
+    set -- $(awk '/^pswpin |^pswpout /{print $2}' /proc/vmstat 2>/dev/null; echo 0 0)
+    pin0=$1; pout0=$2
+
+    if command -v mpstat >/dev/null 2>&1; then
+        # 欄位取法跟 _mon_cpu 一樣：以資料行自己的 "all" 當基準往後數，
+        # 不要拿表頭的欄號去索引 (12 小時制的時間會多一欄，整排錯位)。
+        cap_run env LC_ALL=C mpstat "$secs" 1
+        cpu=$(printf '%s\n' "$CAP_OUT" | awk '
+            /Average|平均/ {
+                a = 0
+                for (i = 1; i <= NF; i++) if ($i == "all") a = i
+                if (!a) next
+                print $(a+1), $(a+3), $(a+7), $NF
+            }')
+    else
+        log "  (沒有 mpstat，這段只取記憶體與換頁)"
+        isleep "$secs"
+        cpu=""
+    fi
+    if [ -n "$cpu" ]; then
+        set -- $cpu
+        usr="$1"; sys="$2"; BASE_STEAL="$3"
+    fi
+
+    set -- $(awk '/^pswpin |^pswpout /{print $2}' /proc/vmstat 2>/dev/null; echo 0 0)
+    pin1=$1; pout1=$2
+    # 頁數 -> KB/s。一頁 4KB，這在 x86_64 是固定的。
+    BASE_SO=$(awk -v a="$pout0" -v b="$pout1" -v s="$secs" 'BEGIN{ d=(b-a); if(d<0)d=0; printf "%d", d*4/s }')
+
+    BASE_LOAD=$(cut -d' ' -f1 /proc/loadavg)
+    BASE_AVAIL=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+    BASE_SWAPFREE=$(awk '/SwapFree/{print int($2/1024)}' /proc/meminfo)
+    total_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+
+    if [ -n "${BASE_STEAL:-}" ]; then
+        log "  CPU   usr=${usr}% sys=${sys}% steal=${BASE_STEAL}%  load=${BASE_LOAD}"
+    else
+        log "  CPU   load=${BASE_LOAD}"
+    fi
+    log "  記憶體  可用 ${BASE_AVAIL}MB / 共 ${total_mb}MB，SwapFree ${BASE_SWAPFREE}MB"
+    log "  換頁   換出 ${BASE_SO} KB/s"
+
+    SUM_BASE="steal ${BASE_STEAL:-?}%，load ${BASE_LOAD}，可用 ${BASE_AVAIL}MB，換出 ${BASE_SO} KB/s"
+
+    # 這三件事會讓後面所有數字失真，一開始就要講
+    if [ -n "${BASE_STEAL:-}" ] && awk -v s="$BASE_STEAL" 'BEGIN{exit !(s > 5)}'; then
+        warn "壓力還沒開始 steal 就有 ${BASE_STEAL}% -> host 已經在超賣，後面的分數都要打折看"
+    fi
+    [ "${BASE_SO:-0}" -gt 0 ] 2>/dev/null && \
+        warn "壓力還沒開始就在換頁 (換出 ${BASE_SO} KB/s) -> 這台的記憶體本來就不夠用"
+    if [ "$total_mb" -gt 0 ] && [ "$(( BASE_AVAIL * 100 / total_mb ))" -lt 15 ]; then
+        warn "壓力還沒開始可用記憶體只剩 ${BASE_AVAIL}MB (總量的 $(( BASE_AVAIL * 100 / total_mb ))%) -> ram/swap 會比預期更早觸發 OOM"
+    fi
+    return 0
+}
+
 # ---------- CPU ----------
 # 注意：一定要「整行組好再印」，不能邊算邊印。
 # mpstat 1 1 要花整整一秒才回來，如果先 printf 前半段再等它，
@@ -436,7 +529,8 @@ _mon_cpu() {
                 printf "usr=%s%% sys=%s%% steal=%s%% idle=%s%%", $(a+1), $(a+3), $(a+7), $NF
             }')
         printf '  %s  load=%s  %s\n' "$ts" "$load" "$cpu" | tee -a "$LOG"
-        sleep 3
+        # mpstat 1 1 自己已經吃掉一秒，扣掉才會是 MON_SEC 的節奏
+        sleep $(( MON_SEC > 1 ? MON_SEC - 1 : 1 ))
     done
 }
 t_cpu() {
@@ -455,7 +549,7 @@ t_cpu() {
     #   $4=stressor $5=bogo ops ...      $(NF-1)=bogo ops/s (real time)
     ops=$(since "$m" | awk '$4=="cpu" && $5 ~ /^[0-9]+$/ {print $(NF-1)}' | tail -1)
     steal=$(since "$m" | grep -oE 'steal=[0-9.]+' | cut -d= -f2 | sort -rn | head -1)
-    SUM_CPU="${ops:-?} bogo ops/s (${n} 核)，steal 峰值 ${steal:-?}%"
+    SUM_CPU="${ops:-?} bogo ops/s (${n} 核)，steal 峰值 ${steal:-?}% (壓力前 ${BASE_STEAL:-?}%)"
     # steal 超過幾個百分點就代表 host 上有人在跟你搶 CPU
     if [ -n "$steal" ] && awk -v s="$steal" 'BEGIN{exit !(s > 5)}'; then
         warn "CPU steal 峰值 ${steal}% -> host 超賣，這個 bogo ops 不代表這台 VM 的實力"
@@ -467,7 +561,7 @@ _mon_ram() {
     while :; do
         awk '/MemTotal|MemAvailable|SwapFree/{sub(/:$/,"",$1); printf "  %s=%dMB",$1,$2/1024} END{print ""}' \
             /proc/meminfo | tee -a "$LOG"
-        sleep 3
+        sleep "$MON_SEC"
     done
 }
 t_ram() {
@@ -503,7 +597,7 @@ t_ram() {
 
     ops=$(since "$m" | awk '$4=="vm" && $5 ~ /^[0-9]+$/ {print $(NF-1)}' | tail -1)
     minavail=$(since "$m" | grep -oE 'MemAvailable=[0-9]+' | cut -d= -f2 | sort -n | head -1)
-    SUM_RAM="${ops:-?} bogo ops/s，配置 ${want_mb}MB (總記憶體 ${RAM_PCT}%)，最低可用 ${minavail:-?}MB"
+    SUM_RAM="${ops:-?} bogo ops/s，配置 ${want_mb}MB (總記憶體 ${RAM_PCT}%)，最低可用 ${minavail:-?}MB (壓力前 ${BASE_AVAIL:-?}MB)"
     if oom_dmesg; then
         warn "RAM 測試期間出現 OOM 記錄，請確認被殺掉的是哪些程序"
         SUM_RAM="$SUM_RAM，!! 有 OOM 記錄"
@@ -524,13 +618,14 @@ _mon_swap() {
         mem=$(awk '/SwapTotal|SwapFree|MemAvailable/{sub(/:$/,"",$1); printf "  %s=%dMB",$1,$2/1024}' /proc/meminfo)
         swp=$(vmstat 1 2 2>/dev/null | awk 'NR==4{printf "  si=%s so=%s",$7,$8}')
         printf '%s%s\n' "$mem" "$swp" | tee -a "$LOG"
-        sleep 2
+        # vmstat 1 2 自己已經吃掉一秒，扣掉才會是 MON_SEC 的節奏
+        sleep $(( MON_SEC > 1 ? MON_SEC - 1 : 1 ))
     done
 }
 t_swap() {
     sec "4/5" "SWAP"
     need stress-ng vmstat || { SUM_SWAP="跳過 (缺工具)"; return 1; }
-    local total_mb swap_mb target_mb m maxso minavail
+    local total_mb swap_mb target_mb m maxso avgso nso nsample sostat minavail
     total_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
     swap_mb=$(awk '/SwapTotal/{print int($2/1024)}' /proc/meminfo)
     swap_mb="${swap_mb:-0}"
@@ -549,14 +644,31 @@ t_swap() {
     run_fg stress-ng --vm 1 --vm-bytes "${target_mb}M" --vm-keep -t "${DUR}s" --metrics-brief
     mon_stop
 
-    maxso=$(since "$m" | grep -oE 'so=[0-9]+' | cut -d= -f2 | sort -rn | head -1)
+    # 峰值一個數字看不出「是全程在換頁，還是只噴了一下」。
+    # 一次 awk 同時算出峰值、平均、有在換頁的取樣數與總取樣數。
+    set -- $(since "$m" | grep -oE 'so=[0-9]+' | cut -d= -f2 | awk '
+        { n++; s += $1; if ($1 > x) x = $1; if ($1 > 0) a++ }
+        END { printf "%d %d %d %d", x+0, (n ? s/n : 0), a+0, n+0 }')
+    maxso=$1; avgso=$2; nso=$3; nsample=$4
     minavail=$(since "$m" | grep -oE 'MemAvailable=[0-9]+' | cut -d= -f2 | sort -n | head -1)
+
+    if [ "${nsample:-0}" -gt 0 ]; then
+        sostat="換出峰值 ${maxso} KB/s、平均 ${avgso} KB/s，${nso}/${nsample} 次取樣有在換頁"
+    else
+        sostat="換出峰值 ${maxso:-?} KB/s"
+    fi
+    # 壓力前就在換頁的話，這一項量到的是「原本就有的 + 壓出來的」
+    [ "${BASE_SO:-0}" -gt 0 ] 2>/dev/null && sostat="$sostat (壓力前就有 ${BASE_SO} KB/s)"
+    # 全程都沒換頁 = 這台的 RAM+swap 根本沒被逼到，數字別當成「撐得住」
+    if [ "${nso:-0}" = "0" ] && [ "${nsample:-0}" -gt 0 ]; then
+        warn "整段測試都沒觀察到換出 -> 沒有真的逼出換頁，這組數字說明不了 swap 的表現"
+    fi
 
     if oom_dmesg; then
         warn "SWAP 測試期間出現 OOM 記錄，請確認被殺掉的是哪些程序"
-        SUM_SWAP="換出峰值 ${maxso:-?} KB/s，最低可用 ${minavail:-?}MB，!! 有 OOM 記錄"
+        SUM_SWAP="${sostat}，最低可用 ${minavail:-?}MB，!! 有 OOM 記錄"
     else
-        SUM_SWAP="換出峰值 ${maxso:-?} KB/s，最低可用 ${minavail:-?}MB，無 OOM"
+        SUM_SWAP="${sostat}，最低可用 ${minavail:-?}MB，無 OOM"
     fi
 }
 
@@ -729,6 +841,10 @@ t_ntp() {
 # 參數在檔案上半部就驗完了 (見「參數解析」)，這裡直接開報告。
 LOG="$LOGDIR/$CMD-$TS.log"
 report_head "$CMD"
+
+# 每次執行都先取基準：沒有對照的話，「steal 3%」「可用 200MB」這種數字
+# 分不出是壓出來的還是這台本來就這樣。
+snapshot_idle
 
 case "$CMD" in
     cpu)   t_cpu ;;

@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.7
+OPS_VERSION=1.8
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -941,6 +941,7 @@ stress_run() {
     printf '\n'
     row "每項持續 ${CB}${STRESS_DUR}${C0} 秒"
     row "報告寫入 ${CB}${OPS_STRESS_DIR}/logs/${_cmd}-<時間戳>.log${C0}"
+    row "開跑前會先取 5 秒的${CB}壓力前基準${C0}（steal / 可用記憶體 / 換頁），摘要拿它跟壓力下的數字對照"
     dim "   Ctrl-C 中斷仍會輸出摘要並清乾淨，前面跑完的項目不會白費"
     printf '\n'
     wmsg "這會真的把機器操到滿載，不要在正式環境跑"
