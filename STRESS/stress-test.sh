@@ -29,6 +29,8 @@ usage() {
 參數:
   DUR=60            每項持續秒數
   DISK_DIR=./logs   fio 測試檔位置 (測完自動刪除)
+  DISK_SIZE_MB=     fio 測試檔大小 MB (空 = 可用空間的一半，上限 4096)
+                    要讓「讀取」數據可信就得大過 KVM host 的 cache，通常 8192 起跳
   RAM_PCT=80        ram 要吃掉「總記憶體」的百分之幾 (1-100)
                     >90 會先回收 page cache、接著狂換頁，機器可能卡到連不進去
 
@@ -71,6 +73,15 @@ case "${1:-}" in
     cpu|ram|disk|swap|ntp|all) CMD="$1" ;;
     *) usage; exit 2 ;;
 esac
+# fio 測試檔大小。留空 = 沿用「可用空間的一半、上限 4096MB」的自動算法。
+# 會想手動指定通常只有一個原因：自動算出來的檔案比 host 的 cache 小，
+# 讀取數據等於在量 host RAM。要壓過 cache 就得把它開大 (見 t_disk 的註解)。
+DISK_SIZE_MB="${DISK_SIZE_MB:-}"
+if [ -n "$DISK_SIZE_MB" ]; then
+    case "$DISK_SIZE_MB" in ''|*[!0-9]*) echo "DISK_SIZE_MB 要是正整數 (MB)，收到: $DISK_SIZE_MB"; exit 2 ;; esac
+    [ "$DISK_SIZE_MB" -ge 512 ] || { echo "DISK_SIZE_MB 至少 512，收到: $DISK_SIZE_MB"; exit 2; }
+fi
+
 # 相對於 CWD 建立，再轉成絕對路徑存起來。
 # 轉絕對路徑有兩個好處：報告裡印出的路徑不會有「這是相對誰」的疑問，
 # 而且之後任何 cd 都不會讓 trap 清錯檔案。
@@ -553,13 +564,19 @@ t_swap() {
 t_disk() {
     sec "3/5" "DISK"
     need fio || { SUM_DISK="跳過 (缺工具)"; return 1; }
-    local avail_mb size mem_mb rt mode out iops bw_str bw p99 punit p99ms line
+    local avail_mb size mem_mb rt mode out iops bw_str bw p99 punit p99ms line extra
     avail_mb=$(df -Pm "$DISK_DIR" | awk 'NR==2{print $4}')
-    # 測試檔要大於 RAM 才不會被 page cache 整份吃掉；空間不夠就取可用空間的一半
-    size=$(( avail_mb / 2 ))
-    [ "$size" -gt 4096 ] && size=4096
-    [ "$size" -lt 512 ] && { log "$DISK_DIR 只剩 ${avail_mb}MB，空間不足"; SUM_DISK="跳過 (空間不足，只剩 ${avail_mb}MB)"; return 1; }
-    log "$DISK_DIR 可用 ${avail_mb}MB -> 測試檔 ${size}MB"
+    if [ -n "$DISK_SIZE_MB" ]; then
+        size="$DISK_SIZE_MB"
+        [ "$size" -gt "$avail_mb" ] && { log "$DISK_DIR 只剩 ${avail_mb}MB，放不下 DISK_SIZE_MB=${size}MB"; SUM_DISK="跳過 (空間不足，要 ${size}MB 只剩 ${avail_mb}MB)"; return 1; }
+        log "$DISK_DIR 可用 ${avail_mb}MB -> 測試檔 ${size}MB (DISK_SIZE_MB 指定)"
+    else
+        # 沒指定就取可用空間的一半，上限 4096MB
+        size=$(( avail_mb / 2 ))
+        [ "$size" -gt 4096 ] && size=4096
+        [ "$size" -lt 512 ] && { log "$DISK_DIR 只剩 ${avail_mb}MB，空間不足"; SUM_DISK="跳過 (空間不足，只剩 ${avail_mb}MB)"; return 1; }
+        log "$DISK_DIR 可用 ${avail_mb}MB -> 測試檔 ${size}MB"
+    fi
     log "註: direct=1 繞過 guest 的 page cache，但繞不過 KVM host 的"
 
     # 存全域而不是 local，頂層的 INT/TERM trap 才清得到同一個檔案
@@ -567,24 +584,43 @@ t_disk() {
     trap 'rm -f "$FIO_FILE"; FIO_FILE=""; log "已清掉測試檔"' RETURN
 
     mem_mb=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
-    [ "$size" -lt "$mem_mb" ] && warn "測試檔 ${size}MB < RAM ${mem_mb}MB，讀取數據會被 cache 汙染"
+    if [ "$size" -lt "$mem_mb" ]; then
+        warn "測試檔 ${size}MB < RAM ${mem_mb}MB，讀取數據會被 cache 汙染"
+        log "   要壓過 cache 就把檔案開大: DISK_SIZE_MB=$(( mem_mb * 2 )) (需要同等的可用空間)"
+    fi
 
-    # DUR < 4 時整數除法會得到 0，而 fio 的 --runtime=0 是「不設限」，
+    # DUR < 5 時整數除法會得到 0，而 fio 的 --runtime=0 是「不設限」，
     # 配上 --time_based 就永遠跑不完。至少留 1 秒。
-    rt=$(( DUR / 4 )); [ "$rt" -lt 1 ] && rt=1
-    log "每個模式跑 ${rt}s (DUR 四等分)"
+    rt=$(( DUR / 5 )); [ "$rt" -lt 1 ] && rt=1
+    log "每個模式跑 ${rt}s (DUR 五等分)"
     # 太短的話 iodepth=32 只發得出幾十個 IO，百分位數純粹是雜訊。
     # 不講的話它會安靜地產出看起來很正常、實際沒意義的數字。
     [ "$rt" -lt 5 ] && warn "每個模式只有 ${rt}s，IO 樣本太少，百分位數不具參考價值 (建議 DUR>=240)"
 
+    # 模式規格: <fio rw> <標籤> <bs> <ioengine> <iodepth> <sync>
+    #
+    # 循序寫排第一個是刻意的：檔案由這一輪的 direct 寫入建立起來。讀取與隨機模式
+    # 需要檔案先存在，fio 會自己先 layout 一遍 —— 那一遍是 buffered 的，等於在
+    # 開始量之前先把整個檔案灌進 host cache，既浪費時間又汙染後面的讀取數據。
+    #
+    # 最後一項是「同步寫延遲」：iodepth=1 + O_SYNC + psync，一次只發一個 IO 並等它
+    # 真的落地。前四項的 iodepth=32 量的是「排隊排滿時的吞吐」，把單一 IO 的延遲藏
+    # 在佇列後面；資料庫 commit、fsync、寫 log 感受到的是這個數字，不是那個吞吐。
     SUM_DISK=""
-    for mode in "randread 隨機讀" "randwrite 隨機寫" "read 循序讀" "write 循序寫"; do
+    # 標籤一律四個字：摘要那幾列是 printf 對齊的，而 bash 的 %-Ns 是按 byte 補空白、
+    # 中文字卻佔兩欄，長度不一致的話整排會歪掉。
+    for mode in "write 循序寫入 1M libaio 32 0" \
+                "randwrite 隨機寫入 4k libaio 32 0" \
+                "read 循序讀取 1M libaio 32 0" \
+                "randread 隨機讀取 4k libaio 32 0" \
+                "randwrite 同步延遲 4k psync 1 1"; do
         set -- $mode
         echo "$THIN" | tee -a "$LOG"
-        log "$2 ($1)"
+        log "$2 ($1 bs=$3 iodepth=$5${6:+ sync=$6})"
+        [ "$6" = "1" ] && extra="--sync=1" || extra=""
+        # shellcheck disable=SC2086
         cap_run fio --name="$1" --filename="$FIO_FILE" --size="${size}M" \
-            --rw="$1" --bs=$([ "${1#rand}" = "$1" ] && echo 1M || echo 4k) \
-            --ioengine=libaio --iodepth=32 --direct=1 \
+            --rw="$1" --bs="$3" --ioengine="$4" --iodepth="$5" $extra --direct=1 \
             --runtime="$rt" --time_based --group_reporting
         out="$CAP_OUT"
 

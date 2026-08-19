@@ -49,7 +49,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.6
+ OPS-command 運維工具箱  v1.7
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
@@ -148,6 +148,7 @@ bash <(curl -fsSL .../ops.sh) doctor
 | `OPS_SSH_DIR` | `SSH/` 腳本的產出目錄，預設 `/var/log/OPS-ssh`；`ops.sh` 會傳給子腳本 |
 | `OPS_STRESS_DIR` | 壓測報告的輸出目錄（報告落在它底下的 `logs/`），預設是執行 `ops.sh` 時所在的目錄，選單 `s` -> `o` 也能改 |
 | `RAM_PCT` | 記憶體壓測要吃掉「總記憶體」的百分之幾，預設 80，選單 `s` -> `p` 也能改 |
+| `DISK_SIZE_MB` | 磁碟壓測的 fio 測試檔大小（MB），預設取可用空間的一半、上限 4096；要讓「讀取」數據不被 KVM host cache 汙染就得開大 |
 | `NO_COLOR` | 關閉顏色 |
 
 `SSH/` 底下兩支腳本產出的東西（換埠狀態、設定檔備份、看門狗、操作日誌、取證報告、
