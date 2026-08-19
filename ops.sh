@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.5
+OPS_VERSION=1.6
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -526,7 +526,7 @@ menu() {
     row "b) 進入封鎖選單    ${CD}手動封鎖 / 解封 / 白名單 / 排行，底層走 fail2ban${C0}"
     printf '\n'
     sect "壓力測試  (STRESS/stress-test.sh)"
-    row "s) 進入壓測選單    ${CD}CPU / 記憶體 / 磁碟 / SWAP / NTP / 網路，會把機器操到滿載${C0}"
+    row "s) 進入壓測選單    ${CD}CPU / 記憶體 / 磁碟 / SWAP / NTP，會把機器操到滿載${C0}"
     printf '\n'
     sect "系統"
     row "9) 更換套件來源鏡像 ${CD}呼叫 linuxmirrors.cn 的外部腳本${C0}"
@@ -746,7 +746,7 @@ act_f2b_menu() {
 #   1. 它是 bash 腳本（local / pipefail / {1..78}），不是 POSIX sh，要用 bash 呼叫。
 #   2. 報告一律寫進「當下工作目錄」底下的 logs/，不吃路徑參數 —— 所以是 cd 過去
 #      再呼叫，而不是傳參數進去。
-#   3. 參數全部走環境變數（DUR / URL / DL_URL …），選單先問完再組起來執行。
+#   3. 參數全部走環境變數（DUR / RAM_PCT / DISK_DIR），選單先問完再帶進去。
 #   這些測試會真的把機器操到滿載，每一項執行前都先把「會發生什麼」攤開來再問。
 # =========================================================
 stress_guard() {
@@ -770,21 +770,16 @@ stress_tools_of() {
         swap)     echo "stress-ng vmstat" ;;
         ntp)      echo "chronyc" ;;
         all)      echo "stress-ng mpstat fio vmstat" ;;
-        baseline) echo "wrk" ;;
-        traffic)  echo "curl" ;;
-        mixed)    echo "wrk curl" ;;
     esac
 }
 
-# 工具 -> 套件名。發行版之間差在 procps 系列與 wrk 的來源。
+# 工具 -> 套件名。發行版之間只差在 procps 系列的名字。
 stress_pkg_for() {
     case "$1" in
         stress-ng) echo stress-ng ;;
         mpstat)    echo sysstat ;;
         fio)       echo fio ;;
         chronyc)   echo chrony ;;
-        curl)      echo curl ;;
-        wrk)       echo wrk ;;
         vmstat)    case "$PKG" in apk|apt) echo procps ;; *) echo procps-ng ;; esac ;;
         *)         echo "$1" ;;
     esac
@@ -802,7 +797,7 @@ stress_missing() {
 # 選單標頭那行「工具 …」的內容
 stress_tool_status() {
     _out=''
-    for _t in stress-ng fio mpstat vmstat chronyc wrk curl; do
+    for _t in stress-ng fio mpstat vmstat chronyc; do
         if has "$_t"; then _out="$_out $_t $CG$MK_OK$C0 "
         else               _out="$_out $CD$_t$C0 $CR$MK_NO$C0 "
         fi
@@ -816,9 +811,6 @@ stress_check_deps() {
     [ -z "$_miss" ] && return 0
     nomsg "$1 需要的工具還沒裝：$_miss"
     row "按 i 安裝，或自行執行：$PKG_INSTALL $(for _t in $_miss; do stress_pkg_for "$_t"; done | sort -u | tr '\n' ' ')"
-    case " $_miss " in
-        *' wrk '*) row "wrk 不在 RHEL 系的 base repo，需要 EPEL 或自行編譯 https://github.com/wg/wrk" ;;
-    esac
     return 1
 }
 
@@ -826,9 +818,9 @@ stress_install() {
     printf '\n'
     sect "安裝壓測相依套件"
 
-    # 把七項工具缺的全部湊齊一次裝完，而不是每個項目跑到才裝一次
+    # 把五項工具缺的全部湊齊一次裝完，而不是每個項目跑到才裝一次
     _miss=''
-    for _t in stress-ng fio mpstat vmstat chronyc wrk curl; do
+    for _t in stress-ng fio mpstat vmstat chronyc; do
         has "$_t" || _miss="$_miss $_t"
     done
     _miss="${_miss# }"
@@ -842,20 +834,17 @@ stress_install() {
     fi
 
     _pkgs=$(for _t in $_miss; do stress_pkg_for "$_t"; done | sort -u | tr '\n' ' ' | sed 's/ *$//')
-    # RHEL 系的 stress-ng 與 wrk 都在 EPEL，沒先開就會是「找不到套件」
+    # RHEL 系的 stress-ng 在 EPEL，沒先開就會是「找不到套件」
     _epel=0
     if [ "$OS_FAMILY" = rhel ]; then
         case " $_miss " in
-            *' stress-ng '*|*' wrk '*) _epel=1 ;;
+            *' stress-ng '*) _epel=1 ;;
         esac
     fi
 
     row "缺少：${CB}${_miss}${C0}"
-    [ "$_epel" = 1 ] && row "將先安裝 ${CB}epel-release${C0}（stress-ng / wrk 在 EPEL）"
+    [ "$_epel" = 1 ] && row "將先安裝 ${CB}epel-release${C0}（stress-ng 在 EPEL）"
     row "將要執行：${CB}${PKG_INSTALL} ${_pkgs}${C0}"
-    case " $_miss " in
-        *' wrk '*) dim "   wrk 在部分發行版沒有現成套件，裝不起來就自行編譯 https://github.com/wg/wrk" ;;
-    esac
     printf '\n'
     need_root || return 0
     confirm "要執行嗎？" || return 0
@@ -921,14 +910,12 @@ stress_set_ram_pct() {
     okmsg "記憶體配置比例改為 ${STRESS_RAM_PCT}%"
 }
 
-# 執行一個項目。$1 = cpu/ram/disk/swap/ntp/all/baseline/traffic/mixed
+# 執行一個項目。$1 = cpu/ram/disk/swap/ntp/all
 stress_run() {
     _cmd=$1
     stress_guard || return 0
     need_root || return 0
     stress_check_deps "$_cmd" || return 0
-
-    _url=''; _dl=''; _workers=4
 
     printf '\n'
     sect "壓力測試：$_cmd"
@@ -950,59 +937,9 @@ stress_run() {
               row "預估耗時：約 $(( STRESS_DUR * 4 / 60 + 1 )) 分鐘" ;;
     esac
 
-    # 網路測試的目標是「你授權要打的東西」，沒有預設值，一定要問
-    case "$_cmd" in
-        baseline|mixed)
-            row "wrk 會對目標產生真實高併發請求（預設 2 執行緒 / 50 連線）"
-            nomsg "只能填你自己有權壓測的網站，打別人的站等同一次小型 DoS"
-            ask_default "壓測目標 URL（例 http://127.0.0.1/）：" "${URL:-}"
-            _url="$REPLY_VAL"
-            case "$_url" in
-                http://*|https://*) : ;;
-                '') printf ' 已取消\n'; return 0 ;;
-                *)  nomsg "URL 要以 http:// 或 https:// 開頭"; return 0 ;;
-            esac ;;
-    esac
-    case "$_cmd" in
-        traffic|mixed)
-            row "curl 會反覆下載到測試結束，內容丟 /dev/null，不落磁碟"
-            row "建議用你自己控制的來源；公開測速檔只適合短時間驗證，別長時間連續灌"
-            ask_default "下載來源 DL_URL（逗號分隔可多個）：" "${DL_URL:-}"
-            _dl="$REPLY_VAL"
-            [ -z "$_dl" ] && { printf ' 已取消\n'; return 0; }
-            # 逗號分隔可以給多個來源，所以要逐段驗：只比對整串開頭的話，
-            # http://a,ftp://b 會過關，要等 curl 跑起來才發作
-            _bad=''; _rest="$_dl"
-            while [ -n "$_rest" ]; do
-                case "$_rest" in
-                    *,*) _one="${_rest%%,*}"; _rest="${_rest#*,}" ;;
-                    *)   _one="$_rest"; _rest='' ;;
-                esac
-                # "a, b" 這種寫法底層腳本吃得下（它自己會 trim），這裡也照做
-                _one=$(printf '%s' "$_one" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-                case "$_one" in
-                    http://*|https://*) : ;;
-                    '') _bad="$_bad 〈空白〉" ;;
-                    *)  _bad="$_bad $_one" ;;
-                esac
-            done
-            if [ -n "$_bad" ]; then
-                nomsg "每個來源都要以 http:// 或 https:// 開頭，這些不合格：$_bad"
-                return 0
-            fi
-            ask_default "同時幾個下載程序？" "${DL_WORKERS:-4}"
-            _workers="$REPLY_VAL"
-            case "$_workers" in
-                ''|*[!0-9]*) nomsg "下載程序數要是正整數：$_workers"; return 0 ;;
-            esac
-            [ "$_workers" -ge 1 ] || { nomsg "下載程序數要 >= 1"; return 0; } ;;
-    esac
-
     printf '\n'
     row "每項持續 ${CB}${STRESS_DUR}${C0} 秒"
     row "報告寫入 ${CB}${OPS_STRESS_DIR}/logs/${_cmd}-<時間戳>.log${C0}"
-    [ -n "$_url" ] && row "壓測目標 ${CB}${_url}${C0}"
-    [ -n "$_dl" ]  && row "下載來源 ${CB}${_dl}${C0}（$_workers 個程序）"
     dim "   Ctrl-C 中斷仍會輸出摘要並清乾淨，前面跑完的項目不會白費"
     printf '\n'
     wmsg "這會真的把機器操到滿載，不要在正式環境跑"
@@ -1012,8 +949,7 @@ stress_run() {
     # cd 過去再跑：那支腳本把報告與 fio 測試檔寫在「當下工作目錄」底下的 logs/。
     # 用子 shell 包起來，選單本身的工作目錄不會被換掉。
     ( cd "$OPS_STRESS_DIR" 2>/dev/null || { nomsg "進不去 $OPS_STRESS_DIR"; exit 1; }
-      DUR="$STRESS_DUR" RAM_PCT="$STRESS_RAM_PCT" URL="$_url" DL_URL="$_dl" DL_WORKERS="$_workers" \
-          bash "$STRESS_SH" "$_cmd" )
+      DUR="$STRESS_DUR" RAM_PCT="$STRESS_RAM_PCT" bash "$STRESS_SH" "$_cmd" )
 }
 
 act_stress_menu() {
@@ -1027,18 +963,13 @@ act_stress_menu() {
         printf ' 參數   每項持續 %s%s%s 秒，記憶體配置 %s%s%%%s\n' "$CB" "$STRESS_DUR" "$C0" "$CB" "$STRESS_RAM_PCT" "$C0"
         printf ' 工具   %s\n' "$(stress_tool_status)"
         hr
-        sect "本機壓測"
+        sect "項目"
         row "1) CPU             ${CD}所有核心拉滿，看 bogo ops 與 steal${C0}"
         row "2) 記憶體          ${CD}吃掉總記憶體 ${STRESS_RAM_PCT}%${C0}"
         row "3) 磁碟讀寫        ${CD}隨機/循序 各讀寫一輪，重點在 p99 尾端延遲${C0}"
         row "4) SWAP            ${CD}逼出換頁，有 OOM 風險，會先保護 sshd${C0}"
         row "5) NTP 時間偏移    ${CD}時鐘往前撥 2 分鐘再還原，要單獨跑${C0}"
         row "6) 全部            ${CD}cpu -> ram -> disk -> swap，同一份報告（不含 ntp）${C0}"
-        printf '\n'
-        sect "網路測試  (主機扛下載流量時網站還通不通)"
-        row "7) baseline        ${CD}只壓網站建立基準，需要 URL${C0}"
-        row "8) traffic         ${CD}只灌下載流量，需要 DL_URL${C0}"
-        row "9) mixed           ${CD}下載流量 + 網站壓測同時，兩者都要${C0}"
         printf '\n'
         sect "設定"
         row "t) 每項持續秒數    ${CD}目前 $STRESS_DUR${C0}"
@@ -1056,9 +987,6 @@ act_stress_menu() {
             4) stress_run swap ;;
             5) stress_run ntp ;;
             6) stress_run all ;;
-            7) stress_run baseline ;;
-            8) stress_run traffic ;;
-            9) stress_run mixed ;;
             t|T) stress_set_dur ;;
             p|P) stress_set_ram_pct ;;
             o|O) stress_set_dir ;;

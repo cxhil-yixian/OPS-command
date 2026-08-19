@@ -49,7 +49,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.5
+ OPS-command 運維工具箱  v1.6
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
@@ -72,7 +72,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
    b) 進入封鎖選單    手動封鎖 / 解封 / 白名單 / 排行，底層走 fail2ban
 
  壓力測試  (STRESS/stress-test.sh)
-   s) 進入壓測選單    CPU / 記憶體 / 磁碟 / SWAP / NTP / 網路，會把機器操到滿載
+   s) 進入壓測選單    CPU / 記憶體 / 磁碟 / SWAP / NTP，會把機器操到滿載
 
  系統
    9) 更換套件來源鏡像 呼叫 linuxmirrors.cn 的外部腳本
@@ -93,9 +93,9 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 順便升級軟體包。那支第三方腳本本來是跑到一半才逐項詢問，問題散在輸出中間很容易
 看漏就按下去；現在一次問完、把完整命令列攤開來，確認後才跑。
 
-壓測（`s`）同樣是**先問完參數再攤開來確認**：持續秒數、記憶體配置比例、報告輸出目錄、
-網路測試的 `URL` / `DL_URL` / 下載程序數，接著印出這一項會做什麼（記憶體與 SWAP 的
-OOM 風險、NTP 會動系統時鐘、磁碟測試檔最大 4GB）才問你要不要開始。缺工具會在按下去的當下就講明缺哪幾個，
+壓測（`s`）同樣是**先問完參數再攤開來確認**：持續秒數、記憶體配置比例、報告輸出目錄，
+接著印出這一項會做什麼（記憶體與 SWAP 的 OOM 風險、NTP 會動系統時鐘、磁碟測試檔最大
+4GB）才問你要不要開始。缺工具會在按下去的當下就講明缺哪幾個，
 不會跑到報告開頭才失敗。細節見 [STRESS/README.md](STRESS/README.md)。
 
 ---
@@ -111,7 +111,7 @@ OPS-command/
 ├── FAIL2BAN/           → 詳見 FAIL2BAN/README.md
 │   └── fail2ban.sh     封鎖管理：手動封鎖 / 解封 / 白名單 / 排行 / 環境檢查
 ├── STRESS/             → 詳見 STRESS/README.md
-│   └── stress-test.sh  壓力測試：CPU / 記憶體 / 磁碟 / SWAP / NTP + 網路（wrk + curl）
+│   └── stress-test.sh  壓力測試：CPU / 記憶體 / 磁碟 / SWAP / NTP
 ├── WINDOWS/            → 詳見 WINDOWS/README.md
 │   ├── Win_Admin_Tool.bat  進入點（雙擊即可）
 │   └── Win_Admin_Tool.ps1  Windows 10/11 管理選單：RDP / 帳號 / 更新 / 防火牆 / 磁碟
@@ -248,8 +248,6 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 | disk | `fio` | fio |
 | swap | `stress-ng`、`vmstat` | stress-ng（EPEL）、procps-ng |
 | ntp | `chronyc` | chrony |
-| baseline / mixed | `wrk` | wrk（EPEL，或自行編譯 [wg/wrk](https://github.com/wg/wrk)） |
-| traffic / mixed | `curl` | curl |
 
 ---
 
@@ -274,9 +272,6 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
   拉到 90 以上時更可能變成「狂換頁到沒有回應」而不是乾脆 OOM，那種卡死連 sshd 保險也救不了。
   `ntp` 會把系統時鐘往前撥 2 分鐘，雖然正常結束與 Ctrl-C 都會還原，觀察期間這台機器的
   時間是錯的。
-- **壓測的 `URL` 只能填你自己有權壓測的網站**（通常是 `127.0.0.1`）。`wrk` 產生的是真實
-  高併發請求，打別人的站等同一次小型 DoS。`DL_URL` 建議用你自己控制的來源，公開測速檔
-  只適合短時間驗證工具能動。這兩個值都沒有預設，缺了就擋下——不會幫你決定要打誰。
 - **手動封鎖前先確認會不會封到自己**。`fail2ban.sh` 會擋下涵蓋你目前 SSH 來源、
   本機位址或 loopback 的目標，CIDR 是真的做網段計算的；要硬幹得加 `--force`。
 - **換過 SSH 埠之後要重跑 `fail2ban.sh enable-sshd`**。jail 的 `port` 沒跟著改的話，

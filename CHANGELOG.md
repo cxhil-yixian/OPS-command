@@ -7,6 +7,46 @@
 
 ---
 
+## [1.6.0] - 2026-08-19
+
+移除壓力測試的網路測試，只留本機五項。
+
+### 移除
+
+- **`baseline` / `traffic` / `mixed` 三個網路測試模式整組移除** —— 原本用 `wrk` 壓網站、
+  `curl` 多路下載灌流量，旁邊記錄網卡收發與 TCP 狀態，回答「主機扛大量下載流量時網站
+  還答不答得動」。連帶拿掉的東西：
+  - `stress-test.sh`：`t_baseline` / `t_traffic` / `t_mixed`、`_wrk_run`、`_dl_worker` /
+    `_dl_start` / `_dl_stop` / `_dl_bytes` / `dl_kill`、`_mon_net` / `_mon_peak` /
+    `_net_finish`、`_split_csv` / `_nic_bytes` / `_cpu_snap` / `_hr` / `_hb`、
+    `_net_setup` / `NET_CLEANUP`，以及 `URL` / `DL_URL` / `WRK_THREADS` / `WRK_CONNS` /
+    `DL_WORKERS` / `HOST_HEADER` / `UA` / `INSECURE` 這幾個參數。報告的 `SUITE`
+    （local / net 兩套摘要與兩套判讀提示）機制也跟著消失，只剩一套。**1052 行 → 708 行。**
+  - `ops.sh`：壓測選單的 `7` / `8` / `9` 與「網路測試」小節、`stress_run` 裡問
+    `URL` / `DL_URL` / 下載程序數的那一段（含 1.5.1 才加上的逐段驗證）、工具狀態列與
+    安裝流程裡的 `wrk` / `curl`。
+  - 文件：`STRESS/README.md` 的整個「網路測試」章節與參數說明（424 → 289 行）、
+    根 `README.md` 相依表的 wrk / curl 兩列、安全須知裡 `URL` / `DL_URL` 那一條。
+- **不再需要 `wrk`**，也就不用再為它處理 EPEL 與「base repo 沒有、要自己編」那串說明。
+  壓測相依只剩 `stress-ng`、`fio`、`sysstat`、`procps`、`chrony`（`stress-ng` 仍在 EPEL）。
+
+> 需要那段程式碼的話在 git 歷史裡：`git show d7ed115:STRESS/stress-test.sh`（1.5.1 的版本）。
+
+### 變更
+
+- 壓測選單的「本機壓測」小節改名為「項目」（只剩一組，不需要跟誰對比），主選單 `s`
+  那一列與 `STRESS/README.md` 的選單截圖同步拿掉「網路」。
+- `OPS_VERSION` 升到 `1.6`（README 的選單截圖同步改成 `v1.6`）。
+
+### 未變更
+
+- `cpu` / `ram` / `disk` / `swap` / `ntp` / `all` 六項的行為、參數（`DUR` / `RAM_PCT` /
+  `DISK_DIR`）與報告格式完全不動。
+- 1.5.1 加的中斷處理（`isleep` / `run_fg` / `cap_run` / `work_stop`）全部保留 ——
+  `stress-ng` 與 `fio` 一樣需要它們。
+
+---
+
 ## [1.5.1] - 2026-08-18
 
 壓力測試的中斷處理與 OOM 保險。
