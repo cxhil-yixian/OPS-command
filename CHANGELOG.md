@@ -9,6 +9,68 @@
 
 ---
 
+## [1.11.0] - 2026-08-19
+
+新增時區與系統時間設定：`TIME/time-set.sh`，主選單按 `t`。
+
+### 新增
+
+- **`TIME/time-set.sh`** —— 時區與系統時間設定，POSIX sh，子命令 `status` / `list` /
+  `set-zone` / `set-time` / `sync` / `ntp on|off` / `rtc` / `doctor` / `install`，
+  共用 `-y` 免確認與 `-n` 乾跑。設計上把幾件事分清楚：
+
+  - **時區與時間是兩件事**。`set-zone` 不動絕對時刻，`set-time` 才會。log 時間戳差
+    8 小時通常是時區問題，用 `set-zone` 就沒有下面那些風險。
+  - **改時鐘之前先算差距與方向**，再依方向講後果：往回撥會讓 cron / systemd timer 把
+    已經跑過的工作再跑一次、DB 時序錯亂；往前撥會讓該跑的被跳過、session 立刻過期。
+    兩者共通的是 TLS 憑證的有效期是絕對時間，差太多連線直接失敗。
+  - **不順手啟動或關閉校時服務**（同 `stress-test.sh` 對 chronyd 的態度）。`set-time`
+    遇到 chronyd / ntpd / systemd-timesyncd 正在跑會停下來問要不要先停用；
+    **`-y` 免確認模式一律拒絕**，要使用者先明確 `ntp off`——停用別人的校時服務是有
+    後果的決定，不該因為加了 `-y` 就替他做掉。`install` 裝完 chrony 也不會順手啟動。
+  - **`ntp on` 先警告偏差**：目前偏差多少，服務起來就會跳多少（1.10.3 那台 chronyd
+    停用、時鐘快 8 小時的 VM 就是這個情況）。
+  - **設完一定回讀比對**。`date -s` 各家實作吃的格式不同，而且失敗時常常「回傳 0 但
+    沒改到」。四種寫法依序試（`timedatectl set-time` → `date -s 'YYYY-MM-DD HH:MM:SS'`
+    → `date -s MMDDhhmmCCYY.ss` → `date MMDDhhmmCCYY.ss`），每一種都回讀，差超過
+    120 秒就換下一種，四種都不行才回報失敗，不留下「看起來成功」的假象。
+  - **`doctor` 專門查「改了但不會生效 / 會被拉回去」**：容器（沒有自己的時鐘）、
+    缺 `CAP_SYS_TIME`、沒有 tzdata、同時有兩套校時服務在跑、RTC 記本地時間、
+    以及虛擬機主機端的時間同步（Hyper-V / VMware / KVM 各自給出關閉方式）。
+- **`ops.sh` 主選單新增 `t) 進入時間選單`**，標頭多一列「時間 / 時區」。時間選單的
+  參數（時區關鍵字、目標時間、NTP 伺服器）先問完再帶進底層腳本，說明與確認一律留在
+  `time-set.sh` 裡一份——跟壓測選單同樣的分工。
+- **[`TIME/README.md`](TIME/README.md)**，以及根 `README.md` 的目錄結構、選單示意、
+  支援矩陣、相依套件、安全須知、環境變數。
+- 相鄰文件的交叉引用：`SSH/README.md` 的檔案位置表補上 `time-ops.log`；
+  `STRESS/README.md` 的 `ntp` 一節標明「那是壓力測試，要真的改時間請走 `TIME/`」；
+  `FAIL2BAN/README.md` 的封鎖時長一節補上「到期時間是按系統時鐘算的，改時鐘會連帶影響」。
+
+### 修正
+
+- **`time-set.sh` 對 CentOS 7 的 `timedatectl` 探測**。systemd 219 根本沒有
+  `timedatectl show`（回「Unknown operation show」），但 `set-timezone` / `set-time` /
+  `set-ntp` 都在。原本拿 `show` 當「timedatectl 能不能用」的探測，會把整個 RHEL 7
+  誤判成不能用而退回手改檔案——那條路徑不處理硬體時鐘，也不會擋「NTP 開著不准設時間」。
+  改成用 `status` 探測「能不能設定」、用 `show` 探測「能不能查屬性」，兩者分開；
+  沒有 `show` 的機器改解析 `LC_ALL=C timedatectl status`（強制 C locale，否則標籤會被
+  翻譯；新舊版的 `NTP synchronized` 與 `System clock synchronized` 兩種標籤都比對）。
+
+### 已知事項
+
+- **`/etc/localtime` 排在 `timedatectl` 前面**當作時區的來源。實測 CentOS 7：直接換掉
+  `/etc/localtime` 之後 `date` 立刻是新時區，但 `timedatectl` 在那之後一小段時間仍回
+  舊值（`systemd-timedated` 快取著，`daemon-reexec` 也不會讓它更新，要等它閒置退出）。
+  以「程式實際看到的」為準才不會跟現實對不上；兩邊講的不一樣時由 `doctor` 指出來。
+- 支援矩陣的 `time-set.sh` × CentOS 7.9 標 ✅ 的範圍：`status` / `list` / `doctor`、
+  時區變更的兩條路徑（`timedatectl` 與直接改檔案，都實機跑過、回讀確認過並已還原）、
+  `set-time` 的格式解析與差距計算、乾跑、以及「校時服務在跑時擋下 `-y`」。時間換算與
+  回讀比對的退路邏輯是用替身模擬各種 `date` 實作驗的（含「回傳 0 但沒設到」的假成功）。
+  **`set-time` 真的把時鐘改下去，以及 `sync` / `ntp on|off` / `rtc` 的實機行為尚未有
+  系統地驗證**；其他發行版全部未驗證。
+
+---
+
 ## [1.10.4] - 2026-08-19
 
 文件：Windows 的第一次執行順序，以及 `ntp` 對 chronyd 的態度。
@@ -825,6 +887,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.11.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.4...v1.11.0
 [1.10.4]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.3...v1.10.4
 [1.10.3]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.2...v1.10.3
 [1.10.2]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.1...v1.10.2

@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.10
+OPS_VERSION=1.11
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -40,6 +40,7 @@ SSH_PORT_REL='SSH/ssh-port.sh'
 SELFHEAL_REL='SSH/selfheal-ssh.sh'
 F2B_REL='FAIL2BAN/fail2ban.sh'
 STRESS_REL='STRESS/stress-test.sh'
+TIME_REL='TIME/time-set.sh'
 MIRROR_URL_REL='REPO/URL'
 
 # 各工具腳本產出的東西統一收在這裡；export 讓它們沿用同一個值
@@ -102,6 +103,7 @@ SSH_PORT_SH="$ASSET_DIR/$SSH_PORT_REL"
 SELFHEAL_SH="$ASSET_DIR/$SELFHEAL_REL"
 F2B_SH="$ASSET_DIR/$F2B_REL"
 STRESS_SH="$ASSET_DIR/$STRESS_REL"
+TIME_SH="$ASSET_DIR/$TIME_REL"
 MIRROR_URL_FILE="$ASSET_DIR/$MIRROR_URL_REL"
 
 FETCH_ERR=''
@@ -171,7 +173,7 @@ assets_sync() {
 
     _mode="${1:-}"
     _rc=0; _n=0; _fail=''
-    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL" "$F2B_REL" "$STRESS_REL"; do
+    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL" "$F2B_REL" "$STRESS_REL" "$TIME_REL"; do
         if [ "$_mode" = force ] || [ "$_mode" = update ] || [ ! -f "$ASSET_DIR/$_rel" ]; then
             [ "$_mode" = update ] || printf ' 取得 %s … ' "$_rel"
             if fetch_script "$_rel"; then
@@ -383,6 +385,19 @@ detect() {
 
     PENDING=0
     { [ -f "$PORT_STATE" ] || [ -f "$LEGACY_PORT_STATE" ]; } && PENDING=1
+
+    # 時區。標頭每輪都會重畫，所以這裡只讀檔案，不呼叫 timedatectl
+    # （那是 D-Bus 往返，systemd 有狀況時會卡住整個選單）。
+    TZ_NAME=''
+    if [ -L /etc/localtime ]; then
+        TZ_NAME=$(readlink -f /etc/localtime 2>/dev/null)
+        case "$TZ_NAME" in
+            /usr/share/zoneinfo/*) TZ_NAME=${TZ_NAME#/usr/share/zoneinfo/}; TZ_NAME=${TZ_NAME#posix/} ;;
+            *) TZ_NAME='' ;;
+        esac
+    fi
+    [ -z "$TZ_NAME" ] && [ -r /etc/timezone ] && TZ_NAME=$(sed -n '1s/[[:space:]]//gp' /etc/timezone 2>/dev/null)
+    [ -z "$TZ_NAME" ] && TZ_NAME=$(date +%Z 2>/dev/null)
 }
 
 # =========================================================
@@ -495,6 +510,7 @@ banner() {
     [ -n "$SOCKET_UNIT" ] && printf '   %s[%s 接管中]%s' "$CY" "$SOCKET_UNIT" "$C0"
     printf '\n'
     printf ' 防護   防火牆 %s   SELinux %s   身分 %s\n' "$FW" "$SELINUX" "$(id -un)"
+    printf ' 時間   %s   時區 %s%s%s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$CB" "$TZ_NAME" "$C0"
     if [ "$RUN_MODE" = remote ]; then
         printf ' 工具   %s遠端執行%s  腳本快取於 %s\n' "$CY" "$C0" "$ASSET_DIR"
     else
@@ -527,6 +543,9 @@ menu() {
     printf '\n'
     sect "壓力測試  (STRESS/stress-test.sh)"
     row "s) 進入壓測選單    ${CD}CPU / 記憶體 / 磁碟 / SWAP / NTP，會把機器操到滿載${C0}"
+    printf '\n'
+    sect "時間與時區  (TIME/time-set.sh)"
+    row "t) 進入時間選單    ${CD}改時區 / 改系統時間 / 校時，改之前先算差距與後果${C0}"
     printf '\n'
     sect "系統"
     row "9) 更換套件來源鏡像 ${CD}呼叫 linuxmirrors.cn 的外部腳本${C0}"
@@ -1002,6 +1021,93 @@ act_stress_menu() {
     done
 }
 
+# =========================================================
+# 時間與時區（time-set.sh）
+#   時區與系統時間是兩件事，選單上要分開：改時區不動絕對時刻，改時間才會。
+#   所有「會動到什麼」的說明與確認都留在 time-set.sh 裡一份，這裡只負責把
+#   參數問完再帶進去 —— 跟壓測選單一樣的分工。
+# =========================================================
+time_guard() {
+    require_script "$TIME_SH" "$TIME_REL" || return 1
+    return 0
+}
+
+# 選時區：先給常用清單，再讓使用者用關鍵字縮小範圍
+time_pick_zone() {
+    printf '\n'
+    ask_default "先用關鍵字找（Enter = 只看常用清單，all = 全部）：" ""
+    sh "$TIME_SH" list ${REPLY_VAL:+"$REPLY_VAL"}
+    printf '\n'
+    ask_default "要設成哪個時區？（完整名稱，Enter 取消）" ""
+    [ -n "$REPLY_VAL" ] || { dim " 已取消"; return 0; }
+    sh "$TIME_SH" set-zone "$REPLY_VAL"
+}
+
+time_set_clock() {
+    printf '\n'
+    dim " 格式：'2026-08-19 15:30:00'、'2026-08-19'、'15:30'（今天）、@1755590000"
+    dim " 底層腳本會先算出跟現在差多少、往哪個方向，再把後果講完才問你要不要做。"
+    ask_default "要設成什麼時間？（Enter 取消）" ""
+    [ -n "$REPLY_VAL" ] || { dim " 已取消"; return 0; }
+    sh "$TIME_SH" set-time "$REPLY_VAL"
+}
+
+time_sync_now() {
+    printf '\n'
+    dim " chronyd 在跑的話會用它既有的來源，不會改變服務的開機狀態。"
+    ask_default "要向哪台校時？（Enter = 用預設 / 既有設定）" ""
+    if [ -n "$REPLY_VAL" ]; then
+        sh "$TIME_SH" sync "$REPLY_VAL"
+    else
+        sh "$TIME_SH" sync
+    fi
+}
+
+act_time_menu() {
+    time_guard || return 0
+    while :; do
+        clear 2>/dev/null || printf '\n\n'
+        hr
+        printf '%s 時間與時區%s  %sTIME/time-set.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
+        hr
+        sh "$TIME_SH" status bare 2>/dev/null
+        hr
+        sect "設定"
+        row "1) 變更時區        ${CD}不會改變絕對時刻，只換顯示與換算方式${C0}"
+        row "2) 手動設定時間    ${CD}會先算差距、講後果；校時服務在跑時會先問要不要停${C0}"
+        row "3) 立刻校時一次    ${CD}向 NTP 來源校，不改服務的開機狀態${C0}"
+        printf '\n'
+        sect "自動校時"
+        row "4) 啟用            ${CD}偏差大的機器一啟動就會跳，會先警告${C0}"
+        row "5) 停用            ${CD}要手動設時間之前用${C0}"
+        printf '\n'
+        sect "其他"
+        row "6) 寫回硬體時鐘    ${CD}沒寫回去的話，重開機會跳回舊值${C0}"
+        row "l) 列出時區        ${CD}可用關鍵字過濾${C0}"
+        row "d) 環境檢查        ${CD}含「改了會被拉回去」的情況（容器、VM 主機同步）${C0}"
+        row "i) 安裝 chrony / tzdata"
+        row "b) 返回主選單"
+        printf '\n 請選擇：'
+        read -r _c 2>/dev/null || return 0
+        printf '\n'
+        case "$_c" in
+            1) time_pick_zone ;;
+            2) time_set_clock ;;
+            3) time_sync_now ;;
+            4) sh "$TIME_SH" ntp on ;;
+            5) sh "$TIME_SH" ntp off ;;
+            6) sh "$TIME_SH" rtc ;;
+            l|L) ask_default "關鍵字（Enter = 常用清單，all = 全部）：" ""
+                 sh "$TIME_SH" list ${REPLY_VAL:+"$REPLY_VAL"} ;;
+            d|D) sh "$TIME_SH" doctor ;;
+            i|I) sh "$TIME_SH" install ;;
+            b|B|q|Q|'') return 0 ;;
+            *) nomsg "無此選項：$_c" ;;
+        esac
+        pause
+    done
+}
+
 # 問一題：$1=提示 $2=預設值，回答放進 REPLY_VAL
 ask_default() {
     printf ' %s%s%s ' "$CC" "$1" "$C0"
@@ -1162,6 +1268,7 @@ act_doctor() {
     row "SELinux   : $SELINUX"
     row "防火牆    : $FW"
     row "執行身分  : $(id -un) (uid=$(id -u))"
+    row "時間      : $(date '+%Y-%m-%d %H:%M:%S %Z')   時區 $TZ_NAME   （細節走選單 t -> d）"
     if [ "$RUN_MODE" = remote ]; then
         row "工具來源  : 遠端 $OPS_RAW_BASE"
         row "腳本快取  : $ASSET_DIR"
@@ -1176,7 +1283,7 @@ act_doctor() {
     check_deps
     hr
     sect "腳本"
-    for _s in "$SSH_PORT_SH" "$SELFHEAL_SH" "$F2B_SH" "$STRESS_SH"; do
+    for _s in "$SSH_PORT_SH" "$SELFHEAL_SH" "$F2B_SH" "$STRESS_SH" "$TIME_SH"; do
         if [ -f "$_s" ]; then
             [ -x "$_s" ] && okmsg "$_s" || wmsg "$_s（無執行權限，本選單以 sh/bash 呼叫故仍可用）"
         elif [ "$RUN_MODE" = remote ]; then
@@ -1359,6 +1466,8 @@ ops.sh — OPS-command 視覺化操作選單  v$OPS_VERSION
                    目前：$OPS_SSH_DIR
     OPS_STRESS_DIR 壓測報告的輸出目錄（報告落在它底下的 logs/）
                    預設是執行 ops.sh 時所在的目錄，目前：$OPS_STRESS_DIR
+    OPS_NTP_SERVER 時間選單「立刻校時」預設要問哪台 NTP 伺服器
+                   （內網機器連不到 pool.ntp.org 時設它）
     NO_COLOR       關閉顏色
 
 目前模式：$RUN_MODE（工具路徑 $ASSET_DIR）
@@ -1408,6 +1517,7 @@ if [ ! -t 0 ]; then
     printf '%s\n' "    sh $SSH_PORT_SH status"
     printf '%s\n' "    sh $SELFHEAL_SH oneshot"
     printf '%s\n' "    DUR=60 bash $STRESS_SH cpu"
+    printf '%s\n' "    sh $TIME_SH status"
     printf '%s\n' "或執行 ops.sh doctor 做環境檢查。"
     exit 1
 fi
@@ -1433,6 +1543,7 @@ while :; do
         9) act_mirror ;;
         b|B) act_f2b_menu ;;
         s|S) act_stress_menu ;;
+        t|T) act_time_menu ;;
         d|D) act_doctor ;;
         i|I) act_install_deps ;;
         u|U) act_refresh ;;

@@ -3,6 +3,7 @@
 一組伺服器日常運維用的腳本，重點放在**遠端操作時不要把自己鎖在門外**。
 換 SSH 埠有看門狗自動還原，手動封鎖 IP 會先算會不會封到你自己。
 另附一組壓力測試（CPU / 記憶體 / 磁碟 / SWAP / NTP），跑之前先把會發生什麼攤開來問。
+時區與系統時間也能改，改時鐘之前先算出差多少、往哪個方向、會弄壞什麼。
 Linux 以外還有一支 Windows 10/11 的管理工具，換 RDP Port 同樣有看門狗。
 
 所有工具都能單獨執行，也可以透過 `ops.sh` 的視覺化選單操作。
@@ -59,11 +60,12 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.10
+ OPS-command 運維工具箱  v1.11
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
  防護   防火牆 firewalld   SELinux enforcing   身分 root
+ 時間   2026-08-19 15:26:36 CST   時區 Asia/Taipei
  工具   遠端執行  腳本快取於 /var/lib/ops-command
 ────────────────────────────────────────────────────────────────────
  SSH 連接埠  (SSH/ssh-port.sh)
@@ -84,6 +86,9 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
  壓力測試  (STRESS/stress-test.sh)
    s) 進入壓測選單    CPU / 記憶體 / 磁碟 / SWAP / NTP，會把機器操到滿載
 
+ 時間與時區  (TIME/time-set.sh)
+   t) 進入時間選單    改時區 / 改系統時間 / 校時，改之前先算差距與後果
+
  系統
    9) 更換套件來源鏡像 呼叫 linuxmirrors.cn 的外部腳本
    d) 環境自我診斷     檢查相依套件與已知相容性問題
@@ -102,6 +107,12 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 換源（第 9 項）會**先把參數問完再執行**：鏡像站、協議、內外網、EPEL、備份、是否
 順便升級軟體包。那支第三方腳本本來是跑到一半才逐項詢問，問題散在輸出中間很容易
 看漏就按下去；現在一次問完、把完整命令列攤開來，確認後才跑。
+
+時間選單（`t`）把「時區」與「系統時間」分成兩件事：改時區不動絕對時刻，改時鐘才會。
+改時鐘之前會先算出**跟現在差多少、往哪個方向**，再依方向講後果（往回撥會讓 cron 重跑
+已經跑過的工作，往前撥會讓該跑的被跳過），最後才問。校時服務正在跑時手動設的時間會被
+拉回去，這種情況會停下來問要不要先停用它——`-y` 免確認模式一律拒絕，要你先明確
+`ntp off`。細節見 [TIME/README.md](TIME/README.md)。
 
 壓測（`s`）同樣是**先問完參數再攤開來確認**：持續秒數、記憶體配置比例、報告輸出目錄，
 接著印出這一項會做什麼（記憶體與 SWAP 的 OOM 風險、NTP 會動系統時鐘、磁碟測試檔最大
@@ -122,6 +133,8 @@ OPS-command/
 │   └── fail2ban.sh     封鎖管理：手動封鎖 / 解封 / 白名單 / 排行 / 環境檢查
 ├── STRESS/             → 詳見 STRESS/README.md
 │   └── stress-test.sh  壓力測試：CPU / 記憶體 / 磁碟 / SWAP / NTP
+├── TIME/               → 詳見 TIME/README.md
+│   └── time-set.sh     時區與系統時間：改時區 / 改時鐘 / 校時 / 硬體時鐘
 ├── WINDOWS/            → 詳見 WINDOWS/README.md
 │   ├── ops-win.ps1         一行指令的進入點（下載主腳本到 %ProgramData% 再執行）
 │   ├── Win_Admin_Tool.bat  本機進入點（雙擊即可）
@@ -162,6 +175,7 @@ bash <(curl -fsSL .../ops.sh) doctor
 | `DISK_SIZE_MB` | 磁碟壓測的 fio 測試檔大小（MB），預設取可用空間的一半、上限 4096；要讓「讀取」數據不被 KVM host cache 汙染就得開大 |
 | `DISK_QD` | 磁碟壓測前四輪的佇列深度，預設 32（第五輪的同步延遲固定 1） |
 | `MON_SEC` | 壓測期間監看的取樣間隔秒數，預設 3；調小才抓得到短促的谷底 |
+| `OPS_NTP_SERVER` | 時間選單「立刻校時」預設要問哪台 NTP 伺服器，預設 `pool.ntp.org`；內網機器連不到就設它 |
 | `NO_COLOR` | 關閉顏色 |
 
 `SSH/` 底下兩支腳本產出的東西（換埠狀態、設定檔備份、看門狗、操作日誌、取證報告、
@@ -192,14 +206,14 @@ bash <(curl -fsSL .../ops.sh) doctor
 
 符號：**✅ 實機驗證過**｜**⚠️ 應該能跑，沒實際驗證**｜**❌ 不支援**｜**❔ 從未執行過**
 
-| 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh | fail2ban.sh | stress-test.sh |
-|---|---|---|---|---|---|
-| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
-| Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
-| Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
-| Ubuntu 18.04 / 20.04 / 22.04 / 24.04 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
-| Alpine (OpenRC + busybox) | ✅ | ✅ | ✅ | ✅ | ❌ 需 bash |
+| 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh | fail2ban.sh | stress-test.sh | time-set.sh |
+|---|---|---|---|---|---|---|
+| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 |
+| Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 |
+| Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 |
+| Ubuntu 18.04 / 20.04 / 22.04 / 24.04 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 |
+| Alpine (OpenRC + busybox) | ✅ | ✅ | ✅ | ✅ | ❌ 需 bash | ⚠️ 未驗證 |
 
 `stress-test.sh` 是針對 CentOS 7.9 / KVM 寫的，其他 systemd + Linux 發行版應該也能跑但
 未實測；它是 repo 內唯一需要 **bash** 的腳本（用到 `local`、`pipefail`），沒有 bash 的
@@ -223,6 +237,17 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 這兩支的修改都是在 Linux 上做的，只做過結構檢查（括號平衡、函式定義、編碼與行尾），
 **沒有真的跑過**。第一次用請先在測試機上驗，尤其是換 RDP Port 那條流程——它會重啟
 `TermService`，目前那條 RDP 連線必然中斷。
+
+> **`time-set.sh` 在 CentOS 7.9 上驗過的部分**：`status` / `list` / `doctor`、時區變更的
+> **兩條路徑都實機跑過並還原**（`timedatectl set-timezone`，以及強制走「直接改
+> `/etc/localtime`」的退路），`set-time` 的格式解析、差距與方向計算、乾跑、
+> 「校時服務在跑時擋下 `-y`」。時間換算與「設完回讀比對」的退路邏輯是用替身模擬各種
+> `date` 實作驗的，包含「`date -s` 回傳 0 但其實沒設到」這種假成功。
+> **`set-time` 真的把時鐘改下去、`sync` / `ntp on|off` / `rtc` 的實機行為尚未有系統地驗證**
+> ——那些會動到正在運作的機器，請先在測試機上跑。其他發行版全部未驗證。
+>
+> Alpine 標未驗證的另一個原因：最小安裝沒有 `/usr/share/zoneinfo`，`set-zone` 會先擋下來
+> 要你 `apk add tzdata`——這條路徑本身也還沒在真的 Alpine 上跑過。
 
 `fail2ban.sh` 相容 fail2ban 0.9（Debian 9 內建）到 1.x：狀態一律解析
 `fail2ban-client status` 的輸出，不依賴 0.10+ 才有的 `get` 子命令；版本能力
@@ -282,6 +307,17 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 | swap | `stress-ng`、`vmstat` | stress-ng（EPEL）、procps-ng |
 | ntp | `chronyc` | chrony |
 
+時間與時區的相依同樣不併進主清單（缺了只影響時間工具，時間選單按 `i` 會裝）：
+
+| 用途 | 需要 | 套件 |
+|---|---|---|
+| 改時區 | `/usr/share/zoneinfo` | tzdata（Alpine 最小安裝預設沒有） |
+| 自動校時 / `sync` | `chronyd`、`chronyc` | chrony |
+| 寫回硬體時鐘 | `hwclock` | util-linux |
+
+`install` 裝完 **不會**順手啟動 chronyd——時鐘偏差大的機器一啟動就會跳。要啟用請
+另外執行 `ntp on`，它會先把偏差與後果講清楚再問。
+
 ---
 
 ## 安全須知
@@ -306,6 +342,15 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
   `ntp` 會把系統時鐘往前撥 2 分鐘，雖然正常結束與 Ctrl-C 都會還原，觀察期間這台機器的
   時間是錯的。**chronyd 原本是什麼狀態，測完就是什麼狀態**——本來沒在跑的不會被順手
   打開（實測過一台 chronyd 停用、時鐘快 8 小時的 VM，順手啟動它會讓時間直接跳 8 小時）。
+- **改系統時間是全機器範圍的副作用，不是只影響 `date` 的顯示**。往回撥會讓 cron 與
+  systemd timer 把已經跑過的工作再跑一次，往前撥會讓該跑的被跳過；TLS 憑證的有效期是
+  絕對時間，差太多連線會直接失敗。只是 log 時間看起來差 8 小時的話，那多半是**時區**
+  問題，用 `set-zone` 就好，它不會動到絕對時刻。
+- **手動設定的時間會被三個東西拉回去**：正在跑的校時服務（`set-time` 會停下來問要不要
+  先停用它，`-y` 一律拒絕替你決定）、沒跟著改的硬體時鐘（重開機就跳回舊值）、以及
+  虛擬機主機端的時間同步（那個要在主機上關，`doctor` 會依平台指出來）。
+- **啟用自動校時之前先看偏差**。`ntp on` 會警告：目前偏差多少，服務起來就會跳多少——
+  實測過一台 chronyd 停用、時鐘快 8 小時的 VM，啟動它時間直接跳 8 小時。
 - **手動封鎖前先確認會不會封到自己**。`fail2ban.sh` 會擋下涵蓋你目前 SSH 來源、
   本機位址或 loopback 的目標，CIDR 是真的做網段計算的；要硬幹得加 `--force`。
 - **換過 SSH 埠之後要重跑 `fail2ban.sh enable-sshd`**。jail 的 `port` 沒跟著改的話，
