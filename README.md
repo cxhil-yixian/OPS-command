@@ -190,9 +190,11 @@ bash <(curl -fsSL .../ops.sh) doctor
 
 ## 支援矩陣
 
+符號：**✅ 實機驗證過**｜**⚠️ 應該能跑，沒實際驗證**｜**❌ 不支援**｜**❔ 從未執行過**
+
 | 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh | fail2ban.sh | stress-test.sh |
 |---|---|---|---|---|---|
-| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ⚠️ 只有 1.5.0 |
 | RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
 | Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
 | Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 |
@@ -203,7 +205,23 @@ bash <(curl -fsSL .../ops.sh) doctor
 未實測；它是 repo 內唯一需要 **bash** 的腳本（用到 `local`、`pipefail`），沒有 bash 的
 機器選單會直接擋下來。
 
-Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的 Linux 工具彼此獨立）。
+> **`stress-test.sh` 的驗證狀態要看版本。** 1.5.0（納進本 repo 那一版）在 CentOS 7.9 / KVM
+> 上實機跑過；**1.6.0 之後的每一版都只用替身腳本驗過流程**——開發機上沒有 `fio` /
+> `stress-ng` / `mpstat`，能驗的是參數怎麼組、輸出怎麼解析、中斷與清理對不對，驗不到的是
+> 真工具的實際行為。這期間的改動不小：移除網路測試、磁碟多一輪同步寫延遲（`psync` +
+> `--sync=1`）、壓力前基準、`RAM_PCT` / `DISK_SIZE_MB` / `DISK_QD` / `MON_SEC` 幾個參數。
+> 在真機跑過一輪 `DUR=60 all` 與單獨的 `ntp` 之前，這一格不會改回 ✅。
+
+Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的 Linux 工具彼此獨立）：
+
+| Windows 工具 | 狀態 |
+|---|---|
+| `ops-win.ps1`（一行指令進入點） | ❔ 從未在 Windows 上執行過 |
+| `Win_Admin_Tool.bat` + `.ps1`（本機進入點） | ❔ 從未在 Windows 上執行過 |
+
+這兩支的修改都是在 Linux 上做的，只做過結構檢查（括號平衡、函式定義、編碼與行尾），
+**沒有真的跑過**。第一次用請先在測試機上驗，尤其是換 RDP Port 那條流程——它會重啟
+`TermService`，目前那條 RDP 連線必然中斷。
 
 `fail2ban.sh` 相容 fail2ban 0.9（Debian 9 內建）到 1.x：狀態一律解析
 `fail2ban-client status` 的輸出，不依賴 0.10+ 才有的 `get` 子命令；版本能力
