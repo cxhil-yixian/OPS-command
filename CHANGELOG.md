@@ -9,6 +9,59 @@
 
 ---
 
+## [1.10.0] - 2026-08-19
+
+Windows 也有一行指令了。
+
+### 新增
+
+- **`WINDOWS/ops-win.ps1`** —— Windows 的一行指令進入點，對應 Linux 那邊的
+  `bash <(curl …)`：
+
+  ```powershell
+  [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+  irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-win.ps1 | iex
+  ```
+
+  第一行是 Windows PowerShell 5.1（Win10/11 內建）需要的：它預設不啟用 TLS 1.2，
+  而 GitHub 只收 1.2 以上，不設就是一句「無法建立 SSL/TLS 通道」。
+
+  它只做三件事：把 `Win_Admin_Tool.ps1` 下載到 `%ProgramData%\OPS-command\`、
+  驗一下內容不是被代理攔截的網頁、然後用 `-File` 執行它。**為什麼要落地而不是直接
+  把主腳本 `iex` 掉**：
+  - 提權需要實體路徑。`Start-Process -Verb RunAs` 只能指定檔案，沒有「把這段程式碼
+    交給新的 elevated 行程」的辦法，而管線跑進來的腳本 `$PSCommandPath` 是空的。
+  - RDP 換 port 的狀態、還原腳本與看門狗記錄本來就落在 `%ProgramData%\OPS-command\`。
+  - 主腳本是 UTF-8 **with BOM**，字串化之後餵給 `iex` 在 5.1 上不保證解析得過。
+  - `ops-win.ps1` 自己則刻意是 UTF-8 **無 BOM**——它就是要被 `iex` 的那一支。
+
+  **下載失敗不會默默用舊檔**：`%ProgramData%` 一般使用者也寫得進去，跑上次留下的副本
+  等於相信它沒被動過手腳，所以要用得明確加 `-UseCached`（或 `OPS_USE_CACHED=1`）。
+  來源可用 `OPS_RAW_BASE` / `-BaseUrl` 指到 fork 或內網鏡像，跟 Linux 那邊同名。
+
+### 修正
+
+- **`Win_Admin_Tool.ps1` 的提權在沒有實體路徑時會壞掉。** `Restart-AsAdmin` 直接用
+  `$PSCommandPath` 組 `-File`，而用管線跑起來時那是空字串 —— 等於 `-File ""`。
+  現在改成先問 `Get-SelfPath`：有路徑就用；沒有就把自己的原始碼
+  （`$MyInvocation.MyCommand.ScriptBlock`）寫到 `%ProgramData%\OPS-command\` 再
+  `RunAs`；連寫都寫不進去才放棄，並叫使用者自己開系統管理員視窗，而不是靜靜地失敗。
+
+### 變更
+
+- 根 `README.md` 的快速開始多一段 Windows 一行指令；開頭那句壓力測試的說明
+  漏改的「/ 網路」補掉（1.6.0 已移除）。
+- `OPS_VERSION` 升到 `1.10`。
+
+### 已知限制
+
+- **這條路徑一樣沒有在 Windows 上實測過**（`WINDOWS/` 底下的東西從來沒有）。只有實機
+  能確認的有三點：`irm | iex` 對無 BOM 檔案的解析、`Invoke-WebRequest -OutFile` 之後
+  `Unblock-File` 有沒有真的解掉 MOTW、以及管線跑法下的提權
+  （`$PSCommandPath` 為空 -> 寫檔 -> `RunAs`）。
+
+---
+
 ## [1.9.0] - 2026-08-19
 
 磁碟佇列深度可調，CPU 測試看得到網卡流量。
@@ -659,6 +712,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.10.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.8.1...v1.9.0
 [1.8.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.7.0...v1.8.0

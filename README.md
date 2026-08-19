@@ -2,7 +2,7 @@
 
 一組伺服器日常運維用的腳本，重點放在**遠端操作時不要把自己鎖在門外**。
 換 SSH 埠有看門狗自動還原，手動封鎖 IP 會先算會不會封到你自己。
-另附一組壓力測試（CPU / 記憶體 / 磁碟 / SWAP / NTP / 網路），跑之前先把會發生什麼攤開來問。
+另附一組壓力測試（CPU / 記憶體 / 磁碟 / SWAP / NTP），跑之前先把會發生什麼攤開來問。
 Linux 以外還有一支 Windows 10/11 的管理工具，換 RDP Port 同樣有看門狗。
 
 所有工具都能單獨執行，也可以透過 `ops.sh` 的視覺化選單操作。
@@ -37,6 +37,16 @@ chmod +x ops.sh SSH/*.sh
 sudo ./ops.sh
 ```
 
+**Windows 10 / 11** 也有一行指令（PowerShell，不必先下載檔案）：
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-win.ps1 | iex
+```
+
+第一行是 Windows PowerShell 5.1（Win10 內建）需要的——它預設不啟用 TLS 1.2，
+而 GitHub 只收 1.2 以上。PowerShell 7 可以省略。細節見 [WINDOWS/README.md](WINDOWS/README.md)。
+
 兩種方式的選單完全一樣，`ops.sh` 會自己判斷：`$0` 旁邊有完整的 `SSH/` 就用本機的，
 沒有就走下載。要指到自己的 fork、內網鏡像或其他分支，設 `OPS_RAW_BASE` 即可：
 
@@ -49,7 +59,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.9
+ OPS-command 運維工具箱  v1.10
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
@@ -113,7 +123,8 @@ OPS-command/
 ├── STRESS/             → 詳見 STRESS/README.md
 │   └── stress-test.sh  壓力測試：CPU / 記憶體 / 磁碟 / SWAP / NTP
 ├── WINDOWS/            → 詳見 WINDOWS/README.md
-│   ├── Win_Admin_Tool.bat  進入點（雙擊即可）
+│   ├── ops-win.ps1         一行指令的進入點（下載主腳本到 %ProgramData% 再執行）
+│   ├── Win_Admin_Tool.bat  本機進入點（雙擊即可）
 │   └── Win_Admin_Tool.ps1  Windows 10/11 管理選單：RDP / 帳號 / 更新 / 防火牆 / 磁碟
 ├── REPO/
 │   └── URL             換源腳本的來源網址（linuxmirrors.cn，第三方）

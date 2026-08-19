@@ -5,16 +5,59 @@ Windows 10 / 11 的系統管理工具箱，PowerShell 寫的分類選單。跟 L
 
 | 檔案 | 用途 |
 |---|---|
-| `Win_Admin_Tool.bat` | 進入點，雙擊即可（設好編碼並用 `-ExecutionPolicy Bypass` 呼叫 .ps1） |
-| `Win_Admin_Tool.ps1` | 本體，1060 行的 PowerShell 分類選單 |
+| `ops-win.ps1` | 一行指令的進入點：下載主腳本到 `%ProgramData%\OPS-command\` 再執行 |
+| `Win_Admin_Tool.bat` | 本機進入點，雙擊即可（設好編碼並用 `-ExecutionPolicy Bypass` 呼叫 .ps1） |
+| `Win_Admin_Tool.ps1` | 本體，1090 行的 PowerShell 分類選單 |
+
+## 兩種跑法
+
+**一行指令**（不必先下載檔案，對應 Linux 那邊的 `bash <(curl …)`）：
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-win.ps1 | iex
+```
+
+第一行是 **Windows PowerShell 5.1（Win10 / Win11 內建的那個）需要的**：它預設不啟用
+TLS 1.2，而 GitHub 只收 1.2 以上，不設就是一句 `無法建立 SSL/TLS 通道`。PowerShell 7
+可以省略，加了也無害。
+
+**本機**（離線、或想自己看過內容再跑）：
 
 ```
 下載整個 WINDOWS 資料夾 -> 雙擊 Win_Admin_Tool.bat
 ```
 
-不必事先改執行原則（`.bat` 已帶 `-ExecutionPolicy Bypass -NoProfile`），
-也不必先用系統管理員身分開啟：**修改類功能會在需要時才問你要不要提權**，
-唯讀的「檢查現況」一般帳號就能用。
+兩種方式進去之後完全一樣。不必事先改執行原則（`.bat` 與 `ops-win.ps1` 都帶
+`-ExecutionPolicy Bypass -NoProfile`，只作用在那一次執行），也不必先用系統管理員身分
+開啟：**修改類功能會在需要時才問你要不要提權**，唯讀的「檢查現況」一般帳號就能用。
+
+### 一行指令為什麼要先落地，不直接把主腳本 `iex` 掉
+
+`ops-win.ps1` 做的事只有三件：把 `Win_Admin_Tool.ps1` 下載到
+`%ProgramData%\OPS-command\`、驗一下內容不是被攔截的網頁、然後用 `-File` 執行它。
+
+| 原因 | 說明 |
+|---|---|
+| **提權需要實體路徑** | `Start-Process -Verb RunAs` 只能指定一個檔案，沒有「把這段程式碼交給新的 elevated 行程」的辦法。管線跑進來的腳本 `$PSCommandPath` 是空的，直接 `iex` 主腳本的話「以系統管理員身分重新啟動」會壞掉 |
+| **狀態檔本來就在那** | RDP 換 port 的狀態、還原腳本與看門狗記錄都落在 `%ProgramData%\OPS-command\`，主腳本放同一個目錄最直覺 |
+| **編碼** | 主腳本是 UTF-8 **with BOM**；字串化之後餵給 `iex`，在 PowerShell 5.1 上不保證解析得過。存成檔案用 `-File` 執行反而最穩 |
+
+> 主腳本本身也補了保險：真的被人用管線跑起來（`$PSCommandPath` 是空的），要提權時
+> 它會先把自己的原始碼寫到 `%ProgramData%\OPS-command\Win_Admin_Tool.ps1` 再
+> `RunAs`，寫不進去才放棄並叫你自己開系統管理員視窗。
+
+**下載失敗時不會默默用舊檔**。`%ProgramData%` 一般使用者也寫得進去，直接跑上次留下的
+副本等於相信那份檔案沒被動過手腳——要用可以，但得你明確決定：
+
+```powershell
+irm https://raw.githubusercontent.com/.../WINDOWS/ops-win.ps1 | iex   # 下載失敗 -> 停下來告訴你
+$env:OPS_USE_CACHED=1; irm https://.../ops-win.ps1 | iex              # 明確允許用舊副本
+```
+
+指到自己的 fork、內網鏡像或其他分支：設 `$env:OPS_RAW_BASE`（對應 Linux 那邊的
+同名變數），或用檔案跑法的 `-BaseUrl` 參數。`irm | iex` 沒辦法帶參數，所以這兩個
+開關都吃環境變數。
 
 ---
 
@@ -108,7 +151,11 @@ iDRAC / iLO）。
 
 ## 編碼
 
-`.ps1` 是 UTF-8 with BOM、CRLF；`.bat` 是純 ASCII、CRLF。
+`Win_Admin_Tool.ps1` 是 UTF-8 with BOM、CRLF；`.bat` 是純 ASCII、CRLF。
+
+**`ops-win.ps1` 是唯一的例外：UTF-8 無 BOM。** 它就是要被 `irm | iex` 的那一支，
+而字串開頭多一個 BOM 字元在 Windows PowerShell 5.1 上有機會讓解析出錯。
+主腳本反過來需要 BOM——它是用 `-File` 讀的，有 BOM 才保證 5.1 用 UTF-8 解碼。
 
 `.bat` 用 `chcp 65001` 搭配 UTF-8 的 `.ps1`（原本是 `chcp 950`/Big5，與檔案編碼不一致，
 一旦用到 Big5 沒有的字元就會變亂碼）。`.bat` 自己的訊息刻意保持全英文：cmd 是用**主控台
@@ -121,9 +168,12 @@ shell 腳本被寫成 CRLF 的話，shebang 會變成 `/bin/sh\r` 而直接執�
 
 ## 已知限制
 
-- **這支腳本沒有在 Windows 上實測過。** 修改是在 Linux 上做的，PowerShell 語法經過
-  結構檢查（括號平衡、函式定義），但沒有真的跑過。第一次用請先在測試機上驗證，
-  尤其是換 RDP Port 那條流程。
+- **這裡的東西沒有在 Windows 上實測過。** 修改是在 Linux 上做的，PowerShell 語法經過
+  結構檢查（括號平衡、函式定義），但沒有真的跑過——`ops-win.ps1` 這條一行指令的路徑
+  也一樣。第一次用請先在測試機上驗證，尤其是換 RDP Port 那條流程。
+- 一行指令這條路徑另外有三個只有實機能確認的點：`irm | iex` 對 UTF-8 無 BOM 檔案的
+  解析、`Invoke-WebRequest -OutFile` 之後 `Unblock-File` 有沒有真的解掉 MOTW、
+  以及管線跑法下的提權（`$PSCommandPath` 為空 -> 寫檔 -> `RunAs`）。
 - 「RDP 多開」在用戶端版（家用 / 專業版）受 `termsrv.dll` 限制，本工具只放寬工作階段
   規則；要真正多人同時連線需搭配 RDP Wrapper，且涉及授權條款，請自行評估。
 - Hyper-V 與 VMware 的切換需要重新開機才會生效。

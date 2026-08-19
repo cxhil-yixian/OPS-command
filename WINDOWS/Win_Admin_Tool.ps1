@@ -12,9 +12,40 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 
 function Wait-Enter { Write-Host ""; Read-Host "按 Enter 繼續" | Out-Null }
 
+# 這支腳本自己的位置。走 ops-win.ps1 或 .bat 進來時 $PSCommandPath 有值;
+# 但用 irm | iex 這種管線跑法時它是空的 -- 而提權一定要有實體路徑
+# (Start-Process -Verb RunAs 只能指定檔案,沒有「把這段程式碼交給新的 elevated
+# 行程」這種辦法)。所以管線跑法要先把自己的原始碼寫到 %ProgramData% 再提權。
+$Script:SelfPath   = $PSCommandPath
+$Script:SelfSource = $MyInvocation.MyCommand.ScriptBlock.ToString()
+
+function Get-SelfPath {
+    if ($Script:SelfPath -and (Test-Path $Script:SelfPath)) { return $Script:SelfPath }
+    $root = if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }
+    $dir  = Join-Path $root 'OPS-command'
+    try {
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $p = Join-Path $dir 'Win_Admin_Tool.ps1'
+        # Set-Content -Encoding UTF8 在 5.1 會寫出 with BOM,跟原檔一致,-File 讀得對
+        Set-Content -Path $p -Value $Script:SelfSource -Encoding UTF8
+        $Script:SelfPath = $p
+        return $p
+    } catch {
+        return $null
+    }
+}
+
 # 以系統管理員身分重新啟動自己
 function Restart-AsAdmin {
-    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    $self = Get-SelfPath
+    if (-not $self) {
+        Write-Host ""
+        Write-Host "[錯誤] 取不到本腳本的實體路徑,也寫不進 %ProgramData%,沒辦法提權。"
+        Write-Host "       請改以系統管理員身分開啟 PowerShell 再執行一次。"
+        Wait-Enter
+        return
+    }
+    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$self`"" -Verb RunAs
     exit
 }
 
