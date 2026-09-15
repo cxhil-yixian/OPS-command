@@ -4,6 +4,7 @@
 換 SSH 埠有看門狗自動還原，手動封鎖 IP 會先算會不會封到你自己。
 另附一組壓力測試（CPU / 記憶體 / 磁碟 / SWAP / NTP），跑之前先把會發生什麼攤開來問。
 時區與系統時間也能改，改時鐘之前先算出差多少、往哪個方向、會弄壞什麼。
+常用軟體（docker / nc / tcpping / mtr / nginx）可以一鍵裝，依發行版挑對的裝法。
 Linux 以外還有一支 Windows 10/11 的管理工具，換 RDP Port 同樣有看門狗。
 
 所有工具都能單獨執行，也可以透過 `ops.sh` 的視覺化選單操作。
@@ -60,7 +61,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.11
+ OPS-command 運維工具箱  v1.12
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
@@ -89,6 +90,9 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
  時間與時區  (TIME/time-set.sh)
    t) 進入時間選單    改時區 / 改系統時間 / 校時，改之前先算差距與後果
 
+ 常用軟體  (APPS/apps.sh)
+   a) 進入安裝選單    docker / nc / tcpping / mtr / nginx，依發行版挑裝法
+
  系統
    9) 更換套件來源鏡像 呼叫 linuxmirrors.cn 的外部腳本
    d) 環境自我診斷     檢查相依套件與已知相容性問題
@@ -114,6 +118,12 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 拉回去，這種情況會停下來問要不要先停用它——`-y` 免確認模式一律拒絕，要你先明確
 `ntp off`。細節見 [TIME/README.md](TIME/README.md)。
 
+常用軟體（`a`）一次可以裝一項、全部、或自選幾項。docker 走官方的 `get.docker.com` 腳本
+（先下載成檔案、驗過內容再執行；Alpine 與 AlmaLinux 這類它不支援的發行版改走 apk /
+docker-ce repo），其他四項依套件管理器對應套件名——`nc` 在 RHEL 系是 `nmap-ncat`、
+Debian 系是 `netcat-openbsd`，`tcpping` 不在任何套件庫裡，是 `traceroute` 加上一支固定版本
+的腳本。已經裝好的略過，裝完逐項驗證指令真的在。細節見 [APPS/README.md](APPS/README.md)。
+
 壓測（`s`）同樣是**先問完參數再攤開來確認**：持續秒數、記憶體配置比例、報告輸出目錄，
 接著印出這一項會做什麼（記憶體與 SWAP 的 OOM 風險、NTP 會動系統時鐘、磁碟測試檔最大
 4GB）才問你要不要開始。缺工具會在按下去的當下就講明缺哪幾個，
@@ -135,6 +145,8 @@ OPS-command/
 │   └── stress-test.sh  壓力測試：CPU / 記憶體 / 磁碟 / SWAP / NTP
 ├── TIME/               → 詳見 TIME/README.md
 │   └── time-set.sh     時區與系統時間：改時區 / 改時鐘 / 校時 / 硬體時鐘
+├── APPS/               → 詳見 APPS/README.md
+│   └── apps.sh         常用軟體安裝：docker / nc / tcpping / mtr / nginx
 ├── WINDOWS/            → 詳見 WINDOWS/README.md
 │   ├── ops-win.ps1         一行指令的進入點（下載主腳本到 %ProgramData% 再執行）
 │   ├── Win_Admin_Tool.bat  本機進入點（雙擊即可）
@@ -176,6 +188,8 @@ bash <(curl -fsSL .../ops.sh) doctor
 | `DISK_QD` | 磁碟壓測前四輪的佇列深度，預設 32（第五輪的同步延遲固定 1） |
 | `MON_SEC` | 壓測期間監看的取樣間隔秒數，預設 3；調小才抓得到短促的谷底 |
 | `OPS_NTP_SERVER` | 時間選單「立刻校時」預設要問哪台 NTP 伺服器，預設 `pool.ntp.org`；內網機器連不到就設它 |
+| `OPS_DOCKER_MIRROR` | 安裝 docker 時交給 get-docker.sh 的 `--mirror`（`Aliyun` / `AzureChinaCloud`），連不到 `download.docker.com` 時用 |
+| `OPS_DOCKER_URL` / `OPS_TCPPING_URL` | docker 安裝腳本與 tcpping 腳本的下載網址，內網鏡像用 |
 | `NO_COLOR` | 關閉顏色 |
 
 `SSH/` 底下兩支腳本產出的東西（換埠狀態、設定檔備份、看門狗、操作日誌、取證報告、
@@ -206,14 +220,14 @@ bash <(curl -fsSL .../ops.sh) doctor
 
 符號：**✅ 實機驗證過**｜**⚠️ 應該能跑，沒實際驗證**｜**❌ 不支援**｜**❔ 從未執行過**
 
-| 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh | fail2ban.sh | stress-test.sh | time-set.sh |
-|---|---|---|---|---|---|---|
-| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 |
-| Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 |
-| Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 |
-| Ubuntu 18.04 / 20.04 / 22.04 / 24.04 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 |
-| Alpine (OpenRC + busybox) | ✅ | ✅ | ✅ | ✅ | ❌ 需 bash | ⚠️ 未驗證 |
+| 發行版 | ops.sh | ssh-port.sh | selfheal-ssh.sh | fail2ban.sh | stress-test.sh | time-set.sh | apps.sh |
+|---|---|---|---|---|---|---|---|
+| CentOS 7.9 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ 只驗乾跑 |
+| RHEL 8 / 9 / 10 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 | ⚠️ 未驗證 |
+| Rocky / AlmaLinux 8 / 9 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 | ✅ 9（容器） |
+| Debian 9 / 10 / 11 / 12 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 | ✅ 12（容器） |
+| Ubuntu 18.04 / 20.04 / 22.04 / 24.04 | ✅ | ✅ | ✅ | ✅ | ⚠️ 未驗證 | ⚠️ 未驗證 | ✅ 24.04（容器） |
+| Alpine (OpenRC + busybox) | ✅ | ✅ | ✅ | ✅ | ❌ 需 bash | ⚠️ 未驗證 | ✅ 3.20（容器） |
 
 `stress-test.sh` 是針對 CentOS 7.9 / KVM 寫的，其他 systemd + Linux 發行版應該也能跑但
 未實測；它是 repo 內唯一需要 **bash** 的腳本（用到 `local`、`pipefail`），沒有 bash 的
@@ -248,6 +262,11 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 >
 > Alpine 標未驗證的另一個原因：最小安裝沒有 `/usr/share/zoneinfo`，`set-zone` 會先擋下來
 > 要你 `apk add tzdata`——這條路徑本身也還沒在真的 Alpine 上跑過。
+
+> **`apps.sh` 的 ✅ 是在 docker 容器裡實際安裝過**：Debian 12、Rocky 9、Alpine 3.20 裝了
+> nc / tcpping / mtr / nginx（tcpping 都實際量到延遲），Ubuntu 24.04 與 AlmaLinux 9 連 docker
+> 一起裝（分別走 get-docker.sh 與 docker-ce repo 兩條路徑）。容器沒有 systemd，所以
+> **「裝完服務會不會自動啟動」沒有驗到**；CentOS 7 的官方 repo 已下線，只驗了狀態與乾跑。
 
 `fail2ban.sh` 相容 fail2ban 0.9（Debian 9 內建）到 1.x：狀態一律解析
 `fail2ban-client status` 的輸出，不依賴 0.10+ 才有的 `get` 子命令；版本能力
@@ -351,6 +370,12 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
   虛擬機主機端的時間同步（那個要在主機上關，`doctor` 會依平台指出來）。
 - **啟用自動校時之前先看偏差**。`ntp on` 會警告：目前偏差多少，服務起來就會跳多少——
   實測過一台 chronyd 停用、時鐘快 8 小時的 VM，啟動它時間直接跳 8 小時。
+- **安裝 docker 會以 root 執行 Docker 官方的 `get.docker.com` 腳本**，它會新增 docker-ce 套件
+  來源，裝完自己 `systemctl enable --now docker`。tcpping 則是從 GitHub 下載第三方腳本
+  （deajan/tcpping，釘在 `v2.7`）。兩者都會先檢查下載到的內容是腳本才執行 / 安裝。
+- **docker 發佈的埠（`-p`）會繞過 firewalld / ufw**。docker 自己寫 iptables 的 `DOCKER` 鏈，
+  防火牆上看起來沒開的埠外面照樣連得進來。只給本機用的服務請綁 `127.0.0.1`。
+- **Debian / Ubuntu 裝 nginx 會立刻啟動並佔用 80 埠**。安裝前會先檢查 80 埠有沒有人在聽。
 - **手動封鎖前先確認會不會封到自己**。`fail2ban.sh` 會擋下涵蓋你目前 SSH 來源、
   本機位址或 loopback 的目標，CIDR 是真的做網段計算的；要硬幹得加 `--force`。
 - **換過 SSH 埠之後要重跑 `fail2ban.sh enable-sshd`**。jail 的 `port` 沒跟著改的話，

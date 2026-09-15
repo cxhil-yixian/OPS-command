@@ -9,6 +9,55 @@
 
 ---
 
+## [1.12.0] - 2026-09-15
+
+新增常用軟體安裝：`APPS/apps.sh`，主選單按 `a`。
+
+### 新增
+
+- **`APPS/apps.sh`** —— 安裝 `docker` / `nc` / `tcpping` / `mtr` / `nginx`，POSIX sh，子命令
+  `status` / `install <名稱...|all>`，共用 `-y` 免確認與 `-n` 乾跑。
+  - **docker 走官方 `get.docker.com`**：`curl -fsSL https://get.docker.com -o get-docker.sh`
+    再 `sh ./get-docker.sh`。落地成檔案、先驗內容（開頭 `#!` 且含 `do_install`）才執行，
+    放在用完就刪的暫存目錄。它不支援的發行版改走別條路：Alpine 用 `apk add docker`；
+    AlmaLinux / Oracle Linux 這類它不認得的 RHEL 系（get-docker.sh 只認 centos / rhel /
+    rocky / fedora，其他會回 `Unsupported distribution`）改用 Docker 文件的 docker-ce repo 做法。
+    `OPS_DOCKER_MIRROR` 可帶 `--mirror Aliyun` / `AzureChinaCloud`。
+  - **其他四項依套件管理器對應套件名**，不依發行版名稱——`ID_LIKE` 沒寫的衍生版一樣對得上：
+    `nc` 在 RHEL 系是 `nmap-ncat`、Debian / Alpine 系是 `netcat-openbsd`；`mtr` 在 Debian 系
+    用 `mtr-tiny`（避開 GTK）；CentOS / RHEL 7 的 nginx 在 EPEL，會先裝 `epel-release`。
+    除了 apt / dnf / yum / apk，另外對了 zypper / pacman 的套件名（未實測）。
+  - **tcpping 不在任何套件庫裡**：先裝 `traceroute`（它實際是靠 `traceroute -T` 送 TCP SYN；
+    Alpine 的 busybox traceroute 不支援 `-T`，改裝 `tcptraceroute`），再從 GitHub 下載
+    deajan/tcpping 的 **`v2.7`** 到 `/usr/local/bin/tcpping`——釘 release tag 不抓 `master`
+    （那是 `-dev` 版）。
+  - **已經裝好的略過**。get-docker.sh 對已裝 docker 的機器會停 20 秒並重設 repo 設定，那不是
+    「安裝常用軟體」該順手做的事。
+  - **裝之前把後果講完**：get-docker.sh 會自己 `enable --now docker`；EOL 發行版上它會停
+    10 秒印 DEPRECATION WARNING（先講，免得以為當掉）；RHEL 8+ 已裝 podman 會跟
+    `containerd.io` 衝突；docker 的 `-p` 會繞過 firewalld / ufw；Debian 系裝 nginx 會立刻
+    啟動去搶 80 埠，80 埠已有人在聽就先標紅。
+  - **裝完逐項驗證指令真的在**，不以套件管理器的回傳碼為準；沒裝上的列出來並回傳非 0。
+- **`ops.sh` 主選單新增 `a) 進入安裝選單`**：一項、全部、或自選多項。說明與確認一律留在
+  `apps.sh` 裡一份——跟時間、壓測選單同樣的分工。遠端模式的自動更新與 `u` 會一併抓
+  `APPS/apps.sh`，`doctor` 的腳本清單也列上它。
+- **[`APPS/README.md`](APPS/README.md)**，以及根 `README.md` 的目錄結構、選單示意、
+  支援矩陣、安全須知、環境變數。
+
+### 變更
+
+- `OPS_VERSION` 升到 `1.12`。`ops.sh` 開頭註解的工具目錄清單補上 `TIME/`（1.11.0 漏改）與 `APPS/`。
+
+### 已知限制
+
+- 驗證是在 docker 容器裡**實際安裝**：Debian 12 / Rocky 9 / Alpine 3.20 裝 nc、tcpping、mtr、
+  nginx（tcpping 都實際量到 1.1.1.1:443 的延遲），Ubuntu 24.04 與 AlmaLinux 9 連 docker 一起裝，
+  分別走過 get-docker.sh 與 docker-ce repo 兩條路徑。容器沒有 systemd，**「裝完服務會不會自動
+  啟動」沒有驗到**。CentOS 7 的官方 repo 已下線，只驗了 `status` 與乾跑（EPEL 判斷、EOL 提示）。
+  zypper / pacman 沒有實跑過。
+
+---
+
 ## [1.11.0] - 2026-08-19
 
 新增時區與系統時間設定：`TIME/time-set.sh`，主選單按 `t`。
@@ -887,6 +936,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.12.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.11.0...v1.12.0
 [1.11.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.4...v1.11.0
 [1.10.4]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.3...v1.10.4
 [1.10.3]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.2...v1.10.3

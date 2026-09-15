@@ -1,7 +1,7 @@
 #!/bin/sh
 # ops.sh — OPS-command 視覺化操作選單
 #
-# 一支入口把 SSH/、FAIL2BAN/ 與 STRESS/ 底下的工具包起來，用選單操作，不必記參數。
+# 一支入口把 SSH/、FAIL2BAN/、STRESS/、TIME/ 與 APPS/ 底下的工具包起來，用選單操作，不必記參數。
 #
 # 支援：CentOS 7.9 / RHEL 7-10 / Rocky / AlmaLinux
 #       Ubuntu 18.04-24.04 / Debian 9-12 / Alpine (OpenRC + busybox)
@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.11
+OPS_VERSION=1.12
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -41,6 +41,7 @@ SELFHEAL_REL='SSH/selfheal-ssh.sh'
 F2B_REL='FAIL2BAN/fail2ban.sh'
 STRESS_REL='STRESS/stress-test.sh'
 TIME_REL='TIME/time-set.sh'
+APPS_REL='APPS/apps.sh'
 MIRROR_URL_REL='REPO/URL'
 
 # 各工具腳本產出的東西統一收在這裡；export 讓它們沿用同一個值
@@ -104,6 +105,7 @@ SELFHEAL_SH="$ASSET_DIR/$SELFHEAL_REL"
 F2B_SH="$ASSET_DIR/$F2B_REL"
 STRESS_SH="$ASSET_DIR/$STRESS_REL"
 TIME_SH="$ASSET_DIR/$TIME_REL"
+APPS_SH="$ASSET_DIR/$APPS_REL"
 MIRROR_URL_FILE="$ASSET_DIR/$MIRROR_URL_REL"
 
 FETCH_ERR=''
@@ -173,7 +175,7 @@ assets_sync() {
 
     _mode="${1:-}"
     _rc=0; _n=0; _fail=''
-    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL" "$F2B_REL" "$STRESS_REL" "$TIME_REL"; do
+    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL" "$F2B_REL" "$STRESS_REL" "$TIME_REL" "$APPS_REL"; do
         if [ "$_mode" = force ] || [ "$_mode" = update ] || [ ! -f "$ASSET_DIR/$_rel" ]; then
             [ "$_mode" = update ] || printf ' 取得 %s … ' "$_rel"
             if fetch_script "$_rel"; then
@@ -546,6 +548,9 @@ menu() {
     printf '\n'
     sect "時間與時區  (TIME/time-set.sh)"
     row "t) 進入時間選單    ${CD}改時區 / 改系統時間 / 校時，改之前先算差距與後果${C0}"
+    printf '\n'
+    sect "常用軟體  (APPS/apps.sh)"
+    row "a) 進入安裝選單    ${CD}docker / nc / tcpping / mtr / nginx，依發行版挑裝法${C0}"
     printf '\n'
     sect "系統"
     row "9) 更換套件來源鏡像 ${CD}呼叫 linuxmirrors.cn 的外部腳本${C0}"
@@ -1108,6 +1113,48 @@ act_time_menu() {
     done
 }
 
+# =========================================================
+# 常用軟體（apps.sh）
+#   跟時間選單同樣的分工：這裡只負責選要裝什麼，「會跑什麼指令、會改到什麼」
+#   的說明與確認都留在 apps.sh 裡一份。已經裝好的由它自己略過。
+# =========================================================
+act_apps_menu() {
+    require_script "$APPS_SH" "$APPS_REL" || return 0
+    while :; do
+        clear 2>/dev/null || printf '\n\n'
+        hr
+        printf '%s 常用軟體%s  %sAPPS/apps.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
+        hr
+        sh "$APPS_SH" status bare 2>/dev/null
+        hr
+        row "1) docker          ${CD}官方 get.docker.com 腳本，裝完會啟動並設開機啟動${C0}"
+        row "2) nc              ${CD}netcat，測埠通不通、臨時收發資料${C0}"
+        row "3) tcpping         ${CD}用 TCP SYN 量延遲，ICMP 被擋時用（traceroute + 腳本）${C0}"
+        row "4) mtr             ${CD}traceroute + ping 合一，看是哪一跳在掉包${C0}"
+        row "5) nginx           ${CD}Debian 系裝完會立刻啟動並佔用 80 埠${C0}"
+        row "6) 全部            ${CD}上面還沒裝的一次裝${C0}"
+        row "c) 自選多項        ${CD}例：nc mtr tcpping${C0}"
+        row "b) 返回主選單"
+        printf '\n 請選擇：'
+        read -r _c 2>/dev/null || return 0
+        printf '\n'
+        case "$_c" in
+            1) sh "$APPS_SH" install docker ;;
+            2) sh "$APPS_SH" install nc ;;
+            3) sh "$APPS_SH" install tcpping ;;
+            4) sh "$APPS_SH" install mtr ;;
+            5) sh "$APPS_SH" install nginx ;;
+            6) sh "$APPS_SH" install all ;;
+            c|C) ask_default "要裝哪幾項？（空白分隔，Enter 取消）" ""
+                 # shellcheck disable=SC2086
+                 [ -n "$REPLY_VAL" ] && sh "$APPS_SH" install $REPLY_VAL ;;
+            b|B|q|Q|'') return 0 ;;
+            *) nomsg "無此選項：$_c" ;;
+        esac
+        pause
+    done
+}
+
 # 問一題：$1=提示 $2=預設值，回答放進 REPLY_VAL
 ask_default() {
     printf ' %s%s%s ' "$CC" "$1" "$C0"
@@ -1283,7 +1330,7 @@ act_doctor() {
     check_deps
     hr
     sect "腳本"
-    for _s in "$SSH_PORT_SH" "$SELFHEAL_SH" "$F2B_SH" "$STRESS_SH" "$TIME_SH"; do
+    for _s in "$SSH_PORT_SH" "$SELFHEAL_SH" "$F2B_SH" "$STRESS_SH" "$TIME_SH" "$APPS_SH"; do
         if [ -f "$_s" ]; then
             [ -x "$_s" ] && okmsg "$_s" || wmsg "$_s（無執行權限，本選單以 sh/bash 呼叫故仍可用）"
         elif [ "$RUN_MODE" = remote ]; then
@@ -1468,6 +1515,8 @@ ops.sh — OPS-command 視覺化操作選單  v$OPS_VERSION
                    預設是執行 ops.sh 時所在的目錄，目前：$OPS_STRESS_DIR
     OPS_NTP_SERVER 時間選單「立刻校時」預設要問哪台 NTP 伺服器
                    （內網機器連不到 pool.ntp.org 時設它）
+    OPS_DOCKER_MIRROR  安裝 docker 時交給 get-docker.sh 的 --mirror
+                   （Aliyun / AzureChinaCloud，連不到 download.docker.com 時用）
     NO_COLOR       關閉顏色
 
 目前模式：$RUN_MODE（工具路徑 $ASSET_DIR）
@@ -1518,6 +1567,7 @@ if [ ! -t 0 ]; then
     printf '%s\n' "    sh $SELFHEAL_SH oneshot"
     printf '%s\n' "    DUR=60 bash $STRESS_SH cpu"
     printf '%s\n' "    sh $TIME_SH status"
+    printf '%s\n' "    sh $APPS_SH install nc mtr -y"
     printf '%s\n' "或執行 ops.sh doctor 做環境檢查。"
     exit 1
 fi
@@ -1544,6 +1594,7 @@ while :; do
         b|B) act_f2b_menu ;;
         s|S) act_stress_menu ;;
         t|T) act_time_menu ;;
+        a|A) act_apps_menu ;;
         d|D) act_doctor ;;
         i|I) act_install_deps ;;
         u|U) act_refresh ;;
