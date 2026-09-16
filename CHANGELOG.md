@@ -9,6 +9,48 @@
 
 ---
 
+## [1.13.1] - 2026-09-16
+
+在測試機上把 Linux 這邊的功能整輪跑過一次，抓到兩個既有的問題。
+
+### 修正
+
+- **換埠 `confirm` 之後，狀態檔沒有清掉。** `rollback` 會 `rm -f state confirmed`，但 `confirm`
+  只呼叫 `watchdog_cancel`（建立 `confirmed` 標記、殺掉看門狗），從頭到尾沒有刪 `state`。
+  後果不只是 `ssh-port.sh status` 永遠顯示「有進行中的變更尚未確認」——`ops.sh` 的標頭用同一個
+  檔案判斷，於是**遠端模式會永遠跳過工具腳本的自動更新**（「換埠進行中不覆蓋 ssh-port.sh」）。
+  現在 `confirm` 成功後會刪掉 `state`，但**刻意保留 `confirmed`**：萬一有殺不掉、還在 sleep 的
+  看門狗醒來，它看到標記就會自己退出，不會拿舊狀態亂還原。`status` 與 `ops.sh` 也都改成
+  「有 `confirmed` 就不算進行中」，這樣舊機器上既有的殘留檔案不必手動清也能正確顯示。
+- **`fail2ban.sh top` 會把 `--time`、`600` 這種紀錄算成來源。** 那是 1.13.0 修掉的 `ban -t` bug
+  在日誌裡留下的痕跡；`report` 已經會過濾，`top` 漏掉了。改成只收長得像 IP 的（IPv4 四段或含冒號）。
+
+### 已驗證
+
+於測試機（CentOS 7.9 / Hyper-V）實跑：
+
+- **換埠**：乾跑 → 雙埠並存 + 看門狗 → 外部用新埠登入 → `confirm` 收舊埠；另外單獨驗 `rollback`
+  路徑（換上去再還原，防火牆規則一併收回）。最後換回原埠並重跑 `fail2ban.sh enable-sshd`，
+  jail 的 port 正確跟上。
+- **壓測**：`all`（每項 60 秒）四項跑完——記憶體吃到只剩 17MB 未觸發 OOM、sshd 的
+  `oom_score_adj` 保護有還原、SWAP 19 次取樣有 17 次在換頁、循序讀取被正確判成
+  「hypervisor cache、數據無效」、fio 測試檔沒有殘留；`ntp` 子項撥快 2 分鐘後正確還原、
+  chronyd 回到執行中。
+- **時間**：`install` → `ntp on`（把快 8 小時的時鐘校回來）→ `rtc` 寫回硬體時鐘 →
+  `set-zone` 改 UTC 再改回 Asia/Taipei → `sync`；`set-time` 的乾跑正常，chronyd 執行中用 `-y`
+  正確拒絕並回傳非 0。
+- **常用軟體**：`install all` 在 CentOS 7 上五項全裝成功（docker 26.1.4 / Ncat 7.50 /
+  tcpping v2.7 / mtr 0.85 / nginx 1.20.1）；docker 裝完自動啟動、nginx 不會，與文件一致。
+- **其他**：`ops.sh doctor`（遠端模式，六支腳本全數下載）、`ssh-port.sh status`、取證的
+  `oneshot` / `debug` / `tail` / `watch`、fail2ban 的 `list` / `top` / `log` / `bantime` /
+  `check` / `allow` / `disallow` / `unban-all`。
+
+> `selfheal-ssh.sh watch` 需要真的終端機（它呼叫 procps 的 `watch`）。用
+> `ssh host '指令'` 這種沒有 TTY 的方式跑會得到 `Error opening terminal`，那是 `watch` 指令
+> 本身的訊息，不是腳本的問題；從 `ops.sh` 選單進去不會遇到。
+
+---
+
 ## [1.13.0] - 2026-09-15
 
 fail2ban 圖形化：機制圖寫進 README，另外新增 `fail2ban.sh report` 看「這台實際做了哪些事」。
@@ -1015,6 +1057,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.13.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.0...v1.13.1
 [1.13.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.11.0...v1.12.0
 [1.11.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.4...v1.11.0

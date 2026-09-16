@@ -732,6 +732,12 @@ cmd_confirm() {
         done
     fi
 
+    # 換埠已經完成，清掉「進行中」的狀態檔。沒清的話 status 與 ops.sh 的標頭會一直說
+    # 「有未確認的換埠作業」，而 ops.sh 在那個狀態下會永遠跳過工具腳本的自動更新。
+    # confirmed 這個標記刻意留著：萬一有殺不掉、還在 sleep 的看門狗醒過來，
+    # 它看到標記就會自己退出（見 watchdog_start），不會拿舊狀態亂還原。
+    rm -f "$STATE" 2>/dev/null
+
     printf '\n'
     ok "完成。SSH 現在只監聽埠 $NEW_PORT"
     info "備份保留在 $BACKUP，確認穩定後可自行刪除"
@@ -803,7 +809,8 @@ cmd_status() {
     fi
     info "SELinux   : $SELINUX"
     info "防火牆    : $FW"
-    if [ -f "$STATE" ]; then
+    # confirmed 存在 = 已經確認完成，此時的 state 只是 1.13.1 之前留下的殘留，不是進行中
+    if [ -f "$STATE" ] && [ ! -f "${STATE_DIR}/confirmed" ]; then
         printf '\n'
         warn "有進行中的變更尚未確認："
         sed 's/^/      /' "$STATE"

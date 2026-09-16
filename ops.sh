@@ -385,8 +385,11 @@ detect() {
     [ -z "$PORTS" ] && PORTS=22
     PORTS=$(printf '%s\n' $PORTS | sort -un | tr '\n' ',' | sed 's/,$//')
 
+    # 有 confirmed 標記代表換埠已經確認完成，state 只是殘留（1.13.1 之前的 confirm 沒清掉它）。
+    # 誤判成「進行中」的代價不只是標頭多一行警告：遠端模式會因此永遠跳過工具腳本的自動更新。
     PENDING=0
-    { [ -f "$PORT_STATE" ] || [ -f "$LEGACY_PORT_STATE" ]; } && PENDING=1
+    [ -f "$PORT_STATE" ] && [ ! -f "${PORT_STATE%/state}/confirmed" ] && PENDING=1
+    [ -f "$LEGACY_PORT_STATE" ] && [ ! -f "${LEGACY_PORT_STATE%/state}/confirmed" ] && PENDING=1
 
     # 時區。標頭每輪都會重畫，所以這裡只讀檔案，不呼叫 timedatectl
     # （那是 D-Bus 往返，systemd 有狀況時會卡住整個選單）。

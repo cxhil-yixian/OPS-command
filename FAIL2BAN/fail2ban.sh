@@ -796,7 +796,10 @@ cmd_top() {
     case "$_n" in ''|*[!0-9]*) die "數量要是數字" ;; esac
     [ "$(log_src)" = none ] && die "讀不到 fail2ban 日誌（找過 /var/log/fail2ban.log、journal、logread）"
     step "封鎖次數最多的來源 TOP $_n（來源：$(log_src)）"
-    log_cat | grep -E '\] Ban ' | awk '{print $NF}' |
+    # 只收長得像 IP 的：舊版 banip 不認得 --time 時，日誌裡會留下「Ban 600」「Ban --time」
+    # 這種紀錄（見「封鎖時長」一節），不能把它們算成來源
+    log_cat | grep -E '\] Ban ' |
+        awk '{ ip = $NF; if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ || ip ~ /:/) print ip }' |
         sort | uniq -c | sort -rn | head -n "$_n" |
         awk '{printf "  %6s 次  %s\n", $1, $2}'
 }
