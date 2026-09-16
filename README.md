@@ -252,11 +252,18 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 | Windows 工具 | 狀態 |
 |---|---|
 | `ops-win.ps1`（一行指令進入點） | ❔ 從未在 Windows 上執行過 |
-| `Win_Admin_Tool.bat` + `.ps1`（本機進入點） | ❔ 從未在 Windows 上執行過 |
+| `Win_Admin_Tool.bat` + `.ps1`（本機進入點） | ⚠️ 六個功能在 Windows 10 22H2 實機跑過，其餘未驗證 |
 
-這兩支的修改都是在 Linux 上做的，只做過結構檢查（括號平衡、函式定義、編碼與行尾），
-**沒有真的跑過**。第一次用請先在測試機上驗，尤其是換 RDP Port 那條流程——它會重啟
-`TermService`，目前那條 RDP 連線必然中斷。
+`Win_Admin_Tool.ps1` 已經在一台真的 Windows 10 22H2 上執行過：選單起得來、提權正常，
+實際跑過並還原的有六項——停止 / 還原 Windows 更新、Ping (ICMP) 設定、解除帳號密碼鎖定、
+CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假成功**的真實 bug
+（見 [CHANGELOG](CHANGELOG.md)）。**換 RDP Port 那條流程仍然完全沒驗證過**——它會重啟
+`TermService`，目前那條 RDP 連線必然中斷，第一次用請先在測試機上驗。逐項狀態見
+[WINDOWS/README.md](WINDOWS/README.md#已知限制)。
+
+靜態檢查也用真正的 PowerShell 工具做過（在 Linux 的容器裡）：語法解析**兩支都 0 個錯誤**，
+編碼與行尾符合 `.gitattributes`，PSScriptAnalyzer 的告警逐項確認後沒有一項要改（絕大多數是
+`Write-Host`，以及三個刻意留空的 `catch` 與一個刻意不加的 BOM）。**解析過不等於跑得起來。**
 
 > **`time-set.sh` 在 CentOS 7.9 上驗過的部分**：`status` / `list` / `doctor`、時區變更的
 > **兩條路徑都實機跑過並還原**（`timedatectl set-timezone`，以及強制走「直接改

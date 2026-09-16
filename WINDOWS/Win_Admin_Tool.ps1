@@ -319,9 +319,23 @@ function Stop-WinUpdate {
     Set-ItemProperty -Path $au -Name NoAutoUpdate -Value 1
     Set-ItemProperty -Path $au -Name AUOptions -Value 1
     Write-Host ""
+    # 讀回來不能只讀一次。實測 Windows 10 22H2：設成 Disabled 之後「兩秒內」就會被
+    # 更新自我修復 (Update Orchestrator / WaaSMedic) 改回 Manual 並重新啟動服務,
+    # 而立刻讀的那一眼還是 Disabled —— 於是畫面印「已停止」,實際上更新照跑。
+    # 上面寫的 WaaSMedicSvc Start=4 要重開機才生效,擋不住當下還在跑的修復服務。
     $wu = Get-Service wuauserv -ErrorAction SilentlyContinue
     if ($wu -and $wu.StartType -eq 'Disabled') {
-        Write-Host "[完成] Windows 更新已停止 (wuauserv 啟動類型 = Disabled)。"
+        Start-Sleep -Seconds 6
+        $wu2 = Get-Service wuauserv -ErrorAction SilentlyContinue
+        if ($wu2 -and $wu2.StartType -eq 'Disabled') {
+            Write-Host "[完成] Windows 更新已停止 (wuauserv 啟動類型 = Disabled)。"
+        } else {
+            Write-Host ("[未生效] 設定當下是 Disabled,6 秒後又變回 {0}/{1}。" -f $(if ($wu2) { $wu2.StartType } else { '讀不到' }), $(if ($wu2) { $wu2.Status } else { '?' }))
+            Write-Host "         是 Windows 的更新自我修復 (Update Orchestrator / WaaSMedic) 改回去的,"
+            Write-Host "         可在事件檢視器的系統記錄檔看到 SCM 7040「啟動類型已變更」兩筆一來一回。"
+            Write-Host "         本工具已把 WaaSMedicSvc 設為停用,但那要「重新開機」後才會生效;"
+            Write-Host "         重開機後再執行一次本項,設定才留得住。"
+        }
     } else {
         Write-Host ("[未完成] wuauserv 啟動類型現在是 {0},預期 Disabled。" -f $(if ($wu) { $wu.StartType } else { '讀不到' }))
         Write-Host "         可能被群組原則或第三方工具鎖住,請檢查上面的錯誤訊息。"

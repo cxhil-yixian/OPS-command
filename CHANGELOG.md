@@ -9,6 +9,52 @@
 
 ---
 
+## [1.13.3] - 2026-09-16
+
+第一次把 `Win_Admin_Tool.ps1` 放到真的 Windows 上跑（Windows 10 22H2）。六個功能實際執行
+並還原，抓到一個「畫面說成功、實際沒生效」的 bug。
+
+### 修正
+
+- **「停止 Windows 更新」會回報假成功。** 把 `wuauserv` 啟動類型設成 `Disabled` 之後立刻讀回來
+  確認——但 Windows 的更新自我修復（Update Orchestrator / WaaSMedic）會在**幾秒內**把它改回
+  `Manual` 並重新啟動服務，而立刻讀的那一眼還是 `Disabled`。於是畫面印「[完成] Windows 更新
+  已停止」，實際上更新照跑。實測 Windows 10 22H2：`t+0` 是 `Stopped/Disabled`，`t+5s` 就變回
+  `Running/Manual`，系統記錄檔裡有 SCM 7040「啟動類型已變更」一來一回兩筆可以對上。
+  腳本原本寫的「把 `WaaSMedicSvc` 設為停用」要**重新開機**才生效，擋不住當下正在跑的修復服務。
+  改成設定後等 6 秒再複查：沒留住就印「[未生效]」、指出現在變成什麼狀態、是誰改回去的，
+  以及「重開機後再執行一次本項才留得住」。
+
+### 已驗證
+
+於一台 Windows 10 22H2 實機執行 `Win_Admin_Tool.ps1`（選單起得來、提權正常），
+以下六項實際跑過並全部還原成原狀：
+
+| 功能 | 結果 |
+|---|---|
+| 停止 Windows 更新 | **抓到上述 bug**，用 SCM 7040 事件對照確認 |
+| 還原 Windows 更新 | 正確把 `wuauserv` 還原成 `Manual` 並啟動 |
+| Ping (ICMP) 設定 | 開啟 / 關閉都建立了對應防火牆規則，事後清除乾淨 |
+| 解除帳號密碼鎖定 | 鎖定閾值 10 → 從不 → 10，來回都正確 |
+| CredSSP 加密預示修復 | `AllowEncryptionOracle` 設為 2、再還原成「尚未設定」 |
+| RDP 多開 | `fSingleSessionPerUser` 開啟後還原 |
+
+**換 RDP Port 那條流程（含看門狗排程）仍然完全沒驗證過**——測試在第一步就因為帳號被鎖而中止，
+那台機器的 RDP 設定從頭到尾沒有被動過。磁碟管理、Hyper-V、時間同步、Store 自動更新、
+防火牆 Port 管理、帳號相關功能、以及 `ops-win.ps1` 一行指令路徑也都還沒跑過。
+上面那個修正的**新分支本身也還沒在實機上觸發過**——修好之後就沒有機會再跑一次。
+
+### 已知限制
+
+- **帳號鎖定政策在對外曝露的機器上會反過來變成阻斷自己的管道。** 測試那台（RDP 3389 直接
+  對外）在測試期間被持續暴力破解，內建 Administrator 每 10 分鐘就被鎖一次。帳號被鎖住時
+  **連 SSH 都會在認證開始前就被切斷**：sshd 無法替鎖定帳號建立存取權杖，連線直接 reset，
+  而且 sshd 的紀錄裡一筆都不會留——不存在的帳號反而會留下正常的 `Invalid user` 紀錄，
+  這個差異是判斷「是帳號被鎖」而不是「密碼錯了」的關鍵。Windows 沒有 fail2ban 的對應機制，
+  本工具的「解除帳號密碼鎖定」只能調整閾值、擋不住來源。對外的機器請靠限制來源 IP。
+
+---
+
 ## [1.13.2] - 2026-09-16
 
 在一台 Ubuntu 24.04 上把 Linux 這邊的功能整輪跑過，抓到四個既有問題，其中兩個是
@@ -1108,6 +1154,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.13.3]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.2...v1.13.3
 [1.13.2]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.1...v1.13.2
 [1.13.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.0...v1.13.1
 [1.13.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.12.0...v1.13.0

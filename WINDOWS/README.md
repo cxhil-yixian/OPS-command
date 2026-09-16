@@ -206,12 +206,44 @@ shell 腳本被寫成 CRLF 的話，shebang 會變成 `/bin/sh\r` 而直接執�
 
 ## 已知限制
 
-- **這裡的東西沒有在 Windows 上實測過。** 修改是在 Linux 上做的，PowerShell 語法經過
-  結構檢查（括號平衡、函式定義），但沒有真的跑過——`ops-win.ps1` 這條一行指令的路徑
-  也一樣。第一次用請先在測試機上驗證，尤其是換 RDP Port 那條流程。
+- **只有六個功能在真的 Windows 上跑過，其餘全部未驗證。** 在一台 Windows 10 22H2 上實際
+  執行 `Win_Admin_Tool.ps1`，選單起得來、提權正常，以下六項跑過並且全部還原成原狀：
+
+  | 功能 | 實機結果 |
+  |---|---|
+  | 停止 Windows 更新 | **抓到假成功的 bug**（見下一節與 [CHANGELOG](../CHANGELOG.md)） |
+  | 還原 Windows 更新 | 正確把 `wuauserv` 還原成 `Manual` 並啟動 |
+  | Ping (ICMP) 設定 | 開啟 / 關閉都建立了對應防火牆規則，事後清除乾淨 |
+  | 解除帳號密碼鎖定 | 鎖定閾值 10 → 從不 → 10，來回都正確 |
+  | CredSSP 加密預示修復 | `AllowEncryptionOracle` 設為 2、再還原成「尚未設定」 |
+  | RDP 多開 | `fSingleSessionPerUser` 開啟後還原 |
+
+  **沒跑過的**：換 RDP Port 的完整流程（含看門狗排程）、磁碟管理、Hyper-V 切換、時間同步、
+  Store 自動更新、防火牆 Port 管理、帳號相關功能，以及 `ops-win.ps1` 這條一行指令路徑。
+  第一次用請先在測試機上驗證，尤其是換 RDP Port 那條——它會重啟 `TermService`。
+
+  靜態檢查倒是做完了（在 Linux 的 PowerShell 容器裡跑，不需要 Windows）：
+
+  | 檢查 | 結果 |
+  |---|---|
+  | `[Parser]::ParseFile` 真正的語法解析 | 兩支都 **0 個解析錯誤**（`Win_Admin_Tool.ps1` 37 個函式、5973 個 token） |
+  | 編碼與行尾 | 符合 `.gitattributes`：`ops-win.ps1` 無 BOM、`Win_Admin_Tool.ps1` 有 BOM、三個檔都是 CRLF |
+  | PSScriptAnalyzer 1.22 | `ops-win.ps1` 21 筆、`Win_Admin_Tool.ps1` 323 筆，**逐項確認後沒有一項要改** |
+
+  分析器那些告警的成分：320 筆是 `PSAvoidUsingWriteHost`（互動式選單本來就該用它）、
+  3 筆空 `catch`（包的是 `[Console]::OutputEncoding` 與 TLS 1.2 設定，失敗時本來就該繼續跑）、
+  1 筆 `PSUseBOMForUnicodeEncodedFile`（`ops-win.ps1` **刻意**不加 BOM，見上面「編碼」一節），
+  其餘是命名風格。**這些都不影響行為，解析過不代表跑得起來——實機行為仍然是零驗證。**
 - 一行指令這條路徑另外有三個只有實機能確認的點：`irm | iex` 對 UTF-8 無 BOM 檔案的
   解析、`Invoke-WebRequest -OutFile` 之後 `Unblock-File` 有沒有真的解掉 MOTW、
   以及管線跑法下的提權（`$PSCommandPath` 為空 -> 寫檔 -> `RunAs`）。
 - 「RDP 多開」在用戶端版（家用 / 專業版）受 `termsrv.dll` 限制，本工具只放寬工作階段
   規則；要真正多人同時連線需搭配 RDP Wrapper，且涉及授權條款，請自行評估。
 - Hyper-V 與 VMware 的切換需要重新開機才會生效。
+- **帳號鎖定政策在對外曝露的機器上會反過來變成阻斷自己的管道。** 測試那台（RDP 3389 直接
+  對外）在測試期間被持續暴力破解，內建 Administrator 每 10 分鐘就被鎖一次。帳號被鎖住時
+  **連 SSH 都會在認證開始前就被切斷**——sshd 無法替鎖定帳號建立存取權杖，連線直接 reset，
+  而且 sshd 自己的紀錄裡一筆都不會留（不存在的帳號反而會留下正常的 `Invalid user` 紀錄，
+  這個差異是判斷的關鍵）。攻擊者不需要猜中密碼，只要一直猜就能讓合法使用者永遠登不進去。
+  Windows 這邊沒有 fail2ban 的對應機制，本工具的「解除帳號密碼鎖定」只能調整閾值、
+  擋不住來源。對外的機器請靠「限制來源 IP」，不要只靠鎖定閾值。
