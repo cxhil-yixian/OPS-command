@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.12
+OPS_VERSION=1.13
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -541,7 +541,7 @@ menu() {
     row "8) 解析排查        ${CD}傾印原始 ss / ps 資料，回報問題時用${C0}"
     printf '\n'
     sect "封鎖管理  (FAIL2BAN/fail2ban.sh)"
-    row "b) 進入封鎖選單    ${CD}手動封鎖 / 解封 / 白名單 / 排行，底層走 fail2ban${C0}"
+    row "b) 進入封鎖選單    ${CD}手動封鎖 / 解封 / 白名單 / 排行 / 報告，底層走 fail2ban${C0}"
     printf '\n'
     sect "壓力測試  (STRESS/stress-test.sh)"
     row "s) 進入壓測選單    ${CD}CPU / 記憶體 / 磁碟 / SWAP / NTP，會把機器操到滿載${C0}"
@@ -720,6 +720,7 @@ act_f2b_menu() {
         row "7) 封鎖次數排行    ${CD}讀 fail2ban 日誌${C0}"
         row "8) 追蹤 fail2ban 日誌"
         row "9) 清空所有封鎖    ${CD}要打 y 二次確認${C0}"
+        row "r) 產生報告        ${CD}fail2ban 做了哪些事：時間軸 / 慣犯 / 防火牆比對，另存 HTML${C0}"
         printf '\n'
         row "e) 建立 sshd jail  ${CD}埠號取實際生效值，換過 SSH 埠後要重跑${C0}"
         row "t) 封鎖時長設定"
@@ -746,6 +747,9 @@ act_f2b_menu() {
                sh "$F2B_SH" top "${_n:-15}" ;;
             8) dim " Ctrl-C 離開，會回到本選單"; sleep 1; sh "$F2B_SH" tail ;;
             9) sh "$F2B_SH" unban-all ;;
+            r|R) printf ' 範圍幾天？(Enter = 7，all = 日誌裡全部) '
+                 read -r _d 2>/dev/null || _d=''
+                 sh "$F2B_SH" report --days "${_d:-7}" ;;
             e|E) sh "$F2B_SH" enable-sshd ;;
             t|T) sh "$F2B_SH" bantime
                  printf ' 要改哪個 jail？(Enter 略過) '

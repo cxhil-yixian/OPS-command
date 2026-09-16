@@ -61,7 +61,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.12
+ OPS-command 運維工具箱  v1.13
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
@@ -82,7 +82,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
    8) 解析排查        傾印原始 ss / ps 資料，回報問題時用
 
  封鎖管理  (FAIL2BAN/fail2ban.sh)
-   b) 進入封鎖選單    手動封鎖 / 解封 / 白名單 / 排行，底層走 fail2ban
+   b) 進入封鎖選單    手動封鎖 / 解封 / 白名單 / 排行 / 報告，底層走 fail2ban
 
  壓力測試  (STRESS/stress-test.sh)
    s) 進入壓測選單    CPU / 記憶體 / 磁碟 / SWAP / NTP，會把機器操到滿載
@@ -118,6 +118,12 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 拉回去，這種情況會停下來問要不要先停用它——`-y` 免確認模式一律拒絕，要你先明確
 `ntp off`。細節見 [TIME/README.md](TIME/README.md)。
 
+封鎖選單（`b`）的 `r` 產生**報告**，回答「這台的 fail2ban 實際做了哪些事」：什麼時候被攻擊、
+偵測到的失敗有多少變成封鎖、誰一再回來、現在封了誰還剩多久、封鎖有沒有真的落到防火牆裡、
+攻擊者試了哪些帳號。終端機印摘要，另外產生一個離線可開的單檔 HTML（內嵌 SVG，不連 CDN）；
+全程唯讀。fail2ban 本身怎麼運作（含會悄悄失效的地方）畫成三張圖放在
+[FAIL2BAN/README.md](FAIL2BAN/README.md#fail2ban-到底做了哪些事)。
+
 常用軟體（`a`）一次可以裝一項、全部、或自選幾項。docker 走官方的 `get.docker.com` 腳本
 （先下載成檔案、驗過內容再執行；Alpine 與 AlmaLinux 這類它不支援的發行版改走 apk /
 docker-ce repo），其他四項依套件管理器對應套件名——`nc` 在 RHEL 系是 `nmap-ncat`、
@@ -140,7 +146,7 @@ OPS-command/
 │   ├── ssh-port.sh     安全變更 SSH 連接埠（雙埠並存 + 看門狗自動還原）
 │   └── selfheal-ssh.sh SSH 連線取證與即時監看（夜鶯 n9e 自愈腳本）
 ├── FAIL2BAN/           → 詳見 FAIL2BAN/README.md
-│   └── fail2ban.sh     封鎖管理：手動封鎖 / 解封 / 白名單 / 排行 / 環境檢查
+│   └── fail2ban.sh     封鎖管理：手動封鎖 / 解封 / 白名單 / 排行 / 環境檢查 / 報告
 ├── STRESS/             → 詳見 STRESS/README.md
 │   └── stress-test.sh  壓力測試：CPU / 記憶體 / 磁碟 / SWAP / NTP
 ├── TIME/               → 詳見 TIME/README.md

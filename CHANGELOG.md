@@ -9,6 +9,85 @@
 
 ---
 
+## [1.13.0] - 2026-09-15
+
+fail2ban 圖形化：機制圖寫進 README，另外新增 `fail2ban.sh report` 看「這台實際做了哪些事」。
+
+### 新增
+
+- **`FAIL2BAN/README.md`「fail2ban 到底做了哪些事」**：三張 Mermaid 圖，GitHub 上直接畫出來。
+  - **從日誌到防火牆**：sshd 寫日誌 → filter 比對 → ignoreip → findtime / maxretry 計數 →
+    Ban 寫資料庫 → banaction → 防火牆規則 → bantime 到期 Unban，以及重啟時的 Restore Ban。
+    四個「服務是綠的但一個都擋不住」的點用紅色標在對應的那一步（讀不到日誌、沒有 jail、
+    port 對不上、banaction 與防火牆不符 / reload 沖掉規則）。
+  - **`fail2ban.sh` 碰的是哪一段**：子命令分四組（改封鎖狀態 / 改設定 / 查詢 / 檢查），
+    實線改狀態、虛線唯讀；腳本與防火牆之間沒有實線。細節另附一張「命令 × 碰到的東西」對照表。
+  - **一個 IP 走一遍**：用 `enable-sshd` 實際寫入的 maxretry 5 / findtime 600 / bantime 3600，
+    示範 findtime 是往前滑動的視窗——每 3 分鐘試一次的慢速爆破永遠到不了 5 次。
+- **`fail2ban.sh report`**（封鎖選單 `r`）：終端機摘要 + 單檔 HTML，回答七件事——時間軸、
+  Found 與 Ban 的比例（含「只被偵測、從沒被封」的慢速爆破）、慣犯排行、目前封鎖中與剩餘時間、
+  各 jail 分布、封鎖中的 IP 在防火牆規則裡找不找得到、攻擊者試了哪些帳號。
+  - **全程唯讀**，不需要 fail2ban 以外的套件。伺服器沒在跑時略過「目前封鎖中」與防火牆比對，
+    其餘照日誌算。`--days <N|all>`（預設 7；2 天以內每小時一格，否則每天一格）、`-o <檔案>`。
+  - 讀 fail2ban 日誌的**輪替檔**（`.1`、`.2.gz`…），沒有檔案才退回 journal；認證日誌讀
+    `secure*` / `auth.log*`，都沒有才退回 `journalctl _COMM=sshd`。每個來源各涵蓋到哪一天寫在
+    報告最下面，日誌比範圍短時開頭直接標出「前面是沒有資料，不是沒有攻擊」。
+  - 到期時間優先讀 sqlite 資料庫（`sqlite3` CLI，沒有就用 fail2ban 自己的 python），
+    讀不到才退回「日誌的 Ban 時間 + jail 的 bantime」，表格上註明來源。
+  - 帳號用 sshd 的 pid 去重（一條連線寫的好幾行只算一次），依「試過它的來源數」排序；
+    sshd 回報過「密碼錯誤」的帳號標為存在。
+  - **白名單（ignoreip）裡的來源不算攻擊者**：帳號排行與「不計數的連線」都先排除（CIDR 照樣
+    做網段比對），並註明排除了幾筆。沒有這一步，管理員自己打錯一次密碼、測一下埠，都會被畫成攻擊。
+  - 範圍內的 Ban 全都沒有對應的 Found 時（手動封鎖，或 Found 在範圍之前），直接這樣講，
+    不印「每 0.0 次 Found 換一次 Ban」這種沒有意義的比例。
+  - **另外列出 fail2ban 預設不計數的連線**：連上就斷的掃描、認證前斷線、協商失敗、非 SSH 探測，
+    各自的次數與來源數，以及「從沒出現在 Found / Ban 裡」的來源有幾個。說明依 sshd jail 實際的
+    `mode` 走（normal 時講清楚這些一次都不會算、改 aggressive 的代價）。起因是在測試機上實測：
+    只收金鑰的 22 埠半小時內 14 筆這類紀錄，`fail2ban-regex` 用 normal 一筆都沒比對到、
+    aggressive 全中——沒有 Found 不代表沒人在試。
+  - **HTML 是單一檔案**：內嵌 SVG，不載入 JS 函式庫、不連 CDN，離線可開、可轉寄；亮 / 暗色跟
+    系統設定走；時間軸每根長條都有 hover 提示並附表格檢視。攻擊者可控的字串（帳號名稱）一律
+    HTML 跳脫——測試資料裡放了 `<script>alert(1)</script>` 當帳號名稱驗過。
+  - 日期換算全部在 awk 裡自己做（days_from_civil），不用 `date -d` 也不用 gawk 才有的
+    `mktime` / `strftime`。同一份測試資料在 gawk 4.0、mawk（Debian 12）、busybox awk
+    （Alpine 3.20）上跑出完全相同的總計。
+
+### 修正
+
+- **`ban -t` 在 fail2ban 0.11.2 上會把 `--time` 與秒數也當成 IP 封下去。** 0.11.2（EPEL 7）
+  不支援 `banip --time`，但它不報錯，而是把每個參數都當成 IP：目標 IP 照樣進清單（時長是
+  jail 預設），另外多出 `--time`、`600`（或 `-1`）兩筆垃圾，日誌出現
+  `Failed to execute ban … INVALID_ADDR: -1`。原本的能力探測只看「目標 IP 有沒有進清單」，
+  於是誤判成支援——指定的時長靜靜地沒生效，畫面上也沒有任何警告。改成看清單裡有沒有多出
+  `--time`：有就把垃圾解掉、降級成 jail 的 bantime 並明講。這是在測試機上實際手動封鎖時抓到的。
+- `report` 只收長得像 IP 的紀錄，上面那種 bug 留在日誌裡的 `Ban 600` 不會被算成一個來源。
+
+### 變更
+
+- `OPS_VERSION` 升到 `1.13`；主選單 `b` 那一列、根 `README.md` 的選單示意與目錄結構補上「報告」。
+
+### 已驗證
+
+- **測試機實裝**（CentOS 7.9、Hyper-V VM）：`install`（EPEL 7 已封存，epel-release 7-11 的 metalink
+  仍指得到封存鏡像，照原樣裝得起來）→ `allow` → `enable-sshd`（自動取到 `22,24672` 與
+  `firewallcmd-rich-rules`）→ `doctor` 全數通過；手動封鎖的 IP 在 firewalld rich rule 裡都找得到。
+- **`report` 在真實攻擊資料上跑過**：gawk 4.0、sqlite 3.7.17、firewalld。24 小時的那一份實際內容：
+  Found 45 次 / Ban 13 次 / 9 個來源（2 個被封 2 次以上）、封鎖中 1 個（到期時間讀自 sqlite，
+  且在 firewalld rich rule 裡找得到——第 6 項的比對是對真的規則做的）、攻擊者試了 23 個帳號。
+  最值得看的是最後一段：**同一段時間裡有 948 次連線是 fail2ban 預設不計數的**（認證前斷線 495、
+  連上就斷的掃描 446），其中 67 個來源從頭到尾沒進過 Found / Ban。
+- 第一次跑抓到四個測試資料不會觸發的問題，都已修正：
+  - Y 軸刻度原本是「最大值切 4 等分」，最大值 5 時標籤變成 0 / 1 / 3 / 4 / 6，長條看起來對不上。
+    改成 1 / 2 / 5 × 10ⁿ 的整數間隔。
+  - 目前封鎖中為 0 時磁磚是空白（未初始化的變數印成空字串）。
+  - 沒有封鎖中的 IP 時不會去讀資料庫，資料來源卻寫「沒有資料庫」——改成講清楚是「不需要讀取」。
+  - 管理員自己的連線被算成攻擊者（見上面的白名單排除）。
+- **測試資料**：合成的 fail2ban 日誌（含 `.gz` 輪替）、認證日誌、sqlite 資料庫與模擬 0.11.2 行為的
+  假 `fail2ban-client`，涵蓋尖峰、慣犯、慢速爆破、白名單、永久封鎖、Restore Ban、掃描類連線與
+  藏了 `<script>` 的帳號名稱。HTML 在亮色 / 暗色 / 400px 手機寬度下截圖檢查過，沒有水平溢出。
+
+---
+
 ## [1.12.0] - 2026-09-15
 
 新增常用軟體安裝：`APPS/apps.sh`，主選單按 `a`。
@@ -936,6 +1015,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.13.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.11.0...v1.12.0
 [1.11.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.4...v1.11.0
 [1.10.4]: https://github.com/cxhil-yixian/OPS-command/compare/v1.10.3...v1.10.4
