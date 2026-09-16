@@ -109,7 +109,34 @@ Get-ScheduledTask -TaskName OPS-RdpPort-Watchdog -ErrorAction SilentlyContinue
   E. 虛擬化 (Hyper-V)   - 與 VMware 切換 / 啟用停用
   F. 磁碟管理           - diskpart 視覺化
   S. 檢查現況           - 驗證設定 (免管理員)
+  L. 事件檢視器         - 依症狀查事件紀錄 (免管理員)
 ```
+
+`S` 與 `L` 是僅有的兩個**唯讀**入口，按了不會改動任何設定；A～F 都會動到系統。
+
+`L` 用「症狀」而不是事件 ID 分類，因為排錯的人腦袋裡是症狀：
+
+| 情境 | 查什麼 |
+|---|---|
+| 1. 非預期關機 / 重開機 | Kernel-Power 41、EventLog 6008、User32 1074（**誰**要求關機的）、WER 1001 |
+| 2. 藍畫面與硬體錯誤 | BugCheck 1001（停止碼與傾印檔位置）、WHEA-Logger 17/18/19/20/47 |
+| 3. 磁碟與儲存 | disk 7/11/51/153、Ntfs 55/98/130/137、chkdsk 結果 |
+| 4. 服務異常 | SCM 7000～7045，含 **7040「啟動類型被改」** |
+| 5. 應用程式當機 / 無回應 | Application Error 1000、Application Hang 1002、.NET Runtime 1026 |
+| 6. 登入與帳號 | Security 4624/4625/**4740（帳號被鎖定）**/4648、RDP 1149 與 21/23/24/25 |
+| 7. Windows 更新 | WindowsUpdateClient 19/20/43 |
+
+另有 `C. 自訂查詢`，自己指定記錄檔與事件 ID，給情境清單沒涵蓋到的狀況用。
+
+每個情境進去後：輸入編號展開完整內容與原始 EventData、`T` 切換 24 小時 / 7 天 / 30 天、
+`E` 匯出 CSV（存到桌面，UTF-8 含 BOM，Excel 直接開不會亂碼）。
+
+**這裡只讀不寫，沒有「清除記錄檔」。** 清除無法復原，而且會摧毀事後稽核的能力——
+第 4 項和第 6 項之所以有用，正是因為紀錄還在。真要清請自己用 `wevtutil cl`。
+
+只有第 6 項需要管理員（Security 記錄檔一般帳號讀不到），而且是**進去那一項才問**，
+不是一進 `L` 就擋。讀不到的時候會明確標示「讀不到」，不會印成「沒有紀錄」——
+這兩者混為一談會讓「沒權限看」被當成「沒有人嘗試登入」。
 
 ---
 
@@ -218,22 +245,35 @@ shell 腳本被寫成 CRLF 的話，shebang 會變成 `/bin/sh\r` 而直接執�
   | CredSSP 加密預示修復 | `AllowEncryptionOracle` 設為 2、再還原成「尚未設定」 |
   | RDP 多開 | `fSingleSessionPerUser` 開啟後還原 |
 
-  **沒跑過的**：換 RDP Port 的完整流程（含看門狗排程）、磁碟管理、Hyper-V 切換、時間同步、
-  Store 自動更新、防火牆 Port 管理、帳號相關功能，以及 `ops-win.ps1` 這條一行指令路徑。
+  **沒跑過的**：`L. 事件檢視器`（1.14.0 新增，完全沒在 Windows 上跑過）、換 RDP Port 的
+  完整流程（含看門狗排程）、磁碟管理、Hyper-V 切換、時間同步、Store 自動更新、
+  防火牆 Port 管理、帳號相關功能，以及 `ops-win.ps1` 這條一行指令路徑。
   第一次用請先在測試機上驗證，尤其是換 RDP Port 那條——它會重啟 `TermService`。
+
+  事件檢視器是唯讀的，跑錯了最多是查不到東西，不會改到系統——但「查不到」跟「沒發生」
+  是兩件事，第一次用請拿一個你已經知道答案的情境去對（例如剛重開過機就查第 1 項）。
 
   靜態檢查倒是做完了（在 Linux 的 PowerShell 容器裡跑，不需要 Windows）：
 
   | 檢查 | 結果 |
   |---|---|
-  | `[Parser]::ParseFile` 真正的語法解析 | 兩支都 **0 個解析錯誤**（`Win_Admin_Tool.ps1` 37 個函式、5973 個 token） |
+  | `[Parser]::ParseFile` 真正的語法解析 | 兩支都 **0 個解析錯誤**（`Win_Admin_Tool.ps1` 46 個函式、8328 個 token） |
   | 編碼與行尾 | 符合 `.gitattributes`：`ops-win.ps1` 無 BOM、`Win_Admin_Tool.ps1` 有 BOM、三個檔都是 CRLF |
-  | PSScriptAnalyzer 1.22 | `ops-win.ps1` 21 筆、`Win_Admin_Tool.ps1` 323 筆，**逐項確認後沒有一項要改** |
+  | PSScriptAnalyzer 1.22 | `ops-win.ps1` 21 筆、`Win_Admin_Tool.ps1` 342 筆，**其中一筆是真的 bug** |
 
-  分析器那些告警的成分：320 筆是 `PSAvoidUsingWriteHost`（互動式選單本來就該用它）、
-  3 筆空 `catch`（包的是 `[Console]::OutputEncoding` 與 TLS 1.2 設定，失敗時本來就該繼續跑）、
-  1 筆 `PSUseBOMForUnicodeEncodedFile`（`ops-win.ps1` **刻意**不加 BOM，見上面「編碼」一節），
-  其餘是命名風格。**這些都不影響行為，解析過不代表跑得起來——實機行為仍然是零驗證。**
+  1.14.0 這一輪分析器抓到一個真的缺陷（`PSUseDeclaredVarsMoreThanAssignments`：自訂查詢
+  問了使用者「往回幾天」，卻沒把 `$days` 傳進 `Show-EventScenario`，該函式內部又寫死 7 天
+  ——輸入 30 天實際只查 7 天，而且畫面照樣標「最近 7 天」，不報錯、只給錯答案）。已修正。
+  所以「分析器的告警都是雜訊」這個說法是錯的，值得逐筆看完。
+
+  其餘 341 筆確認過不需要改：319 筆 `PSAvoidUsingWriteHost`（互動式選單本來就該用它）、
+  12 筆 `PSUseShouldProcessForStateChangingFunctions`（這些是選單動作，每個危險操作都已經
+  有自己的確認步驟，再加一層 `-WhatIf` / `-Confirm` 沒有意義）、7 筆 `PSUseApprovedVerbs`
+  與 3 筆 `PSUseSingularNouns`（`Require-Admin`、`Manage-*`、`Menu-*` 這些名字是選單語意，
+  換成核准動詞反而難讀）、1 筆空 `catch`。`ops-win.ps1` 那 21 筆是 18 筆 `Write-Host`、
+  2 筆刻意留空的 `catch`（包的是 `[Console]::OutputEncoding` 與 TLS 1.2 設定，失敗時本來
+  就該繼續跑）、1 筆 `PSUseBOMForUnicodeEncodedFile`（**刻意**不加 BOM，見上面「編碼」一節）。
+  **解析過不代表跑得起來——實機行為仍然是零驗證。**
 - 一行指令這條路徑另外有三個只有實機能確認的點：`irm | iex` 對 UTF-8 無 BOM 檔案的
   解析、`Invoke-WebRequest -OutFile` 之後 `Unblock-File` 有沒有真的解掉 MOTW、
   以及管線跑法下的提權（`$PSCommandPath` 為空 -> 寫檔 -> `RunAs`）。

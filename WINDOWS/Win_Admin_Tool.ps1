@@ -961,30 +961,342 @@ function Add-BatchIP {
 }
 
 # ---- RDP: 查看遠端登入紀錄 ----
+# 底層查詢跟「L. 事件檢視器」共用 Invoke-EventQuery,同一份邏輯只留一份。
+# 順便修掉舊版的一個問題:以前「查不到紀錄」和「沒權限讀 Security」印的是同一句話,
+# 於是「讀不到」會被當成「沒有人嘗試登入」—— 那是最不該搞錯的方向。
 function Show-RdpLogins {
     if (-not (Require-Admin)) { return }
     Clear-Host
     Write-Host "=== 遠端桌面 (RDP) 登入紀錄 ==="
+    Write-Host "   (要看更完整的登入事件,請用主選單 L 的『登入與帳號』)"
     Write-Host ""
     Write-Host "--- 最近的 RDP 連線 (成功通過驗證, 事件 1149) ---"
-    try {
-        $ev = Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational'; Id=1149} -MaxEvents 25 -ErrorAction Stop
-        foreach ($e in $ev) {
+    $r1 = Invoke-EventQuery -Queries @(@{ Log='Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational'; Ids=@(1149) }) -Days 365 -Max 25
+    if ($r1.Problems.Count -gt 0) {
+        foreach ($p in $r1.Problems) { Write-Host ("   [讀不到] {0}" -f $p) }
+    } elseif ($r1.Rows.Count -eq 0) {
+        Write-Host "   (最近一年沒有這類紀錄)"
+    } else {
+        foreach ($e in $r1.Rows) {
             Write-Host ("   {0}  帳號: {1}\{2}  來源: {3}" -f $e.TimeCreated, $e.Properties[1].Value, $e.Properties[0].Value, $e.Properties[2].Value)
         }
-    } catch { Write-Host "   (無此紀錄或紀錄為空)" }
+    }
     Write-Host ""
     Write-Host "--- 最近的登入失敗 (Security 4625, 可能是被嘗試暴力破解) ---"
-    try {
-        $f = Get-WinEvent -FilterHashtable @{LogName='Security'; Id=4625} -MaxEvents 10 -ErrorAction Stop
-        foreach ($e in $f) {
+    $r2 = Invoke-EventQuery -Queries @(@{ Log='Security'; Ids=@(4625) }) -Days 365 -Max 10
+    if ($r2.Problems.Count -gt 0) {
+        foreach ($p in $r2.Problems) { Write-Host ("   [讀不到] {0}" -f $p) }
+        Write-Host "   讀不到『不等於』沒有人嘗試登入,別把這個當成安全的證據。"
+    } elseif ($r2.Rows.Count -eq 0) {
+        Write-Host "   (最近一年沒有登入失敗紀錄)"
+    } else {
+        foreach ($e in $r2.Rows) {
             $x = [xml]$e.ToXml()
             $u  = ($x.Event.EventData.Data | Where-Object { $_.Name -eq 'TargetUserName' }).'#text'
             $ip = ($x.Event.EventData.Data | Where-Object { $_.Name -eq 'IpAddress' }).'#text'
             Write-Host ("   {0}  帳號: {1}  來源IP: {2}" -f $e.TimeCreated, $u, $ip)
         }
-    } catch { Write-Host "   (無失敗紀錄, 或無權限讀取 Security 記錄檔)" }
+    }
     Wait-Enter
+}
+
+# ---- 記錄檔: 事件檢視器 (唯讀) ----
+# 這裡只讀不寫。沒有「清除記錄檔」是刻意的:清除無法復原,而且會摧毀事後稽核的
+# 能力,不該藏在一個叫「查看」的選單裡。真要清請自己用 wevtutil cl。
+#
+# 查詢一律走 Get-WinEvent -FilterHashtable,讓過濾在底層完成。先撈全部再用
+# Where-Object 過濾,在幾十萬筆的記錄檔上會慢到不能用。
+
+# 情境定義:一個情境 = 一組查詢;一個查詢 = 記錄檔 + (可選) 來源 + (可選) 事件 ID。
+# 指定 Provider 是必要的 —— 例如事件 ID 1001 在 System 裡有好幾個來源都在用,
+# 只比對 ID 會撈進一堆不相干的東西。
+function Get-EventScenarios {
+    @(
+        @{ Key='1'; Name='非預期關機 / 重開機'; NeedAdmin=$false
+           Hint='查「這台為什麼會自己重開」。1074 會寫出是誰、用哪個程式要求的。'
+           Queries=@(
+               @{ Log='System'; Provider='Microsoft-Windows-Kernel-Power';             Ids=@(41)   }
+               @{ Log='System'; Provider='EventLog';                                   Ids=@(6008) }
+               @{ Log='System'; Provider='User32';                                     Ids=@(1074) }
+               @{ Log='System'; Provider='Microsoft-Windows-WER-SystemErrorReporting'; Ids=@(1001) }
+           ) }
+        @{ Key='2'; Name='藍畫面與硬體錯誤'; NeedAdmin=$false
+           Hint='BugCheck 會帶停止碼與傾印檔位置;WHEA 是 CPU/記憶體/PCIe 回報的硬體錯誤。'
+           Queries=@(
+               @{ Log='System'; Provider='BugCheck';                        Ids=@(1001) }
+               @{ Log='System'; Provider='Microsoft-Windows-WHEA-Logger';   Ids=@(17,18,19,20,47) }
+           ) }
+        @{ Key='3'; Name='磁碟與儲存'; NeedAdmin=$false
+           Hint='disk 7/51 是壞軌等級的徵兆,Ntfs 55 是檔案系統結構損毀,要盡快備份。'
+           Queries=@(
+               @{ Log='System'; Provider='disk';                     Ids=@(7,11,51,153) }
+               @{ Log='System'; Provider='Microsoft-Windows-Ntfs';   Ids=@(55,98,130,137) }
+               @{ Log='Application'; Provider='Wininit';             Ids=@(1001) }
+           ) }
+        @{ Key='4'; Name='服務異常'; NeedAdmin=$false
+           Hint='7040 是「啟動類型被改」—— 本工具停用 Windows 更新後被系統改回去,就是在這裡現形的。'
+           Queries=@(
+               @{ Log='System'; Provider='Service Control Manager'; Ids=@(7000,7001,7011,7022,7023,7024,7031,7034,7040,7045) }
+           ) }
+        @{ Key='5'; Name='應用程式當機 / 無回應'; NeedAdmin=$false
+           Hint='1000 是當掉,1002 是沒回應。詳細內容裡有出錯的模組名稱與位移。'
+           Queries=@(
+               @{ Log='Application'; Provider='Application Error';        Ids=@(1000) }
+               @{ Log='Application'; Provider='Application Hang';         Ids=@(1002) }
+               @{ Log='Application'; Provider='.NET Runtime';             Ids=@(1026) }
+               @{ Log='Application'; Provider='Windows Error Reporting';  Ids=@(1001) }
+           ) }
+        @{ Key='6'; Name='登入與帳號'; NeedAdmin=$true
+           Hint='4740 是帳號被鎖定。對外的機器如果它一直出現,代表有人在猜密碼、而且已經把你鎖在外面。'
+           Queries=@(
+               @{ Log='Security'; Ids=@(4624,4625,4740,4648) }
+               @{ Log='Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational'; Ids=@(1149) }
+               @{ Log='Microsoft-Windows-TerminalServices-LocalSessionManager/Operational';     Ids=@(21,23,24,25) }
+           ) }
+        @{ Key='7'; Name='Windows 更新'; NeedAdmin=$false
+           Hint='裝了什麼、失敗了什麼。更新被系統自己改回啟用的痕跡要看第 4 項的 7040。'
+           Queries=@(
+               @{ Log='System'; Provider='Microsoft-Windows-WindowsUpdateClient'; Ids=@(19,20,43) }
+           ) }
+    )
+}
+
+# 執行一組查詢,回傳 Rows (依時間新到舊) 與 Problems。
+# Problems 跟「沒有紀錄」是兩回事,呼叫端必須分開呈現。
+function Invoke-EventQuery {
+    param([array]$Queries, [int]$Days = 7, [int]$Max = 50)
+    $start = (Get-Date).AddDays(-$Days)
+    $rows  = New-Object System.Collections.ArrayList
+    $probs = New-Object System.Collections.ArrayList
+    foreach ($q in $Queries) {
+        $f = @{ LogName = $q.Log; StartTime = $start }
+        if ($q.Provider) { $f['ProviderName'] = $q.Provider }
+        if ($q.Ids)      { $f['Id']           = $q.Ids }
+        try {
+            $ev = Get-WinEvent -FilterHashtable $f -MaxEvents $Max -ErrorAction Stop
+            foreach ($e in $ev) { [void]$rows.Add($e) }
+        } catch {
+            # NoMatchingEventsFound = 正常的「這段期間沒有這種事件」,不是問題。
+            # 其他的 (沒權限、記錄檔不存在) 一定要讓使用者看到,不能吞掉。
+            if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { continue }
+            $src = $q.Log
+            if ($q.Provider) { $src = $src + " / " + $q.Provider }
+            [void]$probs.Add(("{0}: {1}" -f $src, $_.Exception.Message))
+        }
+    }
+    @{
+        Rows     = @($rows | Sort-Object TimeCreated -Descending | Select-Object -First $Max)
+        Problems = @($probs)
+    }
+}
+
+function Get-EventBrief {
+    param($Ev, [int]$Width = 60)
+    if ([string]::IsNullOrWhiteSpace($Ev.Message)) { return '(這筆事件沒有描述文字)' }
+    $s = (($Ev.Message -split "`r?`n")[0] -replace '\s+', ' ').Trim()
+    if ($s.Length -gt $Width) { $s = $s.Substring(0, $Width - 1) + '…' }
+    $s
+}
+
+function Show-EventRows {
+    param($Rows)
+    Write-Host "   #  時間            ID    層級   來源"
+    $i = 0
+    foreach ($e in $Rows) {
+        $i++
+        $prov = [string]$e.ProviderName
+        if ($prov.Length -gt 24) { $prov = $prov.Substring(0, 23) + '…' }
+        $lvl = [string]$e.LevelDisplayName
+        if ([string]::IsNullOrWhiteSpace($lvl)) { $lvl = '-' }
+        Write-Host ("  {0,2}. {1}  {2,-5} {3,-4} {4,-24}" -f $i, $e.TimeCreated.ToString('MM-dd HH:mm:ss'), $e.Id, $lvl, $prov)
+        Write-Host ("      {0}" -f (Get-EventBrief $e))
+    }
+}
+
+function Show-EventDetail {
+    param($Ev)
+    Clear-Host
+    Write-Host "=== 事件詳細內容 ==="
+    Write-Host ""
+    Write-Host ("   時間    : {0}" -f $Ev.TimeCreated)
+    Write-Host ("   記錄檔  : {0}" -f $Ev.LogName)
+    Write-Host ("   來源    : {0}" -f $Ev.ProviderName)
+    Write-Host ("   事件 ID : {0}    層級: {1}" -f $Ev.Id, $Ev.LevelDisplayName)
+    Write-Host ""
+    Write-Host "--- 完整描述 ---"
+    if ([string]::IsNullOrWhiteSpace($Ev.Message)) {
+        Write-Host "   (這筆沒有描述文字。通常是提供描述的元件已被移除或未安裝,"
+        Write-Host "    只剩下面的原始資料可以看。)"
+    } else {
+        foreach ($line in ($Ev.Message -split "`r?`n")) { Write-Host ("   " + $line) }
+    }
+    Write-Host ""
+    Write-Host "--- 原始資料 (EventData) ---"
+    try {
+        $x = [xml]$Ev.ToXml()
+        $d = $x.Event.EventData.Data
+        if ($d) {
+            foreach ($item in $d) {
+                $n = [string]$item.Name
+                if ([string]::IsNullOrWhiteSpace($n)) { $n = '(未命名)' }
+                Write-Host ("   {0,-24} = {1}" -f $n, $item.'#text')
+            }
+        } else {
+            Write-Host "   (這筆事件沒有結構化的 EventData)"
+        }
+    } catch {
+        Write-Host ("   (原始資料解析失敗: {0})" -f $_.Exception.Message)
+    }
+    Wait-Enter
+}
+
+function Export-EventCsv {
+    param($Rows, [string]$Label)
+    if (-not $Rows -or @($Rows).Count -eq 0) {
+        Write-Host ""; Write-Host "[錯誤] 目前畫面上沒有任何紀錄可以匯出。"; Wait-Enter; return
+    }
+    $dir = Join-Path $env:USERPROFILE 'Desktop'
+    if (-not (Test-Path $dir)) { $dir = $env:TEMP }
+    $safe = ($Label -replace '[\\/:*?"<>|]', '_') -replace '\s+', ''
+    $file = Join-Path $dir ("事件紀錄-{0}-{1}.csv" -f $safe, (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    try {
+        $Rows | Select-Object @{n='時間';e={$_.TimeCreated}},
+                              @{n='記錄檔';e={$_.LogName}},
+                              @{n='來源';e={$_.ProviderName}},
+                              @{n='事件ID';e={$_.Id}},
+                              @{n='層級';e={$_.LevelDisplayName}},
+                              @{n='描述';e={($_.Message -replace "`r?`n", ' ')}} |
+            Export-Csv -Path $file -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        Write-Host ""; Write-Host ("[錯誤] 匯出失敗: {0}" -f $_.Exception.Message); Wait-Enter; return
+    }
+    # 沒噴錯不代表寫成功,回讀確認再說「完成」。
+    if (Test-Path $file) {
+        $n = @(Import-Csv -Path $file -ErrorAction SilentlyContinue).Count
+        Write-Host ""
+        Write-Host ("[完成] 已匯出 {0} 筆到:" -f $n)
+        Write-Host ("       {0}" -f $file)
+        Write-Host "       檔案是 UTF-8 含 BOM,用 Excel 直接開中文不會變亂碼。"
+    } else {
+        Write-Host ""
+        Write-Host "[錯誤] 指令沒有回報錯誤,但檔案不存在。可能是路徑沒有寫入權限。"
+    }
+    Wait-Enter
+}
+
+function Show-EventScenario {
+    param($S, [int]$Days = 7)
+    if ($S.NeedAdmin -and -not $IsAdmin) {
+        Clear-Host
+        Write-Host ("=== 事件檢視器 - {0} ===" -f $S.Name)
+        Write-Host ""
+        Write-Host "[需要權限] 這個情境要讀 Security 記錄檔,一般使用者讀不到。"
+        Write-Host "           Y = 先提權 (會另開一個管理員視窗,目前這個會關掉)"
+        Write-Host "           N = 直接看,讀不到的部分會標成『讀不到』,不會假裝成『沒有紀錄』"
+        if ((Read-Host "要提權嗎? (Y/N)") -match '^[Yy]') {
+            if (-not (Require-Admin)) { return }
+        }
+    }
+    $days = $Days
+    $max  = 50
+    while ($true) {
+        Clear-Host
+        Write-Host ("=== 事件檢視器 - {0} ===" -f $S.Name)
+        if ($S.Hint) { Write-Host ("   {0}" -f $S.Hint) }
+        Write-Host ""
+        Write-Host ("--- 最近 {0} 天,最多 {1} 筆 (新到舊) ---" -f $days, $max)
+        $r = Invoke-EventQuery -Queries $S.Queries -Days $days -Max $max
+        if ($r.Problems.Count -gt 0) {
+            Write-Host ""
+            Write-Host "[警告] 有記錄檔讀不到。這不等於沒有事件發生:"
+            foreach ($p in $r.Problems) { Write-Host ("       {0}" -f $p) }
+        }
+        Write-Host ""
+        if ($r.Rows.Count -eq 0) {
+            Write-Host ("   (最近 {0} 天沒有符合的事件)" -f $days)
+            if ($S.NeedAdmin -and -not $IsAdmin) {
+                Write-Host "   注意:目前不是管理員,這個「沒有」可能只是讀不到 Security 記錄檔。"
+            }
+        } else {
+            Show-EventRows $r.Rows
+        }
+        Write-Host ""
+        Write-Host "  輸入編號 = 看完整內容    T = 改時間範圍    E = 匯出 CSV    0 = 返回"
+        $c = Read-Host "請選擇"
+        if ([string]::IsNullOrWhiteSpace($c) -or $c -eq '0') { return }
+        elseif ($c -match '^[Tt]$') {
+            Write-Host ""
+            Write-Host "  1. 最近 24 小時     2. 最近 7 天 (預設)     3. 最近 30 天"
+            switch (Read-Host "請選擇") {
+                '1' { $days = 1 }
+                '2' { $days = 7 }
+                '3' { $days = 30 }
+            }
+        }
+        elseif ($c -match '^[Ee]$') { Export-EventCsv -Rows $r.Rows -Label $S.Name }
+        elseif ($c -match '^\d+$') {
+            $n = [int]$c
+            if ($n -ge 1 -and $n -le $r.Rows.Count) { Show-EventDetail $r.Rows[$n - 1] }
+        }
+    }
+}
+
+function Show-EventCustom {
+    Clear-Host
+    Write-Host "=== 事件檢視器 - 自訂查詢 ==="
+    Write-Host "   情境清單沒涵蓋到的才用這裡。想知道有哪些記錄檔可查:"
+    Write-Host "   Get-WinEvent -ListLog * | Where-Object RecordCount -gt 0 | Select-Object LogName,RecordCount"
+    Write-Host ""
+    $log = Read-Host "記錄檔名稱 (Enter = System)"
+    if ([string]::IsNullOrWhiteSpace($log)) { $log = 'System' }
+    $ids = @()
+    $idIn = Read-Host "事件 ID,多個用逗號分隔 (Enter = 不限)"
+    if (-not [string]::IsNullOrWhiteSpace($idIn)) {
+        foreach ($p in ($idIn -split ',')) {
+            $p = $p.Trim()
+            if ($p -match '^\d+$') { $ids += [int]$p }
+            elseif ($p -ne '') { Write-Host ("[警告] 『{0}』不是有效的事件 ID,已略過。" -f $p) }
+        }
+    }
+    $days = 7
+    $dIn = Read-Host "往回幾天 (Enter = 7)"
+    if ($dIn -match '^\d+$' -and [int]$dIn -gt 0) { $days = [int]$dIn }
+    $q = @{ Log = $log }
+    if ($ids.Count -gt 0) { $q['Ids'] = $ids }
+    # -Days 一定要傳進去。少了它,使用者輸入的天數會被安靜丟掉,畫面照樣顯示
+    # 「最近 7 天」—— 不報錯、只給錯答案,正是最難發現的那種壞法。
+    Show-EventScenario -Days $days -S @{
+        Name      = ("自訂 - {0}" -f $log)
+        NeedAdmin = ($log -eq 'Security')
+        Hint      = ("查詢條件: 記錄檔 {0},事件 ID {1}" -f $log, $(if ($ids.Count -gt 0) { $ids -join ',' } else { '不限' }))
+        Queries   = @($q)
+    }
+}
+
+function Show-EventViewer {
+    $scen = Get-EventScenarios
+    while ($true) {
+        Clear-Host
+        Write-Host "===== L. 事件檢視器 (唯讀) ====="
+        Write-Host "   用「症狀」找事件紀錄,不必先知道事件 ID。預設看最近 7 天。"
+        Write-Host ""
+        foreach ($s in $scen) {
+            if ($s.NeedAdmin) {
+                Write-Host ("  {0}. {1}   [需管理員]" -f $s.Key, $s.Name)
+            } else {
+                Write-Host ("  {0}. {1}" -f $s.Key, $s.Name)
+            }
+        }
+        Write-Host "  C. 自訂查詢 (自己指定記錄檔與事件 ID)"
+        Write-Host "  0. 返回主選單"
+        $c = Read-Host "請選擇"
+        if ($c -eq '0') { return }
+        elseif ($c -match '^[Cc]$') { Show-EventCustom }
+        else {
+            $hit = @($scen | Where-Object { $_.Key -eq $c })
+            if ($hit.Count -gt 0) { Show-EventScenario $hit[0] }
+        }
+    }
 }
 
 # ================= 分類子選單 =================
@@ -1083,6 +1395,7 @@ while ($true) {
     Write-Host "  E. 虛擬化 (Hyper-V)   - 與 VMware 切換 / 啟用停用"
     Write-Host "  F. 磁碟管理           - diskpart 視覺化"
     Write-Host "  S. 檢查現況           - 驗證設定 (免管理員)"
+    Write-Host "  L. 事件檢視器         - 依症狀查事件紀錄 (免管理員)"
     Write-Host "  0. 離開"
     Write-Host "============================================================"
     if ($IsAdmin -and (Test-RdpWatchdog)) {
@@ -1090,9 +1403,10 @@ while ($true) {
         Write-Host "============================================================"
     }
     if (-not $IsAdmin) {
-        Write-Host "  * 目前非管理員。S 檢查現況可直接用;其他修改功能會詢問是否提權。"
+        Write-Host "  * 目前非管理員。S 檢查現況、L 事件檢視器可直接用 (L 的『登入與帳號』"
+        Write-Host "    要讀 Security 記錄檔,那一項才會問你要不要提權);其他修改功能會詢問是否提權。"
     }
-    switch (Read-Host "請輸入代號 (A-F / S / 0)") {
+    switch (Read-Host "請輸入代號 (A-F / L / S / 0)") {
         'A' { Menu-RDP }
         'B' { Menu-Account }
         'C' { Menu-System }
@@ -1100,6 +1414,7 @@ while ($true) {
         'E' { Set-HyperV }
         'F' { Manage-Disk }
         'S' { Show-Status }
+        'L' { Show-EventViewer }
         '0' { exit }
     }
 }

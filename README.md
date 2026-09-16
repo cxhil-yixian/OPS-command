@@ -61,7 +61,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.13
+ OPS-command 運維工具箱  v1.14
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
@@ -258,8 +258,9 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 實際跑過並還原的有六項——停止 / 還原 Windows 更新、Ping (ICMP) 設定、解除帳號密碼鎖定、
 CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假成功**的真實 bug
 （見 [CHANGELOG](CHANGELOG.md)）。**換 RDP Port 那條流程仍然完全沒驗證過**——它會重啟
-`TermService`，目前那條 RDP 連線必然中斷，第一次用請先在測試機上驗。逐項狀態見
-[WINDOWS/README.md](WINDOWS/README.md#已知限制)。
+`TermService`，目前那條 RDP 連線必然中斷，第一次用請先在測試機上驗。1.14.0 新增的
+`L. 事件檢視器` 也**還沒在 Windows 上跑過**（它是唯讀的，跑錯不會改到系統）。
+逐項狀態見 [WINDOWS/README.md](WINDOWS/README.md#已知限制)。
 
 靜態檢查也用真正的 PowerShell 工具做過（在 Linux 的容器裡）：語法解析**兩支都 0 個錯誤**，
 編碼與行尾符合 `.gitattributes`，PSScriptAnalyzer 的告警逐項確認後沒有一項要改（絕大多數是

@@ -9,6 +9,52 @@
 
 ---
 
+## [1.14.0] - 2026-09-16
+
+Windows 工具新增「事件檢視器」：用**症狀**而不是事件 ID 分類，不熟 Windows 事件紀錄的人
+也查得動。主選單新增代號 `L`，與 `S 檢查現況` 並列為僅有的兩個唯讀入口。
+
+### 新增
+
+- **`L. 事件檢視器`（唯讀）**，七個排錯情境，每個背後是寫死的「記錄檔 + 來源 + 事件 ID」組合：
+  非預期關機 / 重開機（含 1074「是誰要求關機的」）、藍畫面與硬體錯誤、磁碟與儲存、
+  服務異常（含 **7040「啟動類型被改」**，就是 1.13.3 抓到 Windows 更新假成功的那個訊號）、
+  應用程式當機 / 無回應、登入與帳號（含 **4740「帳號被鎖定」**）、Windows 更新。
+  另有 `C. 自訂查詢` 給清單沒涵蓋到的狀況。
+- 每個情境進去後可以：輸入編號展開完整描述與原始 EventData、`T` 切換 24 小時 / 7 天 / 30 天、
+  `E` 匯出 CSV（存桌面，UTF-8 含 BOM，Excel 直接開不會亂碼）。
+- **刻意不做「清除記錄檔」。** 清除無法復原，而且會摧毀事後稽核的能力——上面第 4、6 兩個
+  情境之所以有用，正是因為紀錄還在。功能叫「查看」就不該藏一個會摧毀證據的動作。
+- 權限只在需要時才要：只有「登入與帳號」要讀 Security 記錄檔，**進到那一項才問**要不要提權，
+  不是一進 `L` 就擋；System 與 Application 一般帳號就讀得到。
+- 查詢一律走 `Get-WinEvent -FilterHashtable`，讓過濾在底層完成。先撈全部再用 `Where-Object`
+  過濾，在幾十萬筆的記錄檔上會慢到不能用。
+
+### 修正
+
+- **「查不到紀錄」與「讀不到記錄檔」不再印成同一句話。** 舊的 `Show-RdpLogins` 兩種情況都印
+  「(無此紀錄或紀錄為空)」，於是「沒權限讀 Security」會被當成「沒有人嘗試登入」——這是最
+  不該搞錯的方向。現在用 `NoMatchingEventsFound` 這個錯誤代號區分（不依賴系統語系），
+  讀不到會標成 `[讀不到]` 並附上實際原因。`Show-RdpLogins` 的底層查詢改成與事件檢視器共用，
+  同一份邏輯只留一份。
+
+### 已驗證
+
+在 Linux 的 PowerShell 容器裡（不需要 Windows）：語法解析 **0 錯誤**；用替身攔截
+`Get-WinEvent`，確認 `-Days` 真的變成查詢條件（1 天 → 查詢起點距今 1.00 天、30 天 → 30.00 天），
+以及 `ProviderName` / `Id` 確實下推到 `FilterHashtable`；情境表 7 個情境、權限旗標與查詢
+數量正確；摘要擷取對多行、空訊息、超長字串的處理都正確；錯誤分類在沒有 `Get-WinEvent` 的
+環境下正確落進「讀不到」而不是被當成「沒有紀錄」吞掉。
+
+PSScriptAnalyzer 這一輪**抓到一個真的 bug**：`C. 自訂查詢` 問了使用者「往回幾天」，卻沒把
+`$days` 傳進 `Show-EventScenario`，該函式內部又寫死 7 天——輸入 30 天實際只查 7 天，畫面還
+照樣標「最近 7 天」。不報錯、只給錯答案。已修正並用上述替身測試確認。這也推翻了上一版
+文件裡「分析器告警逐項確認後沒有一項要改」的說法，該句已改寫。
+
+**實機行為仍然是零驗證**：這個功能從來沒有在 Windows 上跑過。
+
+---
+
 ## [1.13.3] - 2026-09-16
 
 第一次把 `Win_Admin_Tool.ps1` 放到真的 Windows 上跑（Windows 10 22H2）。六個功能實際執行
@@ -1154,6 +1200,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.14.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.3...v1.14.0
 [1.13.3]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.2...v1.13.3
 [1.13.2]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.1...v1.13.2
 [1.13.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.0...v1.13.1
