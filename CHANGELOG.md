@@ -9,6 +9,57 @@
 
 ---
 
+## [1.13.2] - 2026-09-16
+
+在一台 Ubuntu 24.04 上把 Linux 這邊的功能整輪跑過，抓到四個既有問題，其中兩個是
+「畫面顯示正常、實際完全沒防護 / 會失聯」等級的。
+
+### 修正
+
+- **ufw 停用時被誤判成「正在擋」。** 偵測寫的是 `ufw status | grep -qi active`，而停用時的輸出
+  是 `Status: inactive`——裡面就含有 `active`，所以**只要裝了 ufw 就必定命中**。後果：
+  `enable-sshd` 把 banaction 寫成 `ufw`，fail2ban 照樣「封鎖成功」、`doctor` 還說「ufw 可用」，
+  但 ufw 沒啟用等於規則不生效。實測 Ubuntu 24.04：這樣封的 IP 在 ufw 與 iptables 裡都找不到。
+  `ssh-port.sh` 同一個判斷式則會拿 ufw 去放行新埠（指令成功、規則不存在）。
+  三支腳本（`ops.sh` / `ssh-port.sh` / `fail2ban.sh`）一起改成比對整行 `^Status: active`。
+- **改過 banaction 之後 reload，jail 會變成「一個 action 都沒有」。** 實測 fail2ban 1.0.2：
+  全域 `reload`、per-jail `reload sshd` 都救不回來，連把 banaction 改回原值再 reload 也不行，
+  **只有重啟服務才會重建 action**。這期間 fail2ban 照常計數、照常把 IP 放進封鎖清單，
+  但防火牆裡一條規則都沒有，日誌裡也不會有任何錯誤（ban 動作從未被執行）。
+  `reload` 現在會回頭確認每個 jail 是否真的有 action，沒有就自動改用重啟並再確認一次；
+  `doctor` 與開場自檢也會直接指出「這些 jail 一個 action 都沒有」，不再把它誤導成
+  「規則事後被沖掉」。
+- **socket 接管的機器換埠會讓 IPv4 整個消失。** Ubuntu 24.04 的 `ssh.socket` 帶
+  `BindIPv6Only=ipv6-only`，並把兩個位址家族各寫一行。我們的 override 寫的是裸埠號
+  （`ListenStream=22022`），在這種 unit 底下**只會綁 IPv6**——而且是新舊兩個埠一起，
+  等於「雙埠並存」的保護完全失效：使用者照流程另開視窗測新埠會連不上，舊埠也連不上，
+  只能等看門狗還原。現在在 `set` 階段先記下原本的位址家族（存進狀態檔，confirm / rollback
+  沿用），override 逐個埠寫成 `0.0.0.0:埠` 與 `[::]:埠`；取不到就兩種都寫。
+- **`stress-test.sh` 缺工具時的安裝指令寫死 yum。** 在 Debian / Ubuntu 上照著打一定失敗。
+  改成依 `apt-get` / `dnf` / `yum` / `apk` 給對應指令（yum 那條順帶提醒 stress-ng 在 EPEL）。
+
+### 新增
+
+- **`time-set.sh sync` 支援 systemd-timesyncd。** 它是 Debian / Ubuntu 的預設校時服務，但沒有
+  「立刻校時」的指令，所以改成重啟該服務逼它重新對時，並印出同步狀態與來源。
+  在此之前，一台正在正常同步的 Ubuntu 會被告知「找不到校時工具，請安裝 chrony」——錯的建議。
+  timesyncd 存在但沒在跑時，提示也改成先 `ntp on`。
+
+### 已驗證
+
+於 Ubuntu 24.04.5（KVM、ssh.socket 接管、ufw 已安裝但停用）實跑：`ops.sh doctor`、
+`ssh-port.sh status`（正確標示 socket 接管與 socket 埠）、`apps install all`（五項全裝成功，
+nginx 依 Debian 慣例自動啟動）、fail2ban 的 `install` / `allow` / `enable-sshd` / `ban` /
+`unban` / `doctor`、時間工具的時區來回與 `ntp off|on`（timesyncd 路徑）、壓測 `all`
+（每項 60 秒，8 核 / 8GB / 4GB swap，記憶體與 SWAP 都壓出預期行為且無 OOM）。
+換埠三次：修正前後各一次（修正前重現 IPv4 消失、修正後 IPv4 在新舊埠都正常），
+以及一次外部連不到新埠時的自動 rollback——**22022 從外部逾時，看門狗與守則正確把 SSH 還原到 22**。
+
+CentOS 7.9 那台回歸確認：firewalld 仍正確偵測、banaction 不變、jail action 檢查不誤報、
+chrony 路徑不受 timesyncd 分支影響。
+
+---
+
 ## [1.13.1] - 2026-09-16
 
 在測試機上把 Linux 這邊的功能整輪跑過一次，抓到兩個既有的問題。
@@ -1057,6 +1108,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[1.13.2]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.1...v1.13.2
 [1.13.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.0...v1.13.1
 [1.13.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.12.0...v1.13.0
 [1.12.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.11.0...v1.12.0

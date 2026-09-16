@@ -221,7 +221,10 @@ detect_env() {
     FW=none
     if has firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
         FW=firewalld
-    elif has ufw && ufw status 2>/dev/null | head -1 | grep -qi active; then
+    # 比對整行「Status: active」，不能只 grep active —— 停用時輸出是「Status: inactive」，
+    # 裡面就含有 active，會把「裝了但沒啟用」的 ufw 誤判成正在擋，接著用 ufw 去放行新埠
+    # （指令成功、規則不生效）。實測 Ubuntu 24.04 ufw 停用時就是這樣。
+    elif has ufw && ufw status 2>/dev/null | head -1 | grep -qiE '^status:[[:space:]]+active'; then
         FW=ufw
     elif has nft && nft list ruleset 2>/dev/null | grep -q 'hook input'; then
         FW=nftables
@@ -249,6 +252,20 @@ current_socket_ports() {
     [ -n "$SOCKET_UNIT" ] || return 0
     systemctl show "$SOCKET_UNIT" -p Listen 2>/dev/null \
         | tr ' ' '\n' | grep -oE '[0-9]+$' | sort -un
+}
+
+# socket 目前綁在哪些位址家族（0.0.0.0 / [::]）。
+#
+# Ubuntu 24.04 的 ssh.socket 帶 BindIPv6Only=ipv6-only，而且把兩個家族各寫一行
+# （ListenStream=0.0.0.0:22 與 ListenStream=[::]:22）。這種 unit 底下如果只寫裸埠號
+# （ListenStream=22022），systemd 只會綁 IPv6 —— IPv4 的 SSH 會整個消失，而且是
+# 新舊兩個埠一起消失，等於雙埠並存的保護完全失效（實測 Ubuntu 24.04 就是這樣）。
+#
+# 一定要在寫入自己的 override 之前取：之後再讀就是我們自己寫進去的值了。
+socket_families() {
+    [ -n "$SOCKET_UNIT" ] || return 0
+    systemctl show "$SOCKET_UNIT" -p Listen 2>/dev/null |
+        sed -n 's/^Listen=\(.*\):[0-9][0-9]*[[:space:]]*(Stream)$/\1/p' | sort -u
 }
 
 # =========================================================
@@ -316,6 +333,7 @@ state_set() {
         echo "BACKUP='$BACKUP'"
         echo "SOCKET_UNIT='$SOCKET_UNIT'"
         echo "SOCKET_EXISTED='$SOCKET_EXISTED'"
+        echo "SOCKET_FAMS='$SOCKET_FAMS'"
         echo "USE_DROPIN='$USE_DROPIN'"
         echo "FW='$FW'"
         echo "FW_ADDED='$FW_ADDED'"
@@ -402,14 +420,23 @@ clean_our_config() {
 write_socket_ports() {
     [ -n "$SOCKET_UNIT" ] || return 0
     _ports=$(printf '%s\n' $1 | sort -un | tr '\n' ' ' | sed 's/ *$//')
+    # 家族優先用 set 階段記下來的（confirm / rollback 會從狀態檔載回來）；
+    # 沒有就現查，再取不到才退回「兩種都寫」——寧可多綁一個家族，也不能少綁 IPv4。
+    _fams="${SOCKET_FAMS:-}"
+    [ -n "$_fams" ] || _fams=$(socket_families | tr '\n' ' ' | sed 's/ *$//')
+    [ -n "$_fams" ] || _fams='0.0.0.0 [::]'
     mkdir -p "$SOCKET_DIR"
     {
         echo "# 由 ssh-port.sh 產生"
         echo "[Socket]"
         echo "ListenStream="          # 空值用來清掉 unit 原本的設定，不可省略
-        for _q in $_ports; do echo "ListenStream=$_q"; done
+        # 位址家族一定要明寫。unit 帶 BindIPv6Only=ipv6-only 時（Ubuntu 24.04 的預設），
+        # 裸埠號只會綁 IPv6，IPv4 的 SSH 會在新舊兩個埠上同時消失。
+        for _q in $_ports; do
+            for _f in $_fams; do echo "ListenStream=${_f}:${_q}"; done
+        done
     } > "$SOCKET_OVERRIDE"
-    ok "已寫入 socket override：$SOCKET_OVERRIDE"
+    ok "已寫入 socket override：$SOCKET_OVERRIDE（位址家族：$_fams）"
 }
 
 # =========================================================
@@ -624,6 +651,8 @@ cmd_set() {
     done
     SOCKET_EXISTED=0
     [ -f "$SOCKET_OVERRIDE" ] && SOCKET_EXISTED=1
+    # 位址家族要趁現在取，等 override 寫下去之後讀到的就是我們自己的值了
+    SOCKET_FAMS=$(socket_families | tr '\n' ' ' | sed 's/ *$//')
 
     printf '\n'
     step "環境"

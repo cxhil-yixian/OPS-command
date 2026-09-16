@@ -368,7 +368,7 @@ detect() {
 
     FW=none
     if   has firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then FW=firewalld
-    elif has ufw && ufw status 2>/dev/null | head -1 | grep -qi active; then FW=ufw
+    elif has ufw && ufw status 2>/dev/null | head -1 | grep -qiE '^status:[[:space:]]+active'; then FW=ufw
     elif has nft && nft list ruleset 2>/dev/null | grep -q 'hook input'; then FW=nftables
     elif has iptables && iptables -S 2>/dev/null | grep -qE '^-A INPUT'; then FW=iptables
     fi

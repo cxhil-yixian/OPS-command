@@ -153,6 +153,25 @@ svc_start() {
     esac
 }
 
+svc_restart() {
+    case "$INIT" in
+        systemd) systemctl restart "$F2B_SVC" ;;
+        openrc)  rc-service "$F2B_SVC" restart ;;
+        *)       service "$F2B_SVC" restart ;;
+    esac
+}
+
+# jail 目前掛著哪些 action。一個都沒有的 jail 照樣讀日誌、照樣把 IP 放進封鎖清單，
+# 但不會有任何規則寫進防火牆——畫面上完全看不出來。輸出格式各版不同，
+# 所以只判斷「有沒有說 No actions」，不解析清單內容。
+jail_has_actions() {
+    _o=$(fail2ban-client get "$1" actions 2>/dev/null)
+    case "$_o" in
+        ''|*'No actions'*|*'no actions'*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
 # 伺服器有沒有在跑：ping 是唯一可靠的判斷（服務 active 但 socket 還沒起來的空窗期存在）
 f2b_ping() {
     has fail2ban-client || return 1
@@ -453,7 +472,10 @@ live_ssh_ports() {
 # =========================================================
 fw_backend() {
     if has firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then printf 'firewalld\n'; return 0; fi
-    if has ufw && ufw status 2>/dev/null | head -1 | grep -qi active;  then printf 'ufw\n';       return 0; fi
+    # 「Status: inactive」裡面就含有 active，只 grep active 會把「裝了但沒啟用」的 ufw
+    # 判成可用的後端，banaction 就寫成 ufw——ufw 指令回成功、規則卻不生效，封鎖清單有、
+    # 防火牆沒有。實測 Ubuntu 24.04：這樣封的 IP 在 ufw 與 iptables 裡都找不到。
+    if has ufw && ufw status 2>/dev/null | head -1 | grep -qiE '^status:[[:space:]]+active'; then printf 'ufw\n'; return 0; fi
     if has nft && nft list ruleset 2>/dev/null | grep -q 'hook input'; then printf 'nftables\n';  return 0; fi
     if has iptables; then printf 'iptables\n'; return 0; fi     # 有指令就算數，不看有沒有規則
     printf 'none\n'
@@ -916,6 +938,30 @@ cmd_reload() {
             return 1 ;;
         *)  ok "已重載（jail：$(jails | tr '\n' ' ')）" ;;
     esac
+
+    # 改過 banaction 之後，reload 不會重建 action：jail 會變成「一個 action 都沒有」，
+    # 封鎖從此只進清單、不進防火牆，而畫面上一切正常。實測 fail2ban 1.0.2 / Ubuntu 24.04：
+    # 全域 reload 與 per-jail reload 都救不回來，連把 banaction 改回原值再 reload 也不行，
+    # 只有重啟服務才會重建。所以這裡一定要回頭確認，沒有 action 就改用重啟。
+    _noact=''
+    for _j in $(jails); do
+        jail_has_actions "$_j" || _noact="$_noact $_j"
+    done
+    [ -n "$_noact" ] || return 0
+
+    warn "reload 後這些 jail 沒有任何 action：${_noact# } — 封鎖會只進清單、不進防火牆"
+    info "改過 banaction 時 reload 不足以重建，改為重啟 $F2B_SVC"
+    svc_restart >/dev/null 2>&1
+    sleep 2
+    _noact2=''
+    for _j in $(jails); do
+        jail_has_actions "$_j" || _noact2="$_noact2 $_j"
+    done
+    if [ -n "$_noact2" ]; then
+        err "重啟後仍然沒有 action：${_noact2# }（跑 $SELF doctor 看原因）"
+        return 1
+    fi
+    ok "已重啟 $F2B_SVC，action 已重建"
 }
 
 cmd_install() {
@@ -1098,6 +1144,16 @@ cmd_doctor() {
         # 到這一步就別再叫人自己去 grep 了，直接把三件該看的東西挖出來
         _ba=$(banaction_current)
         [ -n "$_ba" ] && info "生效中的 banaction : $_ba"
+
+        # 最常見、也最容易被誤判成「規則事後被沖掉」的情況：jail 根本沒有 action。
+        # 這種狀態下日誌裡不會有任何 ban 失敗的錯誤，因為 ban 動作從來沒被執行。
+        _noact=''
+        for _j in $_js; do jail_has_actions "$_j" || _noact="$_noact $_j"; done
+        if [ -n "$_noact" ]; then
+            err "這些 jail 一個 action 都沒有：${_noact# } — ban 動作根本沒有東西可執行"
+            info "改過 banaction 之後只 reload 不會重建 action（實測 1.0.2：reload 救不回來）"
+            info "修正：$SELF reload（會自動改用重啟）或 systemctl restart $F2B_SVC"
+        fi
 
         if has iptables; then
             if iptables -S 2>/dev/null | grep -q 'f2b'; then

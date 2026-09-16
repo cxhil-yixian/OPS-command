@@ -1035,9 +1035,18 @@ cmd_sync() {
         _how=sntp
     elif has ntpd; then
         _how=ntpd-q
+    elif [ "$NTP_KIND" = timesyncd ] && [ "$NTP_STATE" = active ]; then
+        # Ubuntu / Debian 的預設校時就是它，而且它沒有「立刻校時」的指令：timedatectl
+        # 只能開關 NTP，要逼它馬上重新對時只能重啟服務。少了這條路徑的話，一台正在
+        # 正常同步的 Ubuntu 會被告知「找不到校時工具，請安裝 chrony」——那是錯的建議。
+        _how=timesyncd
     else
-        err "找不到可用的校時工具（chronyd / ntpdate / sntp / ntpd）"
-        info "安裝：$SELF install"
+        err "找不到可用的校時工具（chronyd / ntpdate / sntp / ntpd / systemd-timesyncd）"
+        if [ -n "$NTP_SVC" ] && [ "$NTP_KIND" = timesyncd ]; then
+            info "這台有 $NTP_SVC 但沒在跑，先開起來：$SELF ntp on"
+        else
+            info "安裝：$SELF install"
+        fi
         exit 1
     fi
 
@@ -1047,6 +1056,7 @@ cmd_sync() {
         ntpdate)   info "做法  ntpdate -u $_srv" ;;
         sntp)      info "做法  sntp -sS $_srv" ;;
         ntpd-q)    info "做法  ntpd -q -n -p $_srv（busybox）" ;;
+        timesyncd) info "做法  重啟 $NTP_SVC 讓它立刻重新對時（timesyncd 沒有一次性校時的指令）" ;;
     esac
     plain ""
     warn "校時會讓時鐘跳到正確時間 —— 偏差很大時，那一跳的後果跟手動改時間一樣"
@@ -1077,6 +1087,11 @@ cmd_sync() {
         ntpdate)   run ntpdate -u "$_srv"; _rc=$? ;;
         sntp)      run sntp -sS "$_srv"; _rc=$? ;;
         ntpd-q)    run ntpd -q -n -p "$_srv"; _rc=$? ;;
+        timesyncd)
+            run systemctl restart "$NTP_SVC"; _rc=$?
+            [ "$DRY" = 1 ] || sleep 3
+            info "同步狀態：$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo '?')  來源：$(timedatectl timesync-status 2>/dev/null | sed -n 's/^ *Server: *//p' | head -1)"
+            ;;
     esac
 
     [ "$DRY" = 1 ] && { info "乾跑結束"; exit 0; }

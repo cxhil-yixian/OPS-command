@@ -68,6 +68,13 @@ Ubuntu 24.04 預設啟用 `ssh.socket`。這種模式下 `sshd_config` 裡的 `P
 `/etc/systemd/system/ssh.socket.d/override.conf`（而且必須先寫一行空的
 `ListenStream=` 清掉原設定，否則新舊值會疊加）。
 
+> **位址家族一定要明寫。** Ubuntu 24.04 的 `ssh.socket` 帶 `BindIPv6Only=ipv6-only`，並把
+> `0.0.0.0:22` 與 `[::]:22` 各寫一行。在這種 unit 底下寫裸埠號（`ListenStream=22022`）
+> **只會綁 IPv6**，而且是新舊兩個埠一起——IPv4 的 SSH 全部消失，雙埠並存的保護等於沒有：
+> 照流程另開視窗測新埠會連不上，舊埠也連不上，只能等看門狗還原。
+> 所以 `set` 階段會先記下原本的位址家族（存進狀態檔，`confirm` / `rollback` 沿用），
+> override 逐個埠寫成 `0.0.0.0:埠` 與 `[::]:埠`；取不到就兩種都寫（1.13.2 修正）。
+
 **2. OpenSSH 版本差異**
 8.2+ 支援 `Include /etc/ssh/sshd_config.d/*.conf`，腳本走 drop-in，不動主設定檔。
 CentOS/RHEL 7 的 OpenSSH 是 7.4，不支援 Include，只能改主設定檔——而且必須插在**檔案最

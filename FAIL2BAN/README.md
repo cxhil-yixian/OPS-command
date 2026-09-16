@@ -46,7 +46,7 @@
 ### 1. 從日誌到防火牆
 
 紅色的是「服務看起來好好的、`systemctl status` 是綠的，但一個都擋不住」的地方，
-細節見下面的[三種「設了但不會生效」](#三種設了但不會生效)。`doctor` 會逐項檢查。
+細節見下面的[四種「設了但不會生效」](#四種設了但不會生效)。`doctor` 會逐項檢查。
 
 ```mermaid
 flowchart TD
@@ -277,7 +277,7 @@ $ ./fail2ban.sh ban 203.0.113.0/24
 | 偵測到的後端 | 寫入的 banaction | 為什麼 |
 |---|---|---|
 | firewalld | `firewallcmd-rich-rules` | firewalld 每次 reload 都會把 iptables 上的 f2b 鏈沖掉，用 `iptables-*` 會變成「清單裡有、防火牆裡沒有」 |
-| ufw | `ufw` | |
+| ufw | `ufw` | **只有 `ufw status` 回「Status: active」才算**。停用時輸出是 `Status: inactive`，裡面就含有 `active`——早期版本只 grep `active`，於是「裝了但沒啟用」的 ufw 會被當成正在擋，banaction 寫成 `ufw` 之後封鎖靜默失效（1.13.2 修正） |
 | nftables | `nftables-multiport` | |
 | iptables | `iptables-multiport` | |
 
@@ -287,7 +287,7 @@ $ ./fail2ban.sh ban 203.0.113.0/24
 
 ---
 
-## 三種「設了但不會生效」
+## 四種「設了但不會生效」
 
 `doctor` 專門在抓這些。它們的共同點是：fail2ban 服務看起來好好的、`systemctl status`
 是綠的，但實際上一個攻擊都擋不住。
@@ -333,6 +333,30 @@ firewalld 裡實際找**，而不是看規則名稱裡有沒有 `f2b`——後�
 | 日誌裡沒有錯誤 | 當下有套上，是事後被沖掉的 |
 
 同時會印出設定裡實際的 `banaction`。
+
+---
+
+**4. jail 一個 action 都沒有**
+
+最隱蔽的一種：jail 照常讀日誌、照常計數、照常把 IP 放進封鎖清單，但**防火牆裡一條規則都不會有**，
+而且 fail2ban 的日誌裡連一則錯誤都沒有——因為 ban 動作從頭到尾沒被執行過。
+
+觸發條件是**改過 `banaction` 之後只做 reload**。實測 fail2ban 1.0.2（Ubuntu 24.04）：
+
+| 動作 | jail 的 actions | f2b 鏈 |
+|---|---|---|
+| 服務剛啟動 | `iptables-multiport` | 有 |
+| 改 banaction → 全域 `reload` | **一個都沒有** | 0 |
+| 再下 per-jail `reload sshd` | **一個都沒有** | 0 |
+| 把 banaction 改回原值 → `reload` | **一個都沒有** | 0 |
+| `systemctl restart fail2ban` | `iptables-multiport` | 有 |
+
+也就是 reload 之後救不回來，連改回原值都沒用，只有重啟服務才會重建 action。
+`enable-sshd` 正是「寫入 banaction 然後 reload」，所以這個組合以前會留下一個看起來完全正常、
+實際上什麼都不擋的 fail2ban。
+
+現在 `reload` 會回頭確認每個 jail 是否真的有 action，沒有就自動改用重啟再確認一次；
+`doctor` 與開場自檢也會直接指出是哪些 jail 沒有 action，而不是誤導成「規則事後被沖掉」。
 
 ---
 
@@ -428,7 +452,7 @@ fail2ban 自己的狀態不一致，是這類工具最難查的問題：清單�
 `fail2ban-systemd` 是常見原因，`install` 在 CentOS 7 會一併裝。
 
 **封了但對方還連得進來**
-照「三種設了但不會生效」逐項檢查，`doctor` 會一次跑完。最常見的是 jail 的 port 沒跟上
+照「四種設了但不會生效」逐項檢查，`doctor` 會一次跑完。最常見的是 jail 的 port 沒跟上
 換過的 SSH 埠。
 
 **自己被自己的 fail2ban 擋在外面**

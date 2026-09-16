@@ -180,7 +180,14 @@ need() {
     log "缺少工具:$miss"
     case "$miss" in
         *fio*|*stress-ng*|*mpstat*|*vmstat*|*chronyc*)
-            log "  yum install -y fio sysstat stress-ng chrony" ;;
+            # 安裝指令要跟著這台的套件管理器走。寫死 yum 的話，在 Debian / Ubuntu 上
+            # 照著打一定失敗（實測 Ubuntu 24.04：缺 chronyc 時印出的就是 yum install …）。
+            if   command -v apt-get >/dev/null 2>&1; then log "  apt-get install -y fio sysstat stress-ng chrony"
+            elif command -v dnf     >/dev/null 2>&1; then log "  dnf install -y fio sysstat stress-ng chrony"
+            elif command -v yum     >/dev/null 2>&1; then log "  yum install -y fio sysstat stress-ng chrony   （stress-ng 在 EPEL）"
+            elif command -v apk     >/dev/null 2>&1; then log "  apk add --no-cache fio sysstat stress-ng chrony"
+            else                                          log "  請自行安裝：fio sysstat stress-ng chrony"
+            fi ;;
     esac
     return 1
 }
