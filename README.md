@@ -156,7 +156,7 @@ OPS-command/
 ├── WINDOWS/            → 詳見 WINDOWS/README.md
 │   ├── ops-win.ps1         一行指令的進入點（下載主腳本到 %ProgramData% 再執行）
 │   ├── Win_Admin_Tool.bat  本機進入點（雙擊即可）
-│   └── Win_Admin_Tool.ps1  Windows 10/11 管理選單：RDP / 帳號 / 更新 / 防火牆 / 磁碟
+│   └── Win_Admin_Tool.ps1  Windows 10/11 管理選單：RDP / 帳號 / 更新 / 防火牆 / 磁碟 / 事件檢視器
 ├── REPO/
 │   └── URL             換源腳本的來源網址（linuxmirrors.cn，第三方）
 ├── CHANGELOG.md        變更記錄
@@ -263,8 +263,10 @@ CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假
 逐項狀態見 [WINDOWS/README.md](WINDOWS/README.md#已知限制)。
 
 靜態檢查也用真正的 PowerShell 工具做過（在 Linux 的容器裡）：語法解析**兩支都 0 個錯誤**，
-編碼與行尾符合 `.gitattributes`，PSScriptAnalyzer 的告警逐項確認後沒有一項要改（絕大多數是
-`Write-Host`，以及三個刻意留空的 `catch` 與一個刻意不加的 BOM）。**解析過不等於跑得起來。**
+編碼與行尾符合 `.gitattributes`。PSScriptAnalyzer 在 1.14.0 那一輪**抓到一個真的 bug**——
+事件檢視器的自訂查詢問了使用者「往回幾天」卻沒把值傳進去，輸入 30 天實際只查 7 天，
+畫面還照樣標「最近 7 天」——已修正；其餘告警逐項確認過不需要改，明細見
+[WINDOWS/README.md](WINDOWS/README.md#已知限制)。**解析過不等於跑得起來。**
 
 > **`time-set.sh` 在 CentOS 7.9 上驗過的部分**：`status` / `list` / `doctor`、時區變更的
 > **兩條路徑都實機跑過並還原**（`timedatectl set-timezone`，以及強制走「直接改
@@ -286,9 +288,10 @@ CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假
 `fail2ban-client status` 的輸出，不依賴 0.10+ 才有的 `get` 子命令；版本能力
 （`banip --time`、`addignoreip`）用「試一次看結果」判斷，不比版本號。
 
-**`ops.sh` 與 SSH / FAIL2BAN 底下的三支腳本全部是 POSIX sh，Alpine 的 busybox ash 可以
-直接執行，不需要安裝 bash。** 需要 bash 的只有兩處：選單第 9 項呼叫的第三方換源腳本，
-以及壓測用的 `STRESS/stress-test.sh`——兩者都會在執行前檢查，缺 bash 就擋下並提示安裝。
+**`ops.sh` 與六支工具腳本中的五支全部是 POSIX sh**（`SSH/` 的兩支、`FAIL2BAN/`、`TIME/`、
+`APPS/`），**Alpine 的 busybox ash 可以直接執行，不需要安裝 bash。** 需要 bash 的只有兩處：
+選單第 9 項呼叫的第三方換源腳本，以及壓測用的 `STRESS/stress-test.sh`——兩者都會在執行前
+檢查，缺 bash 就擋下並提示安裝。
 
 外部指令一律「先探測能力再用」，探測不到就降級並在輸出中寫明降級了什麼，不靜默失效：
 
@@ -306,8 +309,9 @@ CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假
 
 ## 相依套件
 
-`SSH/` 與 `FAIL2BAN/` 這三支腳本都能在最小化安裝上跑起來，下表是**想要完整功能**時
-建議補的（壓測的相依另列在本節最後）：
+`SSH/`、`FAIL2BAN/`、`TIME/`、`APPS/` 底下的腳本都能在最小化安裝上跑起來，下表是
+**想要完整功能**時建議補的（壓測與時間工具的相依另列在本節最後；`APPS/apps.sh` 本身
+只需要套件管理器，加上 `curl` 或 `wget` 其中一個）：
 
 | 系統 | 安裝指令 |
 |---|---|

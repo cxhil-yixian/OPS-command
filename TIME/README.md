@@ -142,6 +142,11 @@ log 的時間戳差 8 小時，通常是時區的問題，不是時鐘的問題�
 | chronyd 正在跑 | `chronyc makestep`（用它既有的來源與統計） |
 | 裝了 chrony 但沒在跑 | `chronyd -q`（一次性，不留下常駐程序） |
 | 有 ntpdate / sntp / busybox ntpd | 各自的一次性校時，可用參數指定伺服器 |
+| systemd-timesyncd 正在跑 | 重啟該服務逼它重新對時，完成後印出同步狀態與來源 |
+
+timesyncd 是 Debian / Ubuntu 的預設校時服務，但它**沒有「立刻校時一次」的指令**，所以這條
+路徑的做法是重啟服務。如果 timesyncd 裝了卻沒在跑，`sync` 會叫你先 `ntp on`——在 1.13.2
+之前，一台正在正常同步的 Ubuntu 會被告知「找不到校時工具，請安裝 chrony」，那是錯的建議。
 
 `chronyc` 回的 `200 OK` **只代表指令收到了**，真正的跳躍要等 chronyd 拿到有效測量才發生，
 偏差大時會晚幾秒到幾十秒。腳本會等 3 秒再印結果，並在畫面上註明這件事。

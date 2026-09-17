@@ -68,10 +68,17 @@
 
 不落地，複製整段貼上就跑（**需要 root**）。第一行把腳本網址存成 `$S`，後面每條指令都用它 —— **參數接在 `<(...)` 之後**，不是接在 `curl` 後面。
 
-先裝工具（缺了腳本只會告訴你缺什麼然後結束）：
+先裝工具（缺了腳本只會告訴你缺什麼然後結束，而且會依這台的套件管理器給對應的指令）：
 
 ```bash
-yum install -y fio sysstat stress-ng chrony
+# RHEL 系（CentOS 7 用 yum，8+ 用 dnf；stress-ng 在 EPEL 裡）
+yum install -y epel-release && yum install -y fio sysstat stress-ng chrony
+
+# Debian / Ubuntu
+apt-get update && apt-get install -y fio sysstat stress-ng chrony
+
+# Alpine
+apk add fio sysstat stress-ng chrony
 ```
 
 ```bash
@@ -100,7 +107,14 @@ RAM_PCT=95 bash <(curl -fsSL $S) ram       # 記憶體壓更兇
 - 相依工具：
 
   ```bash
-  yum install -y fio sysstat stress-ng chrony
+  # RHEL 系（stress-ng 在 EPEL 裡）
+  yum install -y epel-release && yum install -y fio sysstat stress-ng chrony
+
+  # Debian / Ubuntu
+  apt-get update && apt-get install -y fio sysstat stress-ng chrony
+
+  # Alpine
+  apk add fio sysstat stress-ng chrony
   ```
 
   各項目實際需要的工具：

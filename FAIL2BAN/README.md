@@ -1,6 +1,6 @@
 # FAIL2BAN/
 
-`fail2ban.sh` — fail2ban 的封鎖管理介面：手動封鎖 / 解封、白名單、排行、環境檢查。
+`fail2ban.sh` — fail2ban 的封鎖管理介面：手動封鎖 / 解封、白名單、排行、環境檢查、報告。
 
 可以透過根目錄的 [`../ops.sh`](../README.md) 選單操作（主選單按 `b`），以下是直接呼叫的說明。
 
@@ -99,7 +99,7 @@ flowchart TD
 flowchart LR
     g_state["改封鎖狀態<br/>ban · unban · unban-all · bantime"]
     g_conf["改設定<br/>allow · disallow · enable-sshd · reload"]
-    g_read["查詢<br/>status · list · check · top · log · tail"]
+    g_read["查詢<br/>status · list · check · top · log · tail · report"]
     g_doc["檢查<br/>doctor · preflight"]
 
     jaild[("jail.d/zz-ops-*.local")]
@@ -135,6 +135,7 @@ flowchart LR
 | `status` / `list` | `status` | — | — |
 | `check` | `status` | — | fail2ban 日誌（歷史封鎖次數） |
 | `top` / `log` / `tail` | — | — | fail2ban 日誌 |
+| `report` | `status`（各 jail 現況） | 產出的 HTML 報告檔（`-o` 指定） | fail2ban 日誌（含輪替的 `.gz`）、sshd 認證日誌、fail2ban 的 sqlite 資料庫、防火牆現況 |
 | `install` | — | —（套件管理器安裝，`systemctl enable --now`） | — |
 | `doctor` / `preflight` | `status`、`get ignoreip` | — | 防火牆、`sshd -T`、fail2ban 日誌；iptables 會建一條臨時空鏈再刪掉來驗證能不能封 |
 

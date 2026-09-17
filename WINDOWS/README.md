@@ -7,7 +7,7 @@ Windows 10 / 11 的系統管理工具箱，PowerShell 寫的分類選單。跟 L
 |---|---|
 | `ops-win.ps1` | 一行指令的進入點：下載主腳本到 `%ProgramData%\OPS-command\` 再執行 |
 | `Win_Admin_Tool.bat` | 本機進入點，雙擊即可（設好編碼並用 `-ExecutionPolicy Bypass` 呼叫 .ps1） |
-| `Win_Admin_Tool.ps1` | 本體，1091 行的 PowerShell 分類選單 |
+| `Win_Admin_Tool.ps1` | 本體，1420 行的 PowerShell 分類選單 |
 
 ## 兩種跑法
 
@@ -122,7 +122,7 @@ Get-ScheduledTask -TaskName OPS-RdpPort-Watchdog -ErrorAction SilentlyContinue
 | 2. 藍畫面與硬體錯誤 | BugCheck 1001（停止碼與傾印檔位置）、WHEA-Logger 17/18/19/20/47 |
 | 3. 磁碟與儲存 | disk 7/11/51/153、Ntfs 55/98/130/137、chkdsk 結果 |
 | 4. 服務異常 | SCM 7000～7045，含 **7040「啟動類型被改」** |
-| 5. 應用程式當機 / 無回應 | Application Error 1000、Application Hang 1002、.NET Runtime 1026 |
+| 5. 應用程式當機 / 無回應 | Application Error 1000、Application Hang 1002、.NET Runtime 1026、Windows Error Reporting 1001 |
 | 6. 登入與帳號 | Security 4624/4625/**4740（帳號被鎖定）**/4648、RDP 1149 與 21/23/24/25 |
 | 7. Windows 更新 | WindowsUpdateClient 19/20/43 |
 
@@ -259,20 +259,24 @@ shell 腳本被寫成 CRLF 的話，shebang 會變成 `/bin/sh\r` 而直接執�
   |---|---|
   | `[Parser]::ParseFile` 真正的語法解析 | 兩支都 **0 個解析錯誤**（`Win_Admin_Tool.ps1` 46 個函式、8328 個 token） |
   | 編碼與行尾 | 符合 `.gitattributes`：`ops-win.ps1` 無 BOM、`Win_Admin_Tool.ps1` 有 BOM、三個檔都是 CRLF |
-  | PSScriptAnalyzer 1.22 | `ops-win.ps1` 21 筆、`Win_Admin_Tool.ps1` 342 筆，**其中一筆是真的 bug** |
+  | PSScriptAnalyzer 1.22 | 修正前 `Win_Admin_Tool.ps1` 343 筆，**其中一筆是真的 bug**；修正後 342 筆、`ops-win.ps1` 21 筆 |
 
   1.14.0 這一輪分析器抓到一個真的缺陷（`PSUseDeclaredVarsMoreThanAssignments`：自訂查詢
   問了使用者「往回幾天」，卻沒把 `$days` 傳進 `Show-EventScenario`，該函式內部又寫死 7 天
-  ——輸入 30 天實際只查 7 天，而且畫面照樣標「最近 7 天」，不報錯、只給錯答案）。已修正。
-  所以「分析器的告警都是雜訊」這個說法是錯的，值得逐筆看完。
+  ——輸入 30 天實際只查 7 天，而且畫面照樣標「最近 7 天」，不報錯、只給錯答案）。已修正，
+  修正後那條規則歸零。所以「分析器的告警都是雜訊」這個說法是錯的，值得逐筆看完。
 
-  其餘 341 筆確認過不需要改：319 筆 `PSAvoidUsingWriteHost`（互動式選單本來就該用它）、
+  剩下的 342 筆確認過不需要改：319 筆 `PSAvoidUsingWriteHost`（互動式選單本來就該用它）、
   12 筆 `PSUseShouldProcessForStateChangingFunctions`（這些是選單動作，每個危險操作都已經
   有自己的確認步驟，再加一層 `-WhatIf` / `-Confirm` 沒有意義）、7 筆 `PSUseApprovedVerbs`
   與 3 筆 `PSUseSingularNouns`（`Require-Admin`、`Manage-*`、`Menu-*` 這些名字是選單語意，
   換成核准動詞反而難讀）、1 筆空 `catch`。`ops-win.ps1` 那 21 筆是 18 筆 `Write-Host`、
   2 筆刻意留空的 `catch`（包的是 `[Console]::OutputEncoding` 與 TLS 1.2 設定，失敗時本來
   就該繼續跑）、1 筆 `PSUseBOMForUnicodeEncodedFile`（**刻意**不加 BOM，見上面「編碼」一節）。
+
+  （那 319 筆不等於原始碼裡 `Write-Host` 的數量——實際有 412 次呼叫、分布在 393 行，
+  而分析器報的 319 筆落在 300 個不同的行。這兩個數字本來就不會一致，不必去「修正」它。）
+
   **解析過不代表跑得起來——實機行為仍然是零驗證。**
 - 一行指令這條路徑另外有三個只有實機能確認的點：`irm | iex` 對 UTF-8 無 BOM 檔案的
   解析、`Invoke-WebRequest -OutFile` 之後 `Unblock-File` 有沒有真的解掉 MOTW、
