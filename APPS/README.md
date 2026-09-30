@@ -1,6 +1,6 @@
 # APPS/
 
-`apps.sh` — 常用軟體安裝：`docker`、`nc`、`tcpping`、`mtr`、`nginx`。依這台的發行版 /
+`apps.sh` — 常用軟體安裝：`docker`、`nc`、`tcpping`、`mtr`、`nginx`、`tree`、`git`、`snmp`。依這台的發行版 /
 套件管理器挑對的裝法，裝之前把會跑的指令全部攤開，裝完回頭驗證指令真的在。
 
 可以透過根目錄的 [`../ops.sh`](../README.md) 選單操作（主選單按 `a`），以下是直接呼叫的說明。
@@ -13,7 +13,7 @@
 | 相依 | 套件管理器（apt / dnf / yum / apk / zypper / pacman）；docker 與 tcpping 要 `curl` 或 `wget` |
 
 ```bash
-./apps.sh status                    五項軟體的安裝狀態與版本
+./apps.sh status                    各項軟體的安裝狀態與版本
 ./apps.sh install <名稱...>          安裝指定項目，例：install nc mtr
 ./apps.sh install all               還沒裝的全部裝
 ```
@@ -34,6 +34,9 @@
 | tcpping | `traceroute` + 腳本 | `traceroute` + 腳本 | `tcptraceroute` + 腳本 | `traceroute` + 腳本 |
 | mtr | `mtr-tiny` | `mtr` | `mtr` | `mtr` |
 | nginx | `nginx` | `nginx`（CentOS/RHEL 7 先裝 `epel-release`） | `nginx` | `nginx` |
+| tree | `tree` | `tree` | `tree` | `tree` |
+| git | `git` | `git` | `git` | `git` |
+| snmp | `snmpd snmp` | `net-snmp net-snmp-utils` | `net-snmp net-snmp-tools` | `net-snmp` |
 
 `mtr` 在 Debian 系選 `mtr-tiny`：`mtr` 那個套件會把整套 GTK 拉進來，伺服器用不到。
 
@@ -104,6 +107,18 @@ seq 1: tcp response from one.one.one.one (1.1.1.1)  1.917 ms
 - CentOS / RHEL 7 的 nginx 在 EPEL，沒有 EPEL 的話會先裝 `epel-release`（8 之後在 AppStream，不需要）。
 - 防火牆不會幫你開 80 / 443。
 
+### snmp
+
+裝的是 net-snmp 的**代理（`snmpd`）加查詢工具（`snmpwalk` / `snmpget`）**：被監控主機查要 `snmpd`，
+排錯時要能在本機 `snmpwalk` 自己驗一次。兩個指令都在才算裝好，只裝了一半的 `status` 會標出缺哪個。
+
+- **Debian / Ubuntu 裝完 snmpd 會立刻啟動**，但預設只聽 `127.0.0.1:161`，外面查不到。要給監控主機查，
+  改 `/etc/snmp/snmpd.conf` 的 `agentaddress` 與 `rocommunity` 再重啟。
+  `snmpwalk` 預設不載入 MIB（授權問題），輸出是數字 OID，這是正常的。
+- **RHEL 系裝完不會自動啟動**，但預設設定一啟動就聽**所有介面**的 UDP 161，community 是 `public`
+  （唯讀，只開 system 等少數 OID）。對外之前先改 community。
+- 防火牆不會幫你開 UDP 161。
+
 ---
 
 ## 裝完一定驗證
@@ -120,7 +135,7 @@ seq 1: tcp response from one.one.one.one (1.1.1.1)  1.917 ms
   + 全部完成
 ```
 
-有沒裝上的會列出來並讓 `install` 回傳非 0。docker / nginx 另外印服務現況（active / 開機啟動），
+有沒裝上的會列出來並讓 `install` 回傳非 0。docker / nginx / snmpd 另外印服務現況（active / 開機啟動），
 **要不要開機啟動留給你決定**；用 `sudo` 執行時還會提示怎麼讓原本的使用者免 sudo 用 docker
 （加進 `docker` 群組，等同給 root 權限）。
 
@@ -133,6 +148,7 @@ seq 1: tcp response from one.one.one.one (1.1.1.1)  1.917 ms
 | 環境 | 實裝項目 | 結果 |
 |---|---|---|
 | Debian 12 | nc / tcpping / mtr / nginx | 全部裝上，tcpping 實際量到延遲 |
+| Debian 12 / Rocky Linux 9 / Alpine 3.20 | tree / git / snmp | 全部裝上（net-snmp 5.9.x） |
 | Ubuntu 24.04 | 全部（docker 走 get-docker.sh） | 全部裝上，docker 29.8.0 |
 | Rocky Linux 9 | nc / tcpping / mtr / nginx | 全部裝上，tcpping 實際量到延遲 |
 | AlmaLinux 9 | 全部（docker 走 docker-ce repo） | 全部裝上，docker 29.8.0 |
@@ -147,8 +163,8 @@ zypper / pacman 的套件名是照各自的套件庫對的，**沒有實跑過**
 
 | 情況 | 行為 |
 |---|---|
-| Alpine 內建的 `nc` 是 busybox 的 | 算已安裝（能用），`status` 標成「busybox nc（精簡版）」並給出完整版的安裝指令 |
-| 沒有 `curl` 也沒有 `wget` | docker 與 tcpping 在計畫階段就擋下，其他三項照裝 |
+| Alpine 內建的 `nc` / `tree` 是 busybox 的 | 算已安裝（能用），`status` 標成「busybox（精簡版）」並給出完整版的安裝指令 |
+| 沒有 `curl` 也沒有 `wget` | docker 與 tcpping 在計畫階段就擋下，其他項目照裝 |
 | 找不到任何套件管理器 | 列出需要的套件名後停下 |
 | pacman | 不先 `-Sy`：只同步不升級是 Arch 明講不支援的「部分升級」 |
 

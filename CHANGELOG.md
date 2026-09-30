@@ -9,6 +9,21 @@
 
 ---
 
+## [Unreleased]
+
+### 新增
+
+- **常用軟體多三項：`tree`、`git`、`snmp`**（`apps.sh` 1.1，選單 `a` 的 6 / 7 / 8，「全部」改為 9）。
+  - `snmp` 同時裝 **snmpd 代理與 snmpwalk / snmpget 查詢工具**：RHEL 系 `net-snmp net-snmp-utils`、
+    Debian 系 `snmpd snmp`、Alpine `net-snmp net-snmp-tools`、zypper / pacman `net-snmp`。兩個指令都在
+    才算裝好，只裝一半的 `status` 會標出缺哪個；`status` 與裝完的驗證一併印 snmpd 服務現況。
+  - 裝之前先講清楚 snmpd 的預設行為：Debian 系裝完**立刻啟動但只聽 127.0.0.1**；RHEL 系不自動啟動，
+    但一啟動就聽**所有介面**的 UDP 161、community 是 `public`（Rocky 9 容器裡看過預設設定檔）。
+  - Alpine 內建的 `tree` 是 busybox 的，跟 `nc` 一樣算已安裝，`status` 標成精簡版並給出完整版的安裝指令。
+  - 實測：Debian 12 / Rocky Linux 9 / Alpine 3.20 容器裡三項都實際裝上並驗過版本。
+
+---
+
 ## [1.14.0] - 2026-09-16
 
 Windows 工具新增「事件檢視器」：用**症狀**而不是事件 ID 分類，不熟 Windows 事件紀錄的人

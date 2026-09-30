@@ -4,7 +4,7 @@
 換 SSH 埠有看門狗自動還原，手動封鎖 IP 會先算會不會封到你自己。
 另附一組壓力測試（CPU / 記憶體 / 磁碟 / SWAP / NTP），跑之前先把會發生什麼攤開來問。
 時區與系統時間也能改，改時鐘之前先算出差多少、往哪個方向、會弄壞什麼。
-常用軟體（docker / nc / tcpping / mtr / nginx）可以一鍵裝，依發行版挑對的裝法。
+常用軟體（docker / nc / tcpping / mtr / nginx / tree / git / snmp）可以一鍵裝，依發行版挑對的裝法。
 Linux 以外還有一支 Windows 10/11 的管理工具，換 RDP Port 同樣有看門狗。
 
 所有工具都能單獨執行，也可以透過 `ops.sh` 的視覺化選單操作。
@@ -91,7 +91,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
    t) 進入時間選單    改時區 / 改系統時間 / 校時，改之前先算差距與後果
 
  常用軟體  (APPS/apps.sh)
-   a) 進入安裝選單    docker / nc / tcpping / mtr / nginx，依發行版挑裝法
+   a) 進入安裝選單    docker / nc / tcpping / mtr / nginx / tree / git / snmp
 
  系統
    9) 更換套件來源鏡像 呼叫 linuxmirrors.cn 的外部腳本
@@ -126,8 +126,8 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 常用軟體（`a`）一次可以裝一項、全部、或自選幾項。docker 走官方的 `get.docker.com` 腳本
 （先下載成檔案、驗過內容再執行；Alpine 與 AlmaLinux 這類它不支援的發行版改走 apk /
-docker-ce repo），其他四項依套件管理器對應套件名——`nc` 在 RHEL 系是 `nmap-ncat`、
-Debian 系是 `netcat-openbsd`，`tcpping` 不在任何套件庫裡，是 `traceroute` 加上一支固定版本
+docker-ce repo），其他項目依套件管理器對應套件名——`nc` 在 RHEL 系是 `nmap-ncat`、
+Debian 系是 `netcat-openbsd`，`snmp` 裝 snmpd 代理加 snmpwalk 查詢工具，`tcpping` 不在任何套件庫裡，是 `traceroute` 加上一支固定版本
 的腳本。已經裝好的略過，裝完逐項驗證指令真的在。細節見 [APPS/README.md](APPS/README.md)。
 
 壓測（`s`）同樣是**先問完參數再攤開來確認**：持續秒數、記憶體配置比例、報告輸出目錄，
@@ -152,7 +152,7 @@ OPS-command/
 ├── TIME/               → 詳見 TIME/README.md
 │   └── time-set.sh     時區與系統時間：改時區 / 改時鐘 / 校時 / 硬體時鐘
 ├── APPS/               → 詳見 APPS/README.md
-│   └── apps.sh         常用軟體安裝：docker / nc / tcpping / mtr / nginx
+│   └── apps.sh         常用軟體安裝：docker / nc / tcpping / mtr / nginx / tree / git / snmp
 ├── WINDOWS/            → 詳見 WINDOWS/README.md
 │   ├── ops-win.ps1         一行指令的進入點（下載主腳本到 %ProgramData% 再執行）
 │   ├── Win_Admin_Tool.bat  本機進入點（雙擊即可）
@@ -280,7 +280,7 @@ CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假
 > 要你 `apk add tzdata`——這條路徑本身也還沒在真的 Alpine 上跑過。
 
 > **`apps.sh` 的 ✅ 是在 docker 容器裡實際安裝過**：Debian 12、Rocky 9、Alpine 3.20 裝了
-> nc / tcpping / mtr / nginx（tcpping 都實際量到延遲），Ubuntu 24.04 與 AlmaLinux 9 連 docker
+> nc / tcpping / mtr / nginx（tcpping 都實際量到延遲）以及 tree / git / snmp，Ubuntu 24.04 與 AlmaLinux 9 連 docker
 > 一起裝（分別走 get-docker.sh 與 docker-ce repo 兩條路徑）。容器沒有 systemd，所以
 > **「裝完服務會不會自動啟動」沒有驗到**；CentOS 7 的官方 repo 已下線，只驗了狀態與乾跑。
 
@@ -394,6 +394,8 @@ CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假
 - **docker 發佈的埠（`-p`）會繞過 firewalld / ufw**。docker 自己寫 iptables 的 `DOCKER` 鏈，
   防火牆上看起來沒開的埠外面照樣連得進來。只給本機用的服務請綁 `127.0.0.1`。
 - **Debian / Ubuntu 裝 nginx 會立刻啟動並佔用 80 埠**。安裝前會先檢查 80 埠有沒有人在聽。
+- **snmpd 啟動後的查詢密碼（community）預設是 `public`**。RHEL 系一啟動就聽所有介面的 UDP 161；
+  Debian 系裝完立刻啟動但只聽本機。要對外給監控主機查之前，先改 `/etc/snmp/snmpd.conf`。
 - **手動封鎖前先確認會不會封到自己**。`fail2ban.sh` 會擋下涵蓋你目前 SSH 來源、
   本機位址或 loopback 的目標，CIDR 是真的做網段計算的；要硬幹得加 `--force`。
 - **換過 SSH 埠之後要重跑 `fail2ban.sh enable-sshd`**。jail 的 `port` 沒跟著改的話，

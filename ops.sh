@@ -553,7 +553,7 @@ menu() {
     row "t) 進入時間選單    ${CD}改時區 / 改系統時間 / 校時，改之前先算差距與後果${C0}"
     printf '\n'
     sect "常用軟體  (APPS/apps.sh)"
-    row "a) 進入安裝選單    ${CD}docker / nc / tcpping / mtr / nginx，依發行版挑裝法${C0}"
+    row "a) 進入安裝選單    ${CD}docker / nc / tcpping / mtr / nginx / tree / git / snmp${C0}"
     printf '\n'
     sect "系統"
     row "9) 更換套件來源鏡像 ${CD}呼叫 linuxmirrors.cn 的外部腳本${C0}"
@@ -1139,7 +1139,10 @@ act_apps_menu() {
         row "3) tcpping         ${CD}用 TCP SYN 量延遲，ICMP 被擋時用（traceroute + 腳本）${C0}"
         row "4) mtr             ${CD}traceroute + ping 合一，看是哪一跳在掉包${C0}"
         row "5) nginx           ${CD}Debian 系裝完會立刻啟動並佔用 80 埠${C0}"
-        row "6) 全部            ${CD}上面還沒裝的一次裝${C0}"
+        row "6) tree            ${CD}樹狀列出目錄結構${C0}"
+        row "7) git             ${CD}版本控制，拉設定檔 / 腳本 repo 用${C0}"
+        row "8) snmp            ${CD}snmpd 代理 + snmpwalk，給監控主機查；Debian 系裝完會啟動（只聽本機）${C0}"
+        row "9) 全部            ${CD}上面還沒裝的一次裝${C0}"
         row "c) 自選多項        ${CD}例：nc mtr tcpping${C0}"
         row "b) 返回主選單"
         printf '\n 請選擇：'
@@ -1151,7 +1154,10 @@ act_apps_menu() {
             3) sh "$APPS_SH" install tcpping ;;
             4) sh "$APPS_SH" install mtr ;;
             5) sh "$APPS_SH" install nginx ;;
-            6) sh "$APPS_SH" install all ;;
+            6) sh "$APPS_SH" install tree ;;
+            7) sh "$APPS_SH" install git ;;
+            8) sh "$APPS_SH" install snmp ;;
+            9) sh "$APPS_SH" install all ;;
             c|C) ask_default "要裝哪幾項？（空白分隔，Enter 取消）" ""
                  # shellcheck disable=SC2086
                  [ -n "$REPLY_VAL" ] && sh "$APPS_SH" install $REPLY_VAL ;;

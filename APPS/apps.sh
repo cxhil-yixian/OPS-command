@@ -1,16 +1,16 @@
 #!/bin/sh
-# apps.sh — 常用軟體安裝：docker / nc / tcpping / mtr / nginx
+# apps.sh — 常用軟體安裝：docker / nc / tcpping / mtr / nginx / tree / git / snmp
 #
 # 支援：CentOS 7.9 / RHEL 7-10 / Rocky / AlmaLinux / Fedora
 #       Ubuntu 18.04-24.04 / Debian 9-12 / Alpine
 #       openSUSE（zypper）/ Arch（pacman）—— 套件名有對應，未實測
 #
 # 用法：
-#   ./apps.sh status                    五項軟體的安裝狀態與版本
+#   ./apps.sh status                    各項軟體的安裝狀態與版本
 #   ./apps.sh install <名稱...>          安裝指定項目，例：install nc mtr
-#   ./apps.sh install all               五項裡還沒裝的全部裝
+#   ./apps.sh install all               還沒裝的全部裝
 #
-#   名稱：docker / nc / tcpping / mtr / nginx
+#   名稱：docker / nc / tcpping / mtr / nginx / tree / git / snmp
 #   共用選項：-y 免確認、-n 乾跑
 #
 # 各項的裝法：
@@ -20,7 +20,8 @@
 #   tcpping  不在任何發行版的套件庫裡：先用套件管理器裝 traceroute（tcpping 實際
 #            是靠它送 TCP SYN），再從 GitHub 下載固定版本的 tcpping 腳本
 #   其他     依套件管理器對應套件名（nc 在 RHEL 系叫 nmap-ncat、Debian 系叫
-#            netcat-openbsd；mtr 在 Debian 系叫 mtr-tiny）
+#            netcat-openbsd；mtr 在 Debian 系叫 mtr-tiny；snmp 是 net-snmp 的
+#            snmpd 代理 + snmpwalk 等查詢工具，Debian 系拆成 snmpd 與 snmp 兩包）
 #
 # 設計原則：
 #   1. 裝之前把「會跑什麼指令、會改到什麼」全部攤開，一次確認。
@@ -36,7 +37,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-APPS_SH_VER=1.0
+APPS_SH_VER=1.1
 SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
 
 # 產出檔案跟其他工具收在一起（見 ../SSH/README.md 的「檔案位置」）
@@ -53,7 +54,7 @@ TCPPING_VER=v2.7
 TCPPING_URL="${OPS_TCPPING_URL:-https://raw.githubusercontent.com/deajan/tcpping/$TCPPING_VER/tcpping}"
 TCPPING_DEST=/usr/local/bin/tcpping
 
-ALL_APPS='docker nc tcpping mtr nginx'
+ALL_APPS='docker nc tcpping mtr nginx tree git snmp'
 
 DRY=0
 YES=0
@@ -176,6 +177,14 @@ pkg_of() {
         mtr:apt)              echo mtr-tiny ;;          # mtr 那個會拉進整套 GTK
         mtr:*)                echo mtr ;;
         nginx:*)              echo nginx ;;
+        tree:*)               echo tree ;;
+        git:*)                echo git ;;
+        # snmp = 代理（snmpd）+ 查詢工具（snmpwalk / snmpget）兩邊都裝：
+        # 被監控要 snmpd，排錯時要在本機 snmpwalk 自己驗一次
+        snmp:dnf|snmp:yum)    echo net-snmp net-snmp-utils ;;
+        snmp:apt)             echo snmpd snmp ;;
+        snmp:apk)             echo net-snmp net-snmp-tools ;;
+        snmp:zypper|snmp:pacman) echo net-snmp ;;
         # tcpping 的前置：GNU traceroute 2.x 才有 -T（TCP SYN）。
         # Alpine 的 traceroute 是 busybox 版不支援 -T，改裝 tcptraceroute（tcpping 會自動改用它）
         tcpping:apk)          echo tcptraceroute ;;
@@ -188,6 +197,7 @@ pkg_of() {
 cmd_of() {
     case "$1" in
         nc)      echo nc ;;
+        snmp)    echo snmpwalk ;;
         *)       echo "$1" ;;
     esac
 }
@@ -201,6 +211,7 @@ is_app() {
 installed() {
     case "$1" in
         tcpping) has tcpping && { has traceroute || has tcptraceroute; } ;;
+        snmp)    has snmpwalk && has snmpd ;;
         *)       has "$(cmd_of "$1")" ;;
     esac
 }
@@ -211,6 +222,13 @@ ver_of() {
         docker)  docker --version 2>/dev/null | head -1 ;;
         nginx)   nginx -v 2>&1 | sed -n 's/^nginx version: //p' | head -1 ;;
         mtr)     mtr --version 2>/dev/null | head -1 ;;
+        git)     git --version 2>/dev/null | head -1 ;;
+        tree)    # Alpine 內建 busybox 的 tree：能列，但沒有 -L / -a / -d 這些選項
+                 case "$(readlink -f "$(command -v tree 2>/dev/null)" 2>/dev/null)" in
+                     */busybox) echo "busybox tree（精簡版，要完整版：$PKG_INSTALL tree）"; return ;;
+                 esac
+                 tree --version 2>/dev/null | head -1 | awk '{print $1, $2}' ;;
+        snmp)    snmpd -v 2>/dev/null | sed -n 's/^NET-SNMP version: *\(.*\)/net-snmp \1/p' | head -1 ;;
         tcpping) _p=$(command -v tcpping 2>/dev/null)
                  [ -n "$_p" ] && sed -n 's/^ver="\(.*\)"$/tcpping \1/p' "$_p" 2>/dev/null | head -1 ;;
         nc)      # ncat 會報版本；openbsd 版沒有 --version，只好不給。
@@ -219,6 +237,15 @@ ver_of() {
                      */busybox) echo "busybox nc（精簡版，要完整版：$PKG_INSTALL $(pkg_of nc)）"; return ;;
                  esac
                  nc --version 2>&1 | grep '^Ncat: Version' | head -1 ;;
+    esac
+}
+
+# 項目 -> 服務名。沒有服務的回傳空字串
+svc_of() {
+    case "$1" in
+        docker|nginx) echo "$1" ;;
+        snmp)         echo snmpd ;;
+        *)            echo '' ;;
     esac
 }
 
@@ -258,10 +285,13 @@ cmd_status() {
             _v=$(ver_of "$_a")
             [ -z "$_v" ] && _v=$(command -v "$(cmd_of "$_a")")
             printf '   %-8s %s已安裝%s  %s' "$_a" "$CG" "$C0" "$_v"
-            case "$_a" in
-                docker|nginx) [ "$INIT" != sysv ] && printf '  %s(%s)%s' "$CD" "$(svc_state "$_a")" "$C0" ;;
-            esac
+            _s=$(svc_of "$_a")
+            [ -n "$_s" ] && [ "$INIT" != sysv ] && printf '  %s(%s)%s' "$CD" "$(svc_state "$_s")" "$C0"
             printf '\n'
+        elif [ "$_a" = snmp ] && { has snmpwalk || has snmpd; }; then
+            if has snmpd; then _m=snmpwalk; else _m=snmpd; fi
+            printf '   %-8s %s缺 %s%s  %s(代理與查詢工具只裝了一半)%s\n' \
+                   "$_a" "$CY" "$_m" "$C0" "$CD" "$C0"
         elif [ "$_a" = tcpping ] && has tcpping; then
             printf '   %-8s %s缺 traceroute%s  %s(腳本在，但沒有它送不出 TCP SYN)%s\n' \
                    "$_a" "$CY" "$C0" "$CD" "$C0"
@@ -384,6 +414,22 @@ svc_hint() {
     esac
 }
 
+plan_snmp() {
+    info "${CB}snmp${C0}  套件 $(pkg_of snmp)（snmpd 代理 + snmpwalk / snmpget）"
+    case "$PKG" in
+        apt)
+            warn "  Debian / Ubuntu 裝完 snmpd 會${CB}立刻啟動${C0}，但預設只聽 127.0.0.1:161"
+            info "  ${CD}要給監控主機查：改 /etc/snmp/snmpd.conf 的 agentaddress 與 rocommunity，再重啟 snmpd${C0}"
+            info "  ${CD}snmpwalk 預設不載入 MIB（授權問題），輸出是數字 OID，這是正常的${C0}" ;;
+        *)
+            info "  ${CD}裝完不會自動啟動；要用請：$(svc_hint snmpd)${C0}"
+            [ "$OS_FAMILY" = rhel ] && \
+                warn "  RHEL 系預設設定一啟動就聽${CB}所有介面${C0}的 UDP 161，community 是 ${CB}public${C0}（唯讀、只開部分 OID）"
+            info "  ${CD}對外之前先改 /etc/snmp/snmpd.conf 的 community，別用 public${C0}" ;;
+    esac
+    info "  ${CD}防火牆不會幫你開 UDP 161，要給監控主機查請自己放行${C0}"
+}
+
 plan_tcpping() {
     _pre=$(pkg_of tcpping)
     info "${CB}tcpping${C0}  前置套件 $_pre + 下載腳本"
@@ -464,7 +510,7 @@ install_docker() {
 }
 
 cmd_install() {
-    [ $# -ge 1 ] || die "要指定項目：$SELF install <docker|nc|tcpping|mtr|nginx|all>"
+    [ $# -ge 1 ] || die "要指定項目：$SELF install <docker|nc|tcpping|mtr|nginx|tree|git|snmp|all>"
     need_root
 
     # ---- 整理清單：展開 all、擋掉打錯的、略過已經裝好的 ----
@@ -526,6 +572,7 @@ cmd_install() {
             docker)  plan_docker; plain "" ;;
             nginx)   plan_nginx; plain "" ;;
             tcpping) plan_tcpping; plain "" ;;
+            snmp)    plan_snmp; plain "" ;;
         esac
     done
 
@@ -566,14 +613,15 @@ cmd_install() {
     done
 
     # 服務現況只講事實，要不要開機啟動留給使用者
-    for _a in docker nginx; do
-        case " $_todo " in *" $_a "*) : ;; *) continue ;; esac
+    for _a in $_todo; do
+        _s=$(svc_of "$_a")
+        [ -n "$_s" ] || continue
         installed "$_a" || continue
         [ "$INIT" = sysv ] && continue
-        info "$_a 服務：$(svc_state "$_a")"
-        case "$(svc_state "$_a")" in
+        info "$_s 服務：$(svc_state "$_s")"
+        case "$(svc_state "$_s")" in
             active*) : ;;
-            *) info "  ${CD}要啟動：$(svc_hint "$_a")${C0}" ;;
+            *) info "  ${CD}要啟動：$(svc_hint "$_s")${C0}" ;;
         esac
     done
     case " $_todo " in
@@ -598,7 +646,7 @@ usage() {
 apps.sh — 常用軟體安裝  v$APPS_SH_VER
 
 用法
-    $SELF status                   五項軟體的安裝狀態與版本
+    $SELF status                   各項軟體的安裝狀態與版本
     $SELF install <名稱...>         安裝指定項目，例：install nc mtr
     $SELF install all              還沒裝的全部裝
 
@@ -608,6 +656,9 @@ apps.sh — 常用軟體安裝  v$APPS_SH_VER
     tcpping   traceroute + deajan/tcpping $TCPPING_VER（裝到 $TCPPING_DEST）
     mtr       mtr（Debian 系 mtr-tiny）
     nginx     nginx（CentOS/RHEL 7 會先裝 epel-release）
+    tree      tree
+    git       git
+    snmp      snmpd + snmpwalk（RHEL 系 net-snmp net-snmp-utils，Debian 系 snmpd snmp）
 
 選項
     -y    免確認
