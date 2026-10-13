@@ -11,8 +11,46 @@
 
 ## [Unreleased]
 
+### 規劃中（還沒做）
+
+sshd 相關、這一版討論過但排到之後的功能：
+
+- **慣犯加重處罰**：recidive jail（0.9 就能用），或 `bantime.increment`（0.11+）。
+- **filter 實測**：用 `fail2ban-regex` 拿這台的 sshd 日誌跑一次，確認失敗真的會被計數。
+- **切換 sshd jail 的 mode**（normal / aggressive）：`report` 已經算得出 fail2ban 看不到的連線，
+  但還沒有切換的入口。
+- **會一直存在的黑名單**（`deny` / `undeny`）：目前手動封鎖只存在 fail2ban 的資料庫裡，沒有可管理的清單。
+- **封鎖通知**（Telegram / Webhook）：這一版討論後決定先不做。
+
+---
+
+## [1.15.0] - 2026-10-13
+
+fail2ban 的封鎖門檻終於能改了，而且改了會留下來；換 SSH 埠時，fail2ban sshd jail 的監控埠
+會跟著同步——之前換完埠 jail 還守著舊埠，新埠完全沒有防護，只有跑 `doctor` 才看得出來。
+
 ### 新增
 
+- **`fail2ban.sh tune`：修改封鎖門檻**（`fail2ban.sh` 1.1，封鎖選單的 `t`）。
+  `tune [jail] maxretry=N findtime=T bantime=T|perm`，jail 不寫 = sshd；`tune <jail> reset` 還原。
+  - 時間可寫 `600` / `10m` / `1h` / `1d` / `1w`，**換算成秒才寫進設定檔**（0.9 看不懂 `10m`）。
+  - 寫在新的 `jail.d/zz-ops-tune.local`，一個 jail 一段，不碰 `[DEFAULT]`。不放進
+    `zz-ops-sshd.local` 是因為 `enable-sshd` 每次都整個覆寫那個檔，調過的值會被蓋掉。
+  - **先即時套用、寫檔、再讀回比對**，不一致就講明「未完成」；不做 reload（這三個值不需要，
+    reload 又有弄丟 action 的風險）。`reset` 例外，交給 fail2ban 用 reload 重新讀設定。
+  - `maxretry ≤ 2`、永久封鎖、bantime 超過一年這三種容易封到自己的設定**會多問一次**，
+    你目前的 SSH 來源不在白名單時會提示先 `allow`。
+  - 下限：maxretry ≥ 1、findtime / bantime ≥ 60 秒；不設上限。fail2ban 在跑時 jail 必須啟用中，
+    沒在跑時必須在設定檔裡找得到，避免打錯字寫進一段沒用的設定。
+  - 選單改成逐項詢問（Enter = 不變），列出改前改後對照再確認。
+- **`fail2ban.sh sync-port`：sshd jail 的監控埠同步成 SSH 實際的埠**（封鎖選單的 `p`）。
+  - `zz-ops-sshd.local` 存在就只改 `port` 那一行；不存在（jail 是發行版內建的，例如 Debian 的
+    `defaults-debian.conf`）就建一個**只有 port 的最小覆蓋檔**，不動 enabled / backend / banaction。
+  - 改完**重啟** fail2ban 而不是 reload：firewalld 的 rich rule 把埠號寫在每條封鎖規則裡，reload 不保證
+    會改到既有規則；重啟時封鎖從資料庫重新套用，用的就是新埠，也順帶補回 firewalld reload 沖掉的 f2b 鏈。
+- **`ssh-port.sh` 換埠時自動同步 fail2ban**（`ssh-port.sh` 1.1）：`set` 時監控新舊兩個埠、
+  `confirm` 只剩新埠、`rollback`（含看門狗自動還原）回到舊埠。沒裝 fail2ban 或同步失敗都只印
+  一行說明，**不影響換埠本身**。
 - **常用軟體多三項：`tree`、`git`、`snmp`**（`apps.sh` 1.1，選單 `a` 的 6 / 7 / 8，「全部」改為 9）。
   - `snmp` 同時裝 **snmpd 代理與 snmpwalk / snmpget 查詢工具**：RHEL 系 `net-snmp net-snmp-utils`、
     Debian 系 `snmpd snmp`、Alpine `net-snmp net-snmp-tools`、zypper / pacman `net-snmp`。兩個指令都在
@@ -21,6 +59,39 @@
     但一啟動就聽**所有介面**的 UDP 161、community 是 `public`（Rocky 9 容器裡看過預設設定檔）。
   - Alpine 內建的 `tree` 是 busybox 的，跟 `nc` 一樣算已安裝，`status` 標成精簡版並給出完整版的安裝指令。
   - 實測：Debian 12 / Rocky Linux 9 / Alpine 3.20 容器裡三項都實際裝上並驗過版本。
+
+### 變更
+
+- **`bantime <jail> <秒>` 改的設定會留下來。** 之前只改執行中的設定，重啟 fail2ban 就變回原值；
+  現在等同 `tune <jail> bantime=<秒>`，寫進設定檔。
+- `doctor` 發現 jail 的 port 跟 SSH 實際的埠不一致時，建議改成跑 `sync-port`（原本是 `enable-sshd`）。
+  `enable-sshd` 顯示門檻時，若 `zz-ops-tune.local` 有調過的值會一併標出實際以哪個為準。
+- 封鎖選單：`t` 改名「封鎖門檻設定」，新增 `p` 同步監控埠；`e` 的說明拿掉「換過 SSH 埠後要重跑」。
+- `OPS_VERSION` 升到 `1.15`。
+
+### 修正
+
+- **Debian / Ubuntu 上 `doctor` 誤報「jail 套錯埠」。** jail.conf 的 `[sshd]` 寫的是 `port = ssh`
+  （服務名），`doctor` 直接拿 `ssh` 跟 `22` 比，SSH 明明就在 22 也會報錯。現在先換成數字再比。
+- **`bantime <jail> -1`（永久）一直不能用。** 全域選項的解析把 `-1` 當成未知選項直接結束，
+  選單 `t` 的「-1 = 永久」從來沒成功過。
+- `fail2ban.sh` 讀 SSH 埠時看得到 Ubuntu 24.04 的 `ssh.socket`：socket 接管時 `sshd -T` 照樣回報 22，
+  真正在聽的是 socket 的 ListenStream。影響 `enable-sshd`、`doctor` 與自鎖檢查。
+
+### 已驗證
+
+**只做了邏輯測試，沒有在真的 fail2ban 上跑過。** 開發機沒有 docker，原本計畫的 Rocky 9 / Debian 12 /
+Alpine 容器測試沒有做成。
+
+- 用會記住狀態的假 `fail2ban-client` 跑 60 項：時間換算與拒絕不合法輸入、tune 的寫檔 / 即時套用 /
+  讀回比對（含「回成功但沒設到」要講明未完成）、多個 jail 各一段、reset 只移除該段且最後一段移除後
+  刪檔、fail2ban 沒在跑時的行為、sync-port 的兩種寫入方式（只改 port 一行 / 建最小覆蓋檔）、
+  `port = ssh` 不誤判、沒有 sshd jail / 沒裝 fail2ban 時跳過。
+- `ssh-port.sh` 的同步呼叫與選單 `t` 的輸入流程，用替身腳本確認傳出去的參數正確、同步失敗不影響回傳值。
+- 三支腳本 `bash --posix -n` 語法通過；ShellCheck 0.11（`-s sh`）在改動的行上沒有新的 warning。
+
+**未驗證**：真的 fail2ban 上 `set / get` 的行為（尤其 0.9）、`sync-port` 重啟後封鎖是否確實用新埠重建、
+firewalld 環境下被沖掉的鏈是否補回、`ssh-port.sh` 三個階段在實機上的完整流程。
 
 ---
 
@@ -1219,6 +1290,8 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
+[Unreleased]: https://github.com/cxhil-yixian/OPS-command/compare/v1.15.0...HEAD
+[1.15.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.3...v1.14.0
 [1.13.3]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.2...v1.13.3
 [1.13.2]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.1...v1.13.2

@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.14
+OPS_VERSION=1.15
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -701,6 +701,37 @@ f2b_ask_ip() {
     [ -n "$_ips" ]
 }
 
+# 封鎖門檻：逐項問，Enter 保留原值。改前改後的對照與確認交給 fail2ban.sh tune。
+act_f2b_tune() {
+    sh "$F2B_SH" tune || return 0
+    printf '\n'
+    printf ' 要調整哪個 jail？(Enter = sshd) '
+    read -r _j 2>/dev/null || return 0
+    _j=${_j:-sshd}
+    printf ' 1) 修改門檻   2) 還原成原本的設定   (Enter = 1) '
+    read -r _a 2>/dev/null || return 0
+    case "$_a" in
+        2) sh "$F2B_SH" tune "$_j" reset; return 0 ;;
+        ''|1) : ;;
+        *) nomsg "無此選項：$_a"; return 0 ;;
+    esac
+    dim " 以下每一項直接按 Enter = 不變"
+    printf ' 失敗幾次就封鎖？(maxretry，例：5) '
+    read -r _mr 2>/dev/null || _mr=''
+    printf ' 在多久之內累計？(findtime，例：600 / 10m / 1h) '
+    read -r _ft 2>/dev/null || _ft=''
+    printf ' 封鎖多久？(bantime，例：3600 / 1h / 1d，perm = 永久) '
+    read -r _bt 2>/dev/null || _bt=''
+    _args=''
+    [ -n "$_mr" ] && _args="$_args maxretry=$_mr"
+    [ -n "$_ft" ] && _args="$_args findtime=$_ft"
+    [ -n "$_bt" ] && _args="$_args bantime=$_bt"
+    [ -n "$_args" ] || { dim " 沒有要修改的項目"; return 0; }
+    printf '\n'
+    # shellcheck disable=SC2086
+    sh "$F2B_SH" tune "$_j" $_args
+}
+
 act_f2b_menu() {
     require_script "$F2B_SH" "$F2B_REL" || return 0
     while :; do
@@ -725,8 +756,9 @@ act_f2b_menu() {
         row "9) 清空所有封鎖    ${CD}要打 y 二次確認${C0}"
         row "r) 產生報告        ${CD}fail2ban 做了哪些事：時間軸 / 慣犯 / 防火牆比對，另存 HTML${C0}"
         printf '\n'
-        row "e) 建立 sshd jail  ${CD}埠號取實際生效值，換過 SSH 埠後要重跑${C0}"
-        row "t) 封鎖時長設定"
+        row "e) 建立 sshd jail  ${CD}埠號取實際生效值${C0}"
+        row "p) 同步監控埠      ${CD}sshd jail 的埠跟上 SSH 實際的埠（用選單換埠時會自動做）${C0}"
+        row "t) 封鎖門檻設定    ${CD}多久之內失敗幾次就封鎖、封多久${C0}"
         row "d) 環境檢查        ${CD}含「設了但不會生效」的常見情況${C0}"
         row "i) 安裝 fail2ban"
         row "b) 返回主選單"
@@ -754,14 +786,8 @@ act_f2b_menu() {
                  read -r _d 2>/dev/null || _d=''
                  sh "$F2B_SH" report --days "${_d:-7}" ;;
             e|E) sh "$F2B_SH" enable-sshd ;;
-            t|T) sh "$F2B_SH" bantime
-                 printf ' 要改哪個 jail？(Enter 略過) '
-                 read -r _j 2>/dev/null || _j=''
-                 if [ -n "$_j" ]; then
-                     printf ' 改成幾秒？(-1 = 永久) '
-                     read -r _s 2>/dev/null || _s=''
-                     [ -n "$_s" ] && sh "$F2B_SH" bantime "$_j" "$_s"
-                 fi ;;
+            p|P) sh "$F2B_SH" sync-port ;;
+            t|T) act_f2b_tune ;;
             d|D) sh "$F2B_SH" doctor ;;
             i|I) sh "$F2B_SH" install ;;
             b|B|q|Q|'') return 0 ;;

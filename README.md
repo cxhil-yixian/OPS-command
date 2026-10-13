@@ -61,7 +61,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.14
+ OPS-command 運維工具箱  v1.15
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
@@ -124,6 +124,12 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 全程唯讀。fail2ban 本身怎麼運作（含會悄悄失效的地方）畫成三張圖放在
 [FAIL2BAN/README.md](FAIL2BAN/README.md#fail2ban-到底做了哪些事)。
 
+封鎖選單的 `t` 改**封鎖門檻**——在多久之內（findtime）失敗幾次（maxretry）就封鎖多久
+（bantime）。時間可以寫 `10m` / `1h` / `1d`，改完寫進設定檔、重啟後仍有效；`maxretry ≤ 2`
+或永久封鎖這種容易把自己關在門外的設定會多問一次。用選單 1–4 換 SSH 埠時，fail2ban
+sshd jail 的監控埠會跟著自動同步（`p` 可以手動同步）。細節見
+[FAIL2BAN/README.md](FAIL2BAN/README.md#封鎖門檻tune)。
+
 常用軟體（`a`）一次可以裝一項、全部、或自選幾項。docker 走官方的 `get.docker.com` 腳本
 （先下載成檔案、驗過內容再執行；Alpine 與 AlmaLinux 這類它不支援的發行版改走 apk /
 docker-ce repo），其他項目依套件管理器對應套件名——`nc` 在 RHEL 系是 `nmap-ncat`、
@@ -146,7 +152,7 @@ OPS-command/
 │   ├── ssh-port.sh     安全變更 SSH 連接埠（雙埠並存 + 看門狗自動還原）
 │   └── selfheal-ssh.sh SSH 連線取證與即時監看（夜鶯 n9e 自愈腳本）
 ├── FAIL2BAN/           → 詳見 FAIL2BAN/README.md
-│   └── fail2ban.sh     封鎖管理：手動封鎖 / 解封 / 白名單 / 排行 / 環境檢查 / 報告
+│   └── fail2ban.sh     封鎖管理：手動封鎖 / 解封 / 白名單 / 封鎖門檻 / 排行 / 環境檢查 / 報告
 ├── STRESS/             → 詳見 STRESS/README.md
 │   └── stress-test.sh  壓力測試：CPU / 記憶體 / 磁碟 / SWAP / NTP
 ├── TIME/               → 詳見 TIME/README.md
@@ -288,6 +294,10 @@ CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假
 `fail2ban-client status` 的輸出，不依賴 0.10+ 才有的 `get` 子命令；版本能力
 （`banip --time`、`addignoreip`）用「試一次看結果」判斷，不比版本號。
 
+> **1.15.0 新增的 `tune`（改封鎖門檻）與 `sync-port`（換埠同步 jail）尚未在實機驗證**，
+> 只用假的 `fail2ban-client` 跑過邏輯測試（60 項）。尤其是 `sync-port` 重啟 fail2ban 之後封鎖是否
+> 確實用新埠重建、firewalld 環境下被沖掉的鏈是否補回，要等真的 fail2ban 跑過才算數。
+
 **`ops.sh` 與六支工具腳本中的五支全部是 POSIX sh**（`SSH/` 的兩支、`FAIL2BAN/`、`TIME/`、
 `APPS/`），**Alpine 的 busybox ash 可以直接執行，不需要安裝 bash。** 需要 bash 的只有兩處：
 選單第 9 項呼叫的第三方換源腳本，以及壓測用的 `STRESS/stress-test.sh`——兩者都會在執行前
@@ -398,9 +408,11 @@ CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假
   Debian 系裝完立刻啟動但只聽本機。要對外給監控主機查之前，先改 `/etc/snmp/snmpd.conf`。
 - **手動封鎖前先確認會不會封到自己**。`fail2ban.sh` 會擋下涵蓋你目前 SSH 來源、
   本機位址或 loopback 的目標，CIDR 是真的做網段計算的；要硬幹得加 `--force`。
-- **換過 SSH 埠之後要重跑 `fail2ban.sh enable-sshd`**。jail 的 `port` 沒跟著改的話，
-  fail2ban 照樣記錄、照樣「封鎖成功」，但規則套在舊埠上，等於完全沒有防護。
-  `fail2ban.sh doctor` 會比對這兩個值。
+- **fail2ban 的 jail 要跟上 SSH 的埠**。jail 的 `port` 沒跟著改的話，fail2ban 照樣記錄、
+  照樣「封鎖成功」，但規則套在舊埠上，等於完全沒有防護。用 `ssh-port.sh` 或選單換埠時會
+  自動同步；自己手動改過 sshd 埠的話跑 `fail2ban.sh sync-port`。`fail2ban.sh doctor` 會比對這兩個值。
+- **門檻別設太緊**。`maxretry` 1–2 次代表打錯一兩次密碼就被封，搭配永久封鎖更危險。先把自己的
+  來源 IP 加進白名單（`fail2ban.sh allow`）再調。
 
 ---
 

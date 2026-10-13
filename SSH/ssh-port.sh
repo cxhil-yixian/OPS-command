@@ -13,6 +13,9 @@
 #   若在時限內沒有 confirm，看門狗會自動還原所有變更（設定檔、防火牆、
 #   SELinux、socket override），因此就算新埠完全連不上也不會失聯。
 #
+#   有裝 fail2ban 的話，三個階段都會把 sshd jail 的監控埠跟著同步
+#   （set：新舊埠都監控；confirm：只剩新埠；rollback：回到舊埠）。
+#
 # 用法：
 #   ./ssh-port.sh set 58763          變更為 58763（雙埠並存 + 看門狗）
 #   ./ssh-port.sh set 58763 -t 900   看門狗時限改 900 秒（預設 600）
@@ -25,8 +28,10 @@
 
 set -u
 
-VERSION=1.0
+VERSION=1.1
 SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
+# 同一個 repo（或 ops.sh 的下載快取）裡的 fail2ban 工具，兩種情況相對位置都一樣
+F2B_SH="$(dirname "$SELF")/../FAIL2BAN/fail2ban.sh"
 
 # 一行指令執行（bash <(curl …)、curl … | sh）時 $0 是行程替換的 fd 或 "sh"，
 # 不是實體檔案。看門狗必須把「本腳本路徑 rollback --auto」寫進背景排程才能
@@ -635,6 +640,24 @@ watchdog_cancel() {
 }
 
 # =========================================================
+# fail2ban：sshd jail 的監控埠跟著換
+#   埠換了 jail 沒跟上，封鎖就套在舊埠，新埠完全沒有防護。這是附帶動作：
+#   不管成功與否都不影響換埠本身，看門狗在背景還原時也一樣要能跑完。
+# =========================================================
+f2b_sync() {
+    [ -z "$PREFIX" ] || return 0
+    has fail2ban-client || { info "沒有安裝 fail2ban，不需要同步 sshd jail"; return 0; }
+    if [ ! -f "$F2B_SH" ]; then
+        info "這台有 fail2ban，但找不到 $F2B_SH，sshd jail 的監控埠沒有同步"
+        info "請另外確認 jail 的 port 是否為：$*"
+        return 0
+    fi
+    step "fail2ban：同步 sshd jail 的監控埠"
+    sh "$F2B_SH" sync-port "$@" || warn "同步沒有完成，SSH 換埠不受影響；稍後可手動執行：sh $F2B_SH sync-port"
+    return 0
+}
+
+# =========================================================
 # 子指令
 # =========================================================
 cmd_set() {
@@ -684,6 +707,7 @@ cmd_set() {
         info "4. 防火牆($FW) 放行 $NEW_PORT/tcp"
         info "5. sshd -t 檢查後重啟服務"
         info "6. 啟動 ${TIMEOUT}s 看門狗"
+        has fail2ban-client && info "7. fail2ban sshd jail 的監控埠改為 $OLD_PORTS $NEW_PORT（會重啟 fail2ban）"
         exit 0
     fi
 
@@ -719,6 +743,9 @@ cmd_set() {
 
     state_set
     watchdog_start "$TIMEOUT"
+    # 新舊埠都開著的這段期間，兩個都要監控，否則新埠就是沒人看守的破口
+    # shellcheck disable=SC2086
+    f2b_sync $OLD_PORTS $NEW_PORT
 
     printf '\n'
     printf '%s\n' "${CG}${CB}────────────────────────────────────────────────────────${C0}"
@@ -767,6 +794,8 @@ cmd_confirm() {
     # 它看到標記就會自己退出（見 watchdog_start），不會拿舊狀態亂還原。
     rm -f "$STATE" 2>/dev/null
 
+    f2b_sync "$NEW_PORT"
+
     printf '\n'
     ok "完成。SSH 現在只監聽埠 $NEW_PORT"
     info "備份保留在 $BACKUP，確認穩定後可自行刪除"
@@ -810,6 +839,8 @@ cmd_rollback() {
         exit 1
     fi
     rm -f "$STATE" "${STATE_DIR}/confirmed"
+    # shellcheck disable=SC2086
+    f2b_sync $OLD_PORTS
     [ "${AUTO:-0}" = 1 ] && info "（此次為看門狗逾時自動還原）"
     return 0
 }

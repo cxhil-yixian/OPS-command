@@ -1,6 +1,6 @@
 # FAIL2BAN/
 
-`fail2ban.sh` — fail2ban 的封鎖管理介面：手動封鎖 / 解封、白名單、排行、環境檢查、報告。
+`fail2ban.sh` — fail2ban 的封鎖管理介面：手動封鎖 / 解封、白名單、封鎖門檻、排行、環境檢查、報告。
 
 可以透過根目錄的 [`../ops.sh`](../README.md) 選單操作（主選單按 `b`），以下是直接呼叫的說明。
 
@@ -8,7 +8,7 @@
 |---|---|
 | Shell | POSIX sh（Alpine 的 busybox ash 可直接執行） |
 | 需要 root | 是（fail2ban 的控制 socket 只有 root 能用），`doctor` / `-h` 除外 |
-| 會改系統嗎 | 會：封鎖狀態（透過 fail2ban-client）與 `jail.d/zz-ops-*.local` 兩個設定檔 |
+| 會改系統嗎 | 會：封鎖狀態（透過 fail2ban-client）與 `jail.d/zz-ops-*.local` 三個設定檔 |
 | 相依 | fail2ban 本身；沒裝可以用 `install` 裝 |
 
 ```bash
@@ -23,8 +23,12 @@
 ./fail2ban.sh top [n]             封鎖次數最多的來源
 ./fail2ban.sh log [n]             最近的封鎖 / 解除事件
 ./fail2ban.sh tail                即時追蹤 fail2ban 日誌
-./fail2ban.sh bantime [jail] [秒] 查看 / 設定封鎖時長
+./fail2ban.sh tune [jail] [maxretry=N] [findtime=T] [bantime=T|perm]
+                                  查看 / 修改封鎖門檻（寫進設定檔，重啟後仍有效）
+./fail2ban.sh tune <jail> reset   還原成原本設定檔的門檻
+./fail2ban.sh bantime [jail] [秒] 只改封鎖時長（等同 tune <jail> bantime=…）
 ./fail2ban.sh enable-sshd         建立 sshd jail（埠號取實際生效值）
+./fail2ban.sh sync-port [埠…]     sshd jail 的監控埠同步成 SSH 實際的埠
 ./fail2ban.sh reload              重載設定
 ./fail2ban.sh install             安裝並啟用 fail2ban
 ./fail2ban.sh doctor              環境檢查
@@ -92,13 +96,13 @@ flowchart TD
 ### 2. `fail2ban.sh` 碰的是哪一段
 
 所有封鎖都經過 `fail2ban-client` 交給執行中的 fail2ban-server，**腳本自己從不寫防火牆規則**；
-設定只寫 `jail.d/zz-ops-*.local` 這兩個檔，發行版的 `jail.conf` 一律不碰。
+設定只寫 `jail.d/zz-ops-*.local` 這三個檔，發行版的 `jail.conf` 一律不碰。
 會改變狀態的動作另外寫一筆稽核到 `/var/log/OPS-ssh/fail2ban-ops.log`。
 
 ```mermaid
 flowchart LR
-    g_state["改封鎖狀態<br/>ban · unban · unban-all · bantime"]
-    g_conf["改設定<br/>allow · disallow · enable-sshd · reload"]
+    g_state["改封鎖狀態<br/>ban · unban · unban-all"]
+    g_conf["改設定<br/>allow · disallow · tune · enable-sshd · sync-port · reload"]
     g_read["查詢<br/>status · list · check · top · log · tail · report"]
     g_doc["檢查<br/>doctor · preflight"]
 
@@ -128,9 +132,10 @@ flowchart LR
 | 命令 | 透過 fail2ban-client | 寫的檔案 | 唯讀的來源 |
 |---|---|---|---|
 | `ban` / `unban` / `unban-all` | `set <jail> banip / unbanip` | — | `ssh_peers`、`ip addr`（封鎖前的自鎖檢查） |
-| `bantime` | `set <jail> bantime`（**只改執行中**，重啟就回到設定檔的值） | — | — |
+| `tune` / `bantime` | `set <jail> maxretry / findtime / bantime`，再 `get` 讀回比對；`reset` 走 `reload` | `zz-ops-tune.local` | 目前生效的三個值 |
 | `allow` / `disallow` | `addignoreip`（不支援就 `reload`） | `zz-ops-ignoreip.local` | 目前生效的 ignoreip（先讀回再合併） |
 | `enable-sshd` | `reload` | `zz-ops-sshd.local` | `sshd -T` 的埠、偵測到的防火牆 |
+| `sync-port` | 重啟服務（不是 reload，原因見[換 SSH 埠之後](#換-ssh-埠之後sync-port)） | `zz-ops-sshd.local` 的 `port` 那一行 | `sshd -T` 或 `ssh.socket` 的埠 |
 | `reload` | `reload` | — | — |
 | `status` / `list` | `status` | — | — |
 | `check` | `status` | — | fail2ban 日誌（歷史封鎖次數） |
@@ -141,12 +146,14 @@ flowchart LR
 
 會改變狀態的動作另外寫一筆稽核到 `/var/log/OPS-ssh/fail2ban-ops.log`。
 
-`enable-sshd` 是唯一會決定「封哪個埠、用哪種方式封」的命令：port 取自 `sshd -T`，
-banaction 取自偵測到的防火牆（對照表見[封鎖後端](#封鎖後端)）。**換過 SSH 埠或防火牆方案之後都要重跑它。**
+`enable-sshd` 決定「封哪個埠、用哪種方式封」：port 取自 `sshd -T`，banaction 取自偵測到的
+防火牆（對照表見[封鎖後端](#封鎖後端)）。**換過防火牆方案之後要重跑它**；換過 SSH 埠則跑
+`sync-port`——用 `ssh-port.sh` 或選單換埠時會自動做。
 
 ### 3. 一個 IP 走一遍
 
 用 `enable-sshd` 寫入的值：`maxretry = 5`、`findtime = 600`（10 分鐘）、`bantime = 3600`（1 小時）。
+這三個值可以用 [`tune`](#封鎖門檻tune) 改。
 重點是 **findtime 是一個往前滑動的視窗**，不是「從第一次失敗開始算 10 分鐘」：
 
 ```mermaid
@@ -311,10 +318,14 @@ RHEL 系裝完 fail2ban 之後，`jail.conf` 裡全部 `enabled = false`，服�
   實際 SSH 埠: 9227
   sshd jail 的 port: 22
   x SSH 實際在 9227，但 jail 的 port 是「22」— 封鎖會套錯埠
-  修正：./fail2ban.sh enable-sshd
+  修正：./fail2ban.sh sync-port
 ```
 
-**換完 SSH 埠請重跑一次 `enable-sshd`。**
+從 1.15.0 起，用 `ssh-port.sh`（或選單 1–4）換埠時會自動同步，見[換 SSH 埠之後](#換-ssh-埠之後sync-port)。
+在那之前換過埠的機器，跑一次 `sync-port` 補上。
+
+> jail.conf 的 `[sshd]` 寫的是 `port = ssh`（服務名，等於 22）。1.15.0 之前 `doctor` 直接拿 `ssh`
+> 去跟數字比，SSH 明明就在 22 也會報「套錯埠」；現在會先換成數字再比。
 
 **3. 封鎖清單有東西，防火牆裡卻沒有規則**
 `banaction` 與實際的防火牆後端對不上時會這樣（firewalld 環境常見）。封鎖清單裡有、
@@ -390,7 +401,7 @@ backport，版本號不可靠），也不是解析 help 文字（各版用詞不
 
 ```
   ! 這個 fail2ban 版本的 banip 不接受指定時長（它把 --time 與秒數也當成 IP 封了，已清掉）
-    203.0.113.5 已用 jail 本身的 bantime 封鎖；要改 jail 的預設時長：./fail2ban.sh bantime <jail> <秒>
+    203.0.113.5 已用 jail 本身的 bantime 封鎖；要改 jail 的預設時長：./fail2ban.sh tune <jail> bantime=<時長>
 ```
 
 > **「試一次」要看的是有沒有多出垃圾，不是目標 IP 有沒有進清單。** 實測 0.11.2（EPEL 7）：
@@ -399,12 +410,104 @@ backport，版本號不可靠），也不是解析 help 文字（各版用詞不
 > `Failed to execute ban … INVALID_ADDR`。只看目標 IP 在不在清單裡，會把這種版本誤判成
 > 支援，指定的時長靜靜地沒生效。現在的判斷是「清單裡有沒有多出 `--time`」，有就清掉並降級。
 
-`bantime <jail> <秒>` 改的是**執行中**的設定，重啟 fail2ban 就會回到設定檔的值；
-要永久生效請寫進 `jail.d` 底下的 `.local` 檔（`enable-sshd` 產生的那份可以直接改）。
+jail 本身的封鎖時長用 [`tune`](#封鎖門檻tune) 改。
 
 > **封鎖到期時間是按系統時鐘算的。** 把時鐘往前撥，等於讓現有封鎖提早到期甚至立刻解封；
 > 往回撥則會讓它們延後解封。要改系統時間請走 [`../TIME/time-set.sh`](../TIME/README.md)，
 > 它會在改之前把差距與這類後果攤開來問。
+
+---
+
+## 封鎖門檻（tune）
+
+一個 jail 什麼時候封鎖，由三個值決定：**在 `findtime` 之內失敗 `maxretry` 次，就封鎖 `bantime`。**
+
+```bash
+./fail2ban.sh tune                                     # 列出每個 jail 目前的三個值
+./fail2ban.sh tune sshd maxretry=3 findtime=10m bantime=1d
+./fail2ban.sh tune maxretry=3                          # jail 不寫 = sshd
+./fail2ban.sh tune sshd bantime=perm                   # 永久
+./fail2ban.sh tune sshd reset                          # 還原成原本設定檔的值
+```
+
+選單是 `b → t`：先列出現況，選 jail、逐項輸入（直接 Enter = 不變），最後顯示改前改後對照再確認。
+
+```
+==> sshd 的封鎖門檻將變成：
+  maxretry  5 次 → 3 次
+  bantime   1 小時 → 1 天
+  寫入：/etc/fail2ban/jail.d/zz-ops-tune.local
+  fail2ban 在跑：會即時套用，不需要 reload
+```
+
+- **時間可以寫 `600`、`10m`、`1h`、`1d`、`1w`。** 腳本換算成秒才寫進設定檔：fail2ban 0.9
+  看不懂 `10m` 這種寫法，寫進去服務會起不來。
+- **下限**：maxretry 至少 1、findtime 與 bantime 至少 60 秒；不設上限。
+- **改的是個別 jail，不是 `[DEFAULT]`。** 全域改下去會連帶改到 recidive 這類本來就該用不同門檻的 jail。
+- **寫在自己的檔案 `zz-ops-tune.local`。** `enable-sshd` 每次都會整個覆寫 `zz-ops-sshd.local`，
+  門檻放在那裡的話，下次換防火牆方案重跑 `enable-sshd` 就被蓋掉了。`zz-ops-tune.local` 的檔名
+  排在後面（`jail.d` 依字母順序載入），所以它的值會勝出。
+- **先即時套用、寫檔、再讀回比對。** `fail2ban-client set` 回成功不代表真的設到了，所以最後
+  一定用 `get` 讀回來比；不一致就講明「未完成」並回傳非 0。不做 reload——這三個值不需要，
+  而 reload 有[把 action 弄丟的風險](#四種設了但不會生效)。`reset` 例外：原本的值可能寫成
+  `10m` 或引用變數，自己換算不可靠，所以交給 fail2ban 用 `reload` 重新讀設定。
+- **fail2ban 沒在跑時**照樣寫檔，下次啟動生效；指定的 jail 必須在設定檔裡找得到（在跑時則必須是
+  啟用中的 jail），避免打錯字寫進一段沒用的設定。
+
+**容易把自己關在門外的設定會多問一次**：`maxretry ≤ 2`（打錯一兩次密碼就被封）、`bantime=perm`，
+或 bantime 超過一年（等同永久）。這時如果你目前的 SSH 來源不在白名單裡，會一併提示先 `allow`：
+
+```
+  ! maxretry=2：打錯 2 次密碼就會被封，很容易封到自己
+  ! 你目前的來源 198.51.100.7 不在白名單內——自己打錯密碼也會被封
+  建議先加白名單：./fail2ban.sh allow 198.51.100.7
+要套用嗎？ [y/N] y
+上面的警告都看過了，確定還是要這樣設？ [y/N]
+```
+
+> **fail2ban 數的是「符合 filter 的失敗事件」，不只是「密碼打錯」。** 以 sshd 來說，不存在的帳號
+> 也算；`mode = aggressive` 時連還沒到認證就斷線的連線都算。所以實際上不一定要打錯 maxretry 次
+> 密碼才會被封。
+
+`bantime <jail> <秒>` 這個舊指令保留，現在等同 `tune <jail> bantime=<秒>`。**1.15.0 之前它只改執行中
+的設定，重啟 fail2ban 就變回原值**；現在會寫進設定檔。
+
+---
+
+## 換 SSH 埠之後（sync-port）
+
+封鎖是「IP + 埠」：jail 的 `port` 沒跟上換過的 SSH 埠，封鎖就套在沒人用的舊埠上。
+
+`sync-port` 把 sshd jail 的 `port` 改成 SSH 實際在聽的埠：
+
+```bash
+./fail2ban.sh sync-port              # 讀 sshd -T（Ubuntu 24.04 的 ssh.socket 則讀 socket 的埠）
+./fail2ban.sh sync-port 22 58763     # 指定
+```
+
+**用 [`../SSH/ssh-port.sh`](../SSH/README.md) 或選單 1–4 換埠時會自動呼叫**，三個階段各同步一次：
+
+| 換埠階段 | jail 監控的埠 | 為什麼 |
+|---|---|---|
+| `set`（新舊埠並存） | 新舊兩個 | 這段期間兩個埠都開著，只監控一個，另一個就是沒人看守的破口 |
+| `confirm` | 只剩新埠 | 舊埠已關閉 |
+| `rollback`（含看門狗逾時自動還原） | 回到舊埠 | 還原後新埠已關閉 |
+
+寫入方式：
+
+- `zz-ops-sshd.local`（`enable-sshd` 建的）存在 → **只改 `[sshd]` 的 `port` 那一行**，其他設定原封不動。
+- 不存在（sshd jail 是發行版內建的，例如 Debian / Ubuntu 的 `defaults-debian.conf`）→ 建一個
+  **只有 `[sshd] port = …` 的最小覆蓋檔**，`enabled` / `backend` / `banaction` 都沿用原本的。
+  之後跑 `enable-sshd` 會用完整內容覆寫它，兩者不衝突。
+- 沒有 sshd jail、沒裝 fail2ban → 印一行說明就跳過，**換埠流程照常進行**。
+
+改完會**重啟** fail2ban，而不是 reload：有些 banaction 把埠號寫進每一條封鎖規則（firewalld 的
+rich rule），reload 不保證會把已經存在的規則改到新埠；重啟時 fail2ban 會從資料庫把封鎖重新套用
+一次，用的就是新埠。這也順帶補回換埠時 `firewall-cmd --reload` 可能沖掉的 f2b 鏈
+（見[四種「設了但不會生效」](#四種設了但不會生效)第 3 種）。
+
+> **未在實機驗證**：重啟後封鎖是否確實用新埠重建、firewalld 環境下被沖掉的鏈是否補回，
+> 目前只做過邏輯測試（假的 fail2ban-client），還沒在真的 fail2ban 上跑過。
 
 ---
 
@@ -414,13 +517,14 @@ backport，版本號不可靠），也不是解析 help 文字（各版用詞不
 |---|---|
 | `/var/log/OPS-ssh/fail2ban-ops.log` | 本腳本的操作稽核（誰在什麼時候封了誰） |
 | `/etc/fail2ban/jail.d/zz-ops-ignoreip.local` | `allow` / `disallow` 管理的白名單 |
-| `/etc/fail2ban/jail.d/zz-ops-sshd.local` | `enable-sshd` 產生的 sshd jail |
+| `/etc/fail2ban/jail.d/zz-ops-sshd.local` | `enable-sshd` 產生的 sshd jail；`sync-port` 只改其中的 `port`（檔案不存在時建一個只有 port 的覆蓋檔） |
+| `/etc/fail2ban/jail.d/zz-ops-tune.local` | `tune` 管理的封鎖門檻，一個 jail 一段 |
 
 產出目錄跟其他工具共用，見 [../SSH/README.md](../SSH/README.md#檔案位置)；
 設 `OPS_SSH_DIR` 可換位置。
 
 **只寫 `jail.d/zz-ops-*.local`，不動發行版的 `jail.conf`。** 後者會在套件升級時被覆寫，
-改在那裡的東西遲早會消失，而且事後很難看出是誰改的。兩個檔案開頭都有「由 fail2ban.sh
+改在那裡的東西遲早會消失，而且事後很難看出是誰改的。每個檔案開頭都有「由 fail2ban.sh
 管理」的註解。
 
 ---
@@ -440,6 +544,7 @@ fail2ban 自己的狀態不一致，是這類工具最難查的問題：清單�
 | 服務沒起來 | 用 `ping` 判斷而非只看 `systemctl`，並指向 `doctor` |
 | 沒有 `banip --time` | 退回 jail 的 bantime，警告一次 |
 | 沒有 `addignoreip` | 改用 `reload` 套用白名單 |
+| `tune` 的即時套用 | 用 `set / get <jail> maxretry · findtime · bantime`，這三個子命令 0.8 就有；讀回不一致會講明未完成。**還沒在 0.9 實機跑過** |
 | 讀不到 fail2ban 日誌 | `top` / `log` 明講讀不到；`check` 的歷史統計標示不可用 |
 | busybox 環境 | 日誌來源會找 `logread`；Alpine 未啟用 syslog 時會提示怎麼開 |
 
@@ -454,7 +559,7 @@ fail2ban 自己的狀態不一致，是這類工具最難查的問題：清單�
 
 **封了但對方還連得進來**
 照「四種設了但不會生效」逐項檢查，`doctor` 會一次跑完。最常見的是 jail 的 port 沒跟上
-換過的 SSH 埠。
+換過的 SSH 埠，跑 `./fail2ban.sh sync-port` 修正。
 
 **自己被自己的 fail2ban 擋在外面**
 從主控台（雲端 Console / VNC / IPMI）登入後：
