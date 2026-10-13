@@ -219,7 +219,7 @@ DeadlineMinutes=$min
     Write-Host "[完成] 登錄檔已改為 $new,看門狗 $min 分鐘。接下來:"
     Write-Host "  1. 重啟 TermService,這條連線會斷"
     Write-Host "  2. 用『另一台電腦』連 IP:$new 確認可以登入"
-    Write-Host "  3. 回本選單選「確認新 Port 可用」取消看門狗"
+    Write-Host "  3. 回主選單選 A -> 2「確認新 Port 可用」取消看門狗"
     Write-Host "  * 連不上就什麼都別做,$min 分鐘後會自動還原成 $cur 並重啟服務"
     Write-Host ""
     if ((Read-Host "現在重啟 TermService? (Y=立即重啟 / N=稍後自行重啟或重開機)") -match '^[Yy]$') {
@@ -340,7 +340,7 @@ function Stop-WinUpdate {
         Write-Host ("[未完成] wuauserv 啟動類型現在是 {0},預期 Disabled。" -f $(if ($wu) { $wu.StartType } else { '讀不到' }))
         Write-Host "         可能被群組原則或第三方工具鎖住,請檢查上面的錯誤訊息。"
     }
-    Write-Host "        若要恢復請回主選單選「3. 還原 Windows 更新」。"
+    Write-Host "        若要恢復請回主選單選 C -> 2「還原 Windows 更新」。"
     Wait-Enter
 }
 
@@ -413,7 +413,7 @@ function Set-Ping {
     Write-Host "=== Ping (ICMP) 設定 ==="
     Write-Host "  1. 開啟 Ping (允許被 ping)"
     Write-Host "  2. 關閉 Ping (拒絕被 ping)"
-    Write-Host "  0. 返回主選單"
+    Write-Host "  0. 返回上一層"
     $c = Read-Host "請選擇"
     switch ($c) {
         '1' {
@@ -439,7 +439,7 @@ function Manage-Port {
     Write-Host "  1. 開啟 Port"
     Write-Host "  2. 查詢 Port"
     Write-Host "  3. 關閉 Port"
-    Write-Host "  0. 返回主選單"
+    Write-Host "  0. 返回上一層"
     $c = Read-Host "請選擇"
     switch ($c) {
         '1' {
@@ -656,7 +656,7 @@ function Set-CredSSP {
         Write-Host ""
         Write-Host "  1. 設為『已啟用 + 易受攻擊』 (AllowEncryptionOracle = 2)"
         Write-Host "  2. 還原為『尚未設定』 (移除此原則)"
-        Write-Host "  0. 返回主選單"
+        Write-Host "  0. 返回上一層"
         $c = Read-Host "請選擇"
         switch ($c) {
             '1' {
@@ -703,7 +703,7 @@ function Set-StoreAutoUpdate {
         Write-Host ""
         Write-Host "  1. 關閉自動更新 (建議,降低 wsappx 占用)"
         Write-Host "  2. 開啟自動更新 (恢復預設)"
-        Write-Host "  0. 返回主選單"
+        Write-Host "  0. 返回上一層"
         $c = Read-Host "請選擇"
         switch ($c) {
             '1' {
@@ -786,7 +786,7 @@ function Sync-Time {
         Write-Host "  2. 設定 NTP 伺服器並同步"
         Write-Host "  3. 設定時區為台北 (Taipei Standard Time, UTC+8)"
         Write-Host "  4. 搜尋 / 手動設定其他時區"
-        Write-Host "  0. 返回主選單"
+        Write-Host "  0. 返回上一層"
         $c = Read-Host "請選擇"
         switch ($c) {
             '1' {
@@ -845,7 +845,7 @@ function Set-RdpMulti {
         Write-Host ""
         Write-Host "  1. 開啟 RDP 多開"
         Write-Host "  2. 關閉 RDP 多開 (還原單一工作階段)"
-        Write-Host "  0. 返回主選單"
+        Write-Host "  0. 返回上一層"
         $c = Read-Host "請選擇"
         switch ($c) {
             '1' {

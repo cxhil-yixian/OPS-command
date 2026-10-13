@@ -9,6 +9,9 @@ Linux 以外還有一支 Windows 10/11 的管理工具，換 RDP Port 同樣有�
 
 所有工具都能單獨執行，也可以透過 `ops.sh` 的視覺化選單操作。
 
+> **第一次用、不熟指令？** 先看新手指南：[Linux](WIKI/linux.md)｜[Windows](WIKI/windows.md)。
+> 照著選單按鍵就能用，每個常見情況都有一步一步的案例。
+
 ---
 
 ## 快速開始
@@ -163,6 +166,9 @@ OPS-command/
 │   ├── ops-win.ps1         一行指令的進入點（下載主腳本到 %ProgramData% 再執行）
 │   ├── Win_Admin_Tool.bat  本機進入點（雙擊即可）
 │   └── Win_Admin_Tool.ps1  Windows 10/11 管理選單：RDP / 帳號 / 更新 / 防火牆 / 磁碟 / 事件檢視器
+├── WIKI/               給新手的使用指南（HTML 單檔離線可開 / Markdown 給 GitHub 閱讀）
+│   ├── linux.html / linux.md
+│   └── windows.html / windows.md
 ├── REPO/
 │   └── URL             換源腳本的來源網址（linuxmirrors.cn，第三方）
 ├── CHANGELOG.md        變更記錄

@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OPS-command Windows 新手指南</title>
+<style>
+  :root {
+    --bg: #fbfaf7; --surface: #ffffff; --text: #23211d; --muted: #6b665d;
+    --line: #e4e0d7; --accent: #1f6f5c; --accent-soft: #e3f1ec;
+    --warn: #8a5a00; --warn-soft: #fbf1dc; --danger: #a33a2c; --danger-soft: #fbe6e2;
+    --code-bg: #1d2421; --code-text: #e6efe9; --code-dim: #8aa197;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #151816; --surface: #1c201e; --text: #e8e6e1; --muted: #a29d93;
+      --line: #2e3430; --accent: #6cc4a8; --accent-soft: #1d3029;
+      --warn: #e7b65c; --warn-soft: #2f2716; --danger: #ef8a7b; --danger-soft: #34201c;
+      --code-bg: #0e1110; --code-text: #e6efe9; --code-dim: #7d948a;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #151816; --surface: #1c201e; --text: #e8e6e1; --muted: #a29d93;
+    --line: #2e3430; --accent: #6cc4a8; --accent-soft: #1d3029;
+    --warn: #e7b65c; --warn-soft: #2f2716; --danger: #ef8a7b; --danger-soft: #34201c;
+    --code-bg: #0e1110; --code-text: #e6efe9; --code-dim: #7d948a;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 1rem; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft JhengHei", "PingFang TC",
+                 "Noto Sans TC", sans-serif;
+    font-size: 17px; line-height: 1.75;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 2.5rem 1.25rem 5rem;
+          display: grid; grid-template-columns: 210px minmax(0, 1fr); gap: 3rem; }
+  @media (max-width: 860px) { .wrap { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; padding-top: 1.5rem; } }
+
+  /* 目錄 */
+  nav.toc { position: sticky; top: 1.5rem; align-self: start; font-size: .92rem; }
+  nav.toc strong { display: block; color: var(--muted); font-size: .8rem; letter-spacing: .08em; margin-bottom: .5rem; }
+  nav.toc ol { list-style: none; margin: 0; padding: 0; }
+  nav.toc li { margin: .15rem 0; }
+  nav.toc a { color: var(--text); text-decoration: none; display: block; padding: .2rem .6rem;
+              border-left: 2px solid var(--line); }
+  nav.toc a:hover { border-left-color: var(--accent); color: var(--accent); }
+  nav.toc .sub a { padding-left: 1.4rem; font-size: .86rem; color: var(--muted); }
+  @media (max-width: 860px) {
+    nav.toc { position: static; background: var(--surface); border: 1px solid var(--line);
+              border-radius: 10px; padding: 1rem; }
+    nav.toc .sub { display: none; }
+  }
+
+  /* 內容 */
+  main { min-width: 0; }
+  header.hero { border-bottom: 1px solid var(--line); padding-bottom: 1.5rem; margin-bottom: 1rem; }
+  .eyebrow { color: var(--accent); font-weight: 600; font-size: .9rem; letter-spacing: .04em; }
+  h1 { font-size: 2.1rem; line-height: 1.3; margin: .3rem 0 .8rem; }
+  .lede { font-size: 1.1rem; color: var(--muted); margin: 0; }
+  h2 { font-size: 1.5rem; margin: 3.2rem 0 1rem; padding-top: .5rem; }
+  h2 .num { color: var(--accent); margin-right: .4rem; }
+  h3 { font-size: 1.15rem; margin: 2rem 0 .6rem; }
+  p { margin: .6rem 0; }
+  a { color: var(--accent); }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .25rem 0; }
+
+  kbd {
+    display: inline-block; min-width: 1.6em; padding: 0 .45em; text-align: center;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .9em; font-weight: 600;
+    background: var(--surface); border: 1px solid var(--line); border-bottom-width: 3px;
+    border-radius: 6px; line-height: 1.6;
+  }
+  code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: .9em;
+         background: var(--accent-soft); padding: .05em .35em; border-radius: 4px; }
+
+  /* 指令區塊 */
+  .cmd { position: relative; margin: .8rem 0; }
+  .cmd pre, pre.screen {
+    margin: 0; background: var(--code-bg); color: var(--code-text); border-radius: 10px;
+    padding: 1rem 1.1rem; overflow-x: auto; font-size: .88rem; line-height: 1.6;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+  /* 指令一律換行顯示，新手才看得到整行；複製按鈕佔右上角，文字不會跑到它底下 */
+  .cmd pre { padding-right: 4.8rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cmd button {
+    position: absolute; top: .55rem; right: .55rem; font: inherit; font-size: .8rem;
+    background: #2d3a35; color: #dbe7e1; border: 1px solid #44544d; border-radius: 6px;
+    padding: .15rem .6rem; cursor: pointer;
+  }
+  .cmd button:hover { background: #3a4a44; }
+  pre.screen { font-size: .82rem; }
+  pre.screen .dim { color: var(--code-dim); }
+  pre.screen .hl { color: #f2c66d; font-weight: 600; }
+  .caption { color: var(--muted); font-size: .88rem; margin-top: .35rem; }
+
+  /* 提示框 */
+  .note { border-radius: 10px; padding: .8rem 1rem; margin: 1rem 0; border-left: 4px solid; }
+  .note p:first-child { margin-top: 0; } .note p:last-child { margin-bottom: 0; }
+  .note.tip { background: var(--accent-soft); border-color: var(--accent); }
+  .note.warn { background: var(--warn-soft); border-color: var(--warn); }
+  .note.danger { background: var(--danger-soft); border-color: var(--danger); }
+  .note b.label { display: block; margin-bottom: .2rem; }
+
+  /* 表格 */
+  .table-wrap { overflow-x: auto; margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .95rem; background: var(--surface); }
+  th, td { border: 1px solid var(--line); padding: .5rem .75rem; text-align: left; vertical-align: top; }
+  th { background: var(--accent-soft); font-weight: 600; white-space: nowrap; }
+  td.key { white-space: nowrap; }
+
+  /* 三步驟 */
+  .steps { list-style: none; padding: 0; counter-reset: s; }
+  .steps > li { counter-increment: s; position: relative; padding-left: 2.8rem; margin: 1.2rem 0; }
+  .steps > li::before {
+    content: counter(s); position: absolute; left: 0; top: .1rem; width: 2rem; height: 2rem;
+    border-radius: 50%; background: var(--accent); color: var(--bg); font-weight: 700;
+    display: grid; place-items: center; font-size: .95rem;
+  }
+
+  /* 案例卡片 */
+  .case { background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+          padding: 1.1rem 1.3rem; margin: 1.2rem 0; }
+  .case h3 { margin-top: 0; }
+  .case .when { color: var(--muted); margin-top: -.3rem; }
+  .path { font-weight: 600; }
+
+  dl.glossary { display: grid; grid-template-columns: max-content 1fr; gap: .4rem 1.2rem; }
+  dl.glossary dt { font-weight: 600; }
+  dl.glossary dd { margin: 0; }
+  @media (max-width: 560px) { dl.glossary { grid-template-columns: 1fr; } dl.glossary dd { margin-bottom: .6rem; } }
+
+  footer { margin-top: 4rem; padding-top: 1.2rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .9rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="toc" aria-label="目錄">
+  <strong>目錄</strong>
+  <ol>
+    <li><a href="#what">這是什麼</a></li>
+    <li><a href="#before">開始之前</a></li>
+    <li><a href="#start">三步驟開始</a></li>
+    <li><a href="#menu">主選單一覽</a></li>
+    <li><a href="#cases">使用案例</a></li>
+    <li class="sub"><a href="#case-check">看看電腦現況</a></li>
+    <li class="sub"><a href="#case-rdp">換遠端桌面 Port</a></li>
+    <li class="sub"><a href="#case-credssp">遠端桌面驗證錯誤</a></li>
+    <li class="sub"><a href="#case-event">電腦自己重開機</a></li>
+    <li class="sub"><a href="#case-lock">帳號一直被鎖住</a></li>
+    <li class="sub"><a href="#case-update">暫停 Windows 更新</a></li>
+    <li class="sub"><a href="#case-time">時間或時區不對</a></li>
+    <li class="sub"><a href="#case-port">開放防火牆 Port</a></li>
+    <li class="sub"><a href="#case-other">其他功能</a></li>
+    <li><a href="#trouble">出問題怎麼辦</a></li>
+    <li><a href="#rules">四條安全守則</a></li>
+    <li><a href="#words">名詞小辭典</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="hero">
+  <div class="eyebrow">OPS-command · Windows 篇</div>
+  <h1>Windows 新手指南</h1>
+  <p class="lede">不用記指令、不用翻設定畫面，照著選單按英文字母和數字，就能處理 Windows 10 / 11 常見的管理工作。</p>
+</header>
+
+<!-- ───────────────────────── 1 ───────────────────────── -->
+<h2 id="what"><span class="num">1</span>這是什麼</h2>
+<p>OPS-command 的 Windows 工具，是一個用 PowerShell 做的<strong>選單</strong>。你可以用它：</p>
+<ul>
+  <li><strong>換遠端桌面（RDP）的 Port</strong>：換錯了會自動還原，不會把自己關在門外。</li>
+  <li><strong>查電腦為什麼自己重開機、藍畫面、誰登入過</strong>：用「症狀」找，不用懂事件代碼。</li>
+  <li><strong>解決遠端桌面連不上的常見錯誤</strong>。</li>
+  <li><strong>暫停 Windows 更新、校正時間、開關防火牆 Port、管理帳號</strong>。</li>
+</ul>
+<div class="note tip">
+  <p>會改設定的功能都會<strong>先說明接下來要改什麼，等你輸入 <kbd>Y</kbd> 才動手</strong>。看不懂時輸入 <kbd>N</kbd> 或直接按 <kbd>Enter</kbd>，什麼都不會改。</p>
+</div>
+
+<!-- ───────────────────────── 2 ───────────────────────── -->
+<h2 id="before"><span class="num">2</span>開始之前</h2>
+
+<h3>你需要</h3>
+<ul>
+  <li>一台 Windows 10 或 Windows 11 電腦。</li>
+  <li>能連上網路（要從 GitHub 下載工具）。</li>
+  <li><strong>不需要</strong>先用系統管理員身分開啟。要改設定時，工具會問你要不要提權，答 <kbd>Y</kbd> 後跳出「使用者帳戶控制」視窗，按「是」就好。</li>
+</ul>
+
+<h3>支援哪些版本</h3>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Windows 版本</th><th>能不能用</th></tr></thead>
+  <tbody>
+    <tr><td>Windows 10 / 11 專業版、企業版</td><td>✅ 可以</td></tr>
+    <tr><td>Windows 10 / 11 家用版</td><td>⚠️ 大部分可以，但<strong>遠端桌面相關功能不能用</strong>（家用版本身就不能被遠端桌面連入）</td></tr>
+    <tr><td>Windows 7 / 8 及更舊</td><td>❌ 不支援</td></tr>
+  </tbody>
+</table>
+</div>
+<p>不知道自己是哪個版本？按 <kbd>Win</kbd> + <kbd>R</kbd>，輸入 <code>winver</code>，按 <kbd>Enter</kbd>。</p>
+<div class="note warn">
+  <b class="label">⚠️ 第一次用請先在測試機試</b>
+  <p>這個工具目前只有少數功能在真的電腦上測過。用在重要的電腦之前，先找一台不重要的試一次。<strong>換遠端桌面 Port</strong> 尤其要先試。</p>
+</div>
+
+<!-- ───────────────────────── 3 ───────────────────────── -->
+<h2 id="start"><span class="num">3</span>三步驟開始</h2>
+<ol class="steps">
+  <li>
+    <strong>打開 PowerShell</strong>
+    <p>在「開始」按鈕上按右鍵，選「<strong>Windows PowerShell</strong>」（Windows 11 是「<strong>終端機</strong>」）。用一般身分開就可以。</p>
+  </li>
+  <li>
+    <strong>複製下面兩行，貼上，按 <kbd>Enter</kbd></strong>
+    <div class="cmd"><pre>[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
+irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-win.ps1 | iex</pre></div>
+    <p class="caption">在 PowerShell 視窗裡按滑鼠右鍵就是貼上。第一行是讓舊版 PowerShell 能連上 GitHub，不要省略。</p>
+  </li>
+  <li>
+    <strong>看到選單，第一次先按 <kbd>S</kbd> 再按 <kbd>Enter</kbd></strong>
+    <p><kbd>S</kbd> 是「檢查現況」，只看不改，會列出這台電腦目前的遠端桌面 Port、Windows 更新、帳號鎖定等設定。</p>
+  </li>
+</ol>
+<div class="note tip">
+  <p><strong>操作方式都一樣：</strong>輸入選項前面的英文字母或數字，按 <kbd>Enter</kbd>。大小寫都可以。子選單裡按 <kbd>0</kbd> 回到上一層，主選單按 <kbd>0</kbd> 離開。</p>
+</div>
+<p>下次要再用，重新貼一次第 2 步那兩行就好，每次都會下載最新版。</p>
+<p class="caption">不方便用指令的話，也可以從 GitHub 下載整個 <code>WINDOWS</code> 資料夾，雙擊裡面的 <code>Win_Admin_Tool.bat</code>，進去之後完全一樣。</p>
+
+<!-- ───────────────────────── 4 ───────────────────────── -->
+<h2 id="menu"><span class="num">4</span>主選單一覽</h2>
+<p>打開後會看到這個畫面：</p>
+<pre class="screen"><span class="dim">============================================================</span>
+        Windows 10 / 11  系統管理工具  (分類選單)
+        目前權限: 一般使用者 (修改功能會要求提權)
+<span class="dim">============================================================</span>
+  <span class="hl">A</span>. 遠端桌面 (RDP)     - 換 Port / 確認 / 還原 / 多開 / CredSSP / 登入紀錄
+  <span class="hl">B</span>. 帳號與安全         - 鎖定 / Administrator / 改密碼
+  <span class="hl">C</span>. 系統與更新         - Windows 更新 / Store / 時間時區
+  <span class="hl">D</span>. 網路與防火牆       - Ping / Port / 批量加 IP
+  <span class="hl">E</span>. 虛擬化 (Hyper-V)   - 與 VMware 切換 / 啟用停用
+  <span class="hl">F</span>. 磁碟管理           - diskpart 視覺化
+  <span class="hl">S</span>. 檢查現況           - 驗證設定 (免管理員)
+  <span class="hl">L</span>. 事件檢視器         - 依症狀查事件紀錄 (免管理員)
+  <span class="hl">0</span>. 離開
+<span class="dim">============================================================</span>
+請輸入代號 (A-F / L / S / 0):</pre>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>按鍵</th><th>用白話說</th><th>會改設定嗎</th></tr></thead>
+  <tbody>
+    <tr><td class="key"><kbd>S</kbd></td><td>看這台電腦目前的設定（<strong>不確定時就按它</strong>）</td><td>不會</td></tr>
+    <tr><td class="key"><kbd>L</kbd></td><td>查事件紀錄：為什麼重開機、藍畫面、誰登入過</td><td>不會</td></tr>
+    <tr><td class="key"><kbd>A</kbd></td><td>遠端桌面：換 Port、修驗證錯誤、看登入紀錄</td><td>會</td></tr>
+    <tr><td class="key"><kbd>B</kbd></td><td>帳號：解除鎖定、啟用 Administrator、改密碼</td><td>會</td></tr>
+    <tr><td class="key"><kbd>C</kbd></td><td>系統：暫停 / 恢復 Windows 更新、校正時間</td><td>會</td></tr>
+    <tr><td class="key"><kbd>D</kbd></td><td>網路：開關 Ping、開關防火牆 Port、一次加很多個 IP</td><td>會</td></tr>
+    <tr><td class="key"><kbd>E</kbd></td><td>Hyper-V 和 VMware 互相切換</td><td>會（要重開機）</td></tr>
+    <tr><td class="key"><kbd>F</kbd></td><td>磁碟：看磁碟狀況、改代號、格式化</td><td>會（格式化會清掉資料）</td></tr>
+  </tbody>
+</table>
+</div>
+
+<!-- ───────────────────────── 5 ───────────────────────── -->
+<h2 id="cases"><span class="num">5</span>使用案例</h2>
+<p>每個案例都寫了「什麼時候用」和「按哪些鍵」。<span class="path">主選單 → A → 1</span> 的意思是：先在主選單輸入 <kbd>A</kbd>，進去後再輸入 <kbd>1</kbd>，每次都按 <kbd>Enter</kbd>。</p>
+
+<!-- 案例 A -->
+<div class="case" id="case-check">
+  <h3>案例 A：看看這台電腦現在的設定</h3>
+  <p class="when">什麼時候用：接手一台不熟的電腦，或改完設定想確認有沒有生效。</p>
+  <ol>
+    <li>主選單輸入 <kbd>S</kbd>。</li>
+    <li>畫面會列出遠端桌面 Port、Windows 更新狀態、帳號鎖定、能不能被 ping，以及目前有哪些 Port 正在使用。看完按 <kbd>Enter</kbd> 回主選單。</li>
+  </ol>
+  <p>這個功能只看不改，一般身分就能用，可以放心按。</p>
+</div>
+
+<!-- 案例 B -->
+<div class="case" id="case-rdp">
+  <h3>案例 B：把遠端桌面從 3389 換到其他 Port</h3>
+  <p class="when">什麼時候用：遠端桌面直接開在網路上，每天都有大量機器人在猜密碼。換成別的號碼能擋掉大部分。</p>
+  <div class="note danger">
+    <b class="label">⛔ 開始前一定要確認這兩件事</b>
+    <p>1. <strong>換 Port 時，你現在的遠端桌面連線一定會斷。</strong>如果新 Port 連不上，要等 10 分鐘自動還原。最好有<strong>主控台</strong>（雲端後台的網頁畫面、或能走到電腦前面）可以救。</p>
+    <p>2. <strong>雲端主機要先到雲端後台的「安全群組」放行新 Port</strong>，否則換完一定連不進來。</p>
+  </div>
+  <ol>
+    <li>主選單 → <kbd>A</kbd> → <kbd>1</kbd>。工具會問要不要提權，輸入 <kbd>Y</kbd>，在跳出的視窗按「是」，再到新視窗重新走一次 <span class="path">A → 1</span>。</li>
+    <li>輸入新的 Port，例如 <code>53389</code>（建議在 10000 – 65535 之間挑一個）。</li>
+    <li>問「看門狗時限幾分鐘」時直接按 <kbd>Enter</kbd>（10 分鐘）。</li>
+    <li>畫面會列出接下來要做的事，確認後輸入 <kbd>Y</kbd>。</li>
+    <li>問「現在重啟 TermService?」時輸入 <kbd>Y</kbd>。<strong>這時連線會斷掉，是正常的。</strong></li>
+    <li>在你自己的電腦打開「遠端桌面連線」，電腦欄位輸入 <code>IP:新Port</code>，例如 <code>203.0.113.5:53389</code>，重新連進去。</li>
+    <li>
+      <strong>連得上</strong> → 打開工具，主選單 → <kbd>A</kbd> → <kbd>2</kbd>（確認新 Port 可用），輸入 <kbd>Y</kbd>。問要不要移除舊 Port 的規則時也輸入 <kbd>Y</kbd>。完成！<br>
+      <strong>連不上</strong> → 什麼都不用做，10 分鐘後會自動還原成 3389，再用原本的方式連回去就好。
+    </li>
+  </ol>
+  <div class="note tip">
+    <p><b>為什麼不會被鎖在門外？</b>工具會先建一個「看門狗」排程。10 分鐘內沒有到 <span class="path">A → 2</span> 確認，系統就會自動把 Port 改回原樣，就算你已經登出、斷線也一樣。</p>
+  </div>
+</div>
+
+<!-- 案例 C -->
+<div class="case" id="case-credssp">
+  <h3>案例 C：遠端桌面出現「發生驗證錯誤」</h3>
+  <p class="when">什麼時候用：連遠端桌面時跳出「發生驗證錯誤。要求的函數不受支援」，訊息裡提到 <strong>CredSSP 加密 Oracle 修復</strong>。</p>
+  <ol>
+    <li>在<strong>發起連線的那台電腦</strong>（你自己的電腦）打開工具。</li>
+    <li>主選單 → <kbd>A</kbd> → <kbd>5</kbd> → <kbd>1</kbd>，看完警告後輸入 <kbd>Y</kbd>。</li>
+    <li>再連一次遠端桌面。</li>
+  </ol>
+  <div class="note warn">
+    <p>這是把安全檢查放寬，讓你先連得上。<strong>根本的解法是兩邊電腦都裝好 Windows 更新</strong>。更新完之後，回到 <span class="path">A → 5 → 2</span> 還原。</p>
+  </div>
+</div>
+
+<!-- 案例 D -->
+<div class="case" id="case-event">
+  <h3>案例 D：電腦自己重開機、藍畫面，想知道原因</h3>
+  <p class="when">什麼時候用：早上發現電腦重開過、程式一直當掉，或想知道誰登入過這台電腦。</p>
+  <ol>
+    <li>主選單輸入 <kbd>L</kbd>（事件檢視器）。</li>
+    <li>選符合的症狀：
+      <div class="table-wrap">
+      <table>
+        <thead><tr><th>按鍵</th><th>症狀</th></tr></thead>
+        <tbody>
+          <tr><td class="key"><kbd>1</kbd></td><td>電腦自己關機或重開機（還會寫出是哪個程式要求的）</td></tr>
+          <tr><td class="key"><kbd>2</kbd></td><td>藍畫面、硬體錯誤</td></tr>
+          <tr><td class="key"><kbd>3</kbd></td><td>硬碟有問題</td></tr>
+          <tr><td class="key"><kbd>4</kbd></td><td>服務啟動失敗，或設定被人改掉</td></tr>
+          <tr><td class="key"><kbd>5</kbd></td><td>程式當掉、沒有回應</td></tr>
+          <tr><td class="key"><kbd>6</kbd></td><td>誰登入過、密碼打錯、帳號被鎖（要提權）</td></tr>
+          <tr><td class="key"><kbd>7</kbd></td><td>Windows 更新失敗</td></tr>
+        </tbody>
+      </table>
+      </div>
+    </li>
+    <li>畫面會列出最近 7 天的紀錄。輸入紀錄前面的編號可以看詳細內容，<kbd>T</kbd> 可以改成看 24 小時或 30 天，<kbd>E</kbd> 可以存成 Excel 打得開的檔案（放在桌面）。</li>
+  </ol>
+  <p>這裡只看不改，可以放心用。</p>
+</div>
+
+<!-- 案例 E -->
+<div class="case" id="case-lock">
+  <h3>案例 E：帳號一直因為密碼打錯被鎖住</h3>
+  <p class="when">什麼時候用：登入時常常出現「帳戶已被鎖定」。</p>
+  <p><strong>已經被鎖住的帳號，等鎖定時間過了會自動解開</strong>（Windows 預設通常是 10 分鐘），先等一下再登入。</p>
+  <p>如果三不五時就被鎖，可以讓 Windows 不再因為打錯密碼而鎖帳號：</p>
+  <ol>
+    <li>主選單 → <kbd>B</kbd> → <kbd>1</kbd>（解除帳號密碼鎖定），看完警告後輸入 <kbd>Y</kbd>。</li>
+    <li>問題解決之後，<strong>一定要把保護開回來</strong>。用系統管理員身分開 PowerShell，輸入：
+      <div class="cmd"><pre>net accounts /lockoutthreshold:5</pre></div>
+    </li>
+  </ol>
+  <div class="note danger">
+    <p><strong>關掉鎖定等於「密碼可以無限次亂猜」。</strong>一直被鎖，通常代表有人正在猜你的密碼，關掉鎖定只會讓他更好猜。根本的解法是只讓自己的 IP 連進來（用雲端的安全群組或防火牆限制來源），或換遠端桌面 Port（<a href="#case-rdp">案例 B</a>）。</p>
+  </div>
+</div>
+
+<!-- 案例 F -->
+<div class="case" id="case-update">
+  <h3>案例 F：暫時不想讓 Windows 自動更新</h3>
+  <p class="when">什麼時候用：正在跑重要的工作，不想被自動更新重開機打斷。</p>
+  <ol>
+    <li>暫停：主選單 → <kbd>C</kbd> → <kbd>1</kbd>，輸入 <kbd>Y</kbd>。</li>
+    <li>恢復：主選單 → <kbd>C</kbd> → <kbd>2</kbd>。</li>
+  </ol>
+  <div class="note warn">
+    <p>暫停更新會讓電腦收不到安全修補，<strong>忙完記得恢復</strong>。畫面如果說要重新開機才會生效，就重開機後再做一次。</p>
+  </div>
+</div>
+
+<!-- 案例 G -->
+<div class="case" id="case-time">
+  <h3>案例 G：時間或時區不對</h3>
+  <p class="when">什麼時候用：右下角的時間差了幾分鐘，或差了好幾個小時。</p>
+  <ol>
+    <li>主選單 → <kbd>C</kbd> → <kbd>4</kbd>。</li>
+    <li>選要做的事：
+      <ul>
+        <li>時間差幾分鐘 → <kbd>1</kbd>（立即同步網路時間）。</li>
+        <li>差了好幾個小時（時區錯）→ <kbd>3</kbd>（設為台北 UTC+8），其他時區選 <kbd>4</kbd> 用關鍵字搜尋，例如 <code>Tokyo</code>。</li>
+      </ul>
+    </li>
+  </ol>
+</div>
+
+<!-- 案例 H -->
+<div class="case" id="case-port">
+  <h3>案例 H：開放防火牆 Port、讓別人能 ping 到</h3>
+  <p class="when">什麼時候用：架了網站或服務，別人連不進來；或想讓監控系統能 ping 這台電腦。</p>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>想做什麼</th><th>按哪裡</th></tr></thead>
+    <tbody>
+      <tr><td>開放一個 Port</td><td class="key">主選單 → <kbd>D</kbd> → <kbd>2</kbd> → <kbd>1</kbd>，輸入 Port，再選 TCP / UDP / 兩者</td></tr>
+      <tr><td>查某個 Port 有沒有程式在用</td><td class="key">主選單 → <kbd>D</kbd> → <kbd>2</kbd> → <kbd>2</kbd></td></tr>
+      <tr><td>關閉之前開的 Port</td><td class="key">主選單 → <kbd>D</kbd> → <kbd>2</kbd> → <kbd>3</kbd></td></tr>
+      <tr><td>允許 / 拒絕被 ping</td><td class="key">主選單 → <kbd>D</kbd> → <kbd>1</kbd></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="note tip">
+    <p>「關閉 Port」只會刪掉<strong>這個工具建立的</strong>規則，不會動到其他程式自己建的規則。雲端主機記得也要到安全群組放行。</p>
+  </div>
+</div>
+
+<!-- 案例 I -->
+<div class="case" id="case-other">
+  <h3>其他功能</h3>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>想做什麼</th><th>按哪裡</th><th>注意</th></tr></thead>
+    <tbody>
+      <tr><td>啟用 / 停用內建的 Administrator 帳號</td><td class="key"><kbd>B</kbd> → <kbd>2</kbd></td><td>啟用後記得設一個強密碼</td></tr>
+      <tr><td>改某個帳號的密碼</td><td class="key"><kbd>B</kbd> → <kbd>3</kbd></td><td>—</td></tr>
+      <tr><td>看誰用遠端桌面登入過</td><td class="key"><kbd>A</kbd> → <kbd>6</kbd></td><td>—</td></tr>
+      <tr><td>讓同一個帳號可以開兩個遠端桌面</td><td class="key"><kbd>A</kbd> → <kbd>4</kbd></td><td>專業版仍然只能同時一個人連；家用版不能用</td></tr>
+      <tr><td>Microsoft Store 在背景一直吃資源</td><td class="key"><kbd>C</kbd> → <kbd>3</kbd> → <kbd>1</kbd></td><td>關掉 Store 自動更新</td></tr>
+      <tr><td>裝了 VMware 開不了虛擬機</td><td class="key"><kbd>E</kbd> → <kbd>3</kbd></td><td>切成 VMware 優先，要重開機</td></tr>
+      <tr><td>一張網卡加很多個 IP</td><td class="key"><kbd>D</kbd> → <kbd>3</kbd></td><td>設錯可能斷網，遠端操作要小心</td></tr>
+      <tr><td>看磁碟用了多少</td><td class="key"><kbd>F</kbd> → <kbd>1</kbd></td><td>只看不改</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="note danger">
+    <b class="label">⛔ 磁碟管理的格式化和清除會永久刪掉資料</b>
+    <p><span class="path">F → 3</span>（格式化）和 <span class="path">F → 4</span>（清除整顆磁碟）沒有辦法復原。工具會要你重複輸入好幾次確認，但只要輸入錯一個字母，資料就沒了。<strong>不確定的話不要碰。</strong></p>
+  </div>
+</div>
+
+<!-- ───────────────────────── 6 ───────────────────────── -->
+<h2 id="trouble"><span class="num">6</span>出問題怎麼辦</h2>
+
+<h3>貼上指令後出現「無法建立 SSL/TLS 通道」</h3>
+<p>第一行沒有一起貼到。兩行要一起複製、一起貼上。</p>
+
+<h3>出現「因為這個系統上已停用指令碼執行」</h3>
+<p>改用另一種方式：從 GitHub 下載 <code>WINDOWS</code> 資料夾，雙擊 <code>Win_Admin_Tool.bat</code>。</p>
+
+<h3>畫面是亂碼</h3>
+<p>關掉視窗重新開一個 PowerShell 再試。還是亂碼的話，改用雙擊 <code>Win_Admin_Tool.bat</code> 的方式。</p>
+
+<h3>按了 Y 要提權，視窗閃一下就不見</h3>
+<p>先關掉所有 PowerShell 視窗，改成在「開始」按鈕上按右鍵，選「Windows PowerShell (系統管理員)」，再貼一次開始的兩行指令。</p>
+
+<h3>換了遠端桌面 Port，新 Port 連不進來</h3>
+<ul>
+  <li>先確認雲端後台的「安全群組」有沒有放行新的 Port。</li>
+  <li>什麼都不用做，10 分鐘後會自動還原成原本的 Port。</li>
+  <li>有主控台的話，也可以從主控台進去，主選單 → <kbd>A</kbd> → <kbd>3</kbd> 立刻還原。</li>
+</ul>
+
+<h3>不知道哪裡出了問題</h3>
+<p>按 <kbd>S</kbd> 看現況，或按 <kbd>L</kbd> 查事件紀錄。這兩個都只看不改。</p>
+
+<h3>看到不懂的問題，不知道該不該按 Y</h3>
+<p><strong>輸入 <kbd>N</kbd> 或直接按 <kbd>Enter</kbd> 就好。</strong>沒有輸入 <kbd>Y</kbd>，什麼都不會改。</p>
+
+<!-- ───────────────────────── 7 ───────────────────────── -->
+<h2 id="rules"><span class="num">7</span>四條安全守則</h2>
+<ol>
+  <li><strong>換遠端桌面 Port 之前，先準備好主控台。</strong>連線一定會斷，主控台是你的退路。</li>
+  <li><strong>雲端主機記得同時改安全群組。</strong>電腦裡的防火牆放行了，外面不一定進得來。</li>
+  <li><strong>磁碟的格式化和清除，不確定就不要碰。</strong></li>
+  <li><strong>看不懂就不要按 Y。</strong>先按 <kbd>S</kbd> 看現況，或問懂的人。</li>
+</ol>
+
+<!-- ───────────────────────── 8 ───────────────────────── -->
+<h2 id="words"><span class="num">8</span>名詞小辭典</h2>
+<dl class="glossary">
+  <dt>遠端桌面（RDP）</dt><dd>從另一台電腦連進來操作這台電腦的功能。</dd>
+  <dt>Port</dt><dd>電腦上的「門牌號碼」。遠端桌面預設走 3389 號門。</dd>
+  <dt>PowerShell</dt><dd>Windows 內建的指令視窗，這個工具就是在裡面執行。</dd>
+  <dt>系統管理員 / 提權</dt><dd>改系統設定需要的權限。「提權」就是從一般身分換成系統管理員身分。</dd>
+  <dt>使用者帳戶控制（UAC）</dt><dd>要提權時跳出來、問你「是否允許變更」的那個視窗。</dd>
+  <dt>防火牆</dt><dd>決定哪些連線可以進出這台電腦的守門員。</dd>
+  <dt>安全群組</dt><dd>雲端主機在雲端後台的防火牆，跟電腦裡的防火牆是兩回事，兩邊都要放行。</dd>
+  <dt>主控台</dt><dd>不透過網路、直接操作電腦畫面的方式，例如雲端後台的網頁畫面，或走到電腦前面。</dd>
+  <dt>看門狗</dt><dd>換 Port 時的保險計時器。時間到了還沒確認，就自動把設定改回原樣。</dd>
+  <dt>事件紀錄</dt><dd>Windows 自動寫下的系統日記，記錄了開關機、錯誤、登入等事情。</dd>
+</dl>
+
+<footer>
+  <p>OPS-command · Windows 新手指南 · 對應版本 v1.15</p>
+  <p>想看更多細節，請看專案 <code>WINDOWS</code> 資料夾裡的 README。Linux 的版本在 <a href="linux.html">linux.html</a>。</p>
+</footer>
+
+</main>
+</div>
+
+<script>
+  // 每個指令區塊加一個「複製」按鈕
+  document.querySelectorAll('.cmd').forEach(function (box) {
+    var pre = box.querySelector('pre');
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = '複製';
+    btn.addEventListener('click', function () {
+      var text = pre.innerText.trim();
+      var done = function () {
+        btn.textContent = '已複製';
+        setTimeout(function () { btn.textContent = '複製'; }, 1500);
+      };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(done, fallback);
+      } else {
+        fallback();
+      }
+      function fallback() {
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) { btn.textContent = '請手動複製'; }
+        document.body.removeChild(ta);
+      }
+    });
+    box.appendChild(btn);
+  });
+</script>
+</body>
+</html>
