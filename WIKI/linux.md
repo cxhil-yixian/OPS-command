@@ -409,6 +409,11 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 fail2ban-client set sshd unbanip 你的IP
 ```
 
+### 按了 u，還是沒看到新功能
+
+<kbd>u</kbd> 只會更新各項工具，<b>選單本身要重新啟動才會換成新版</b>。按 <kbd>q</kbd> 離開，
+再貼一次[開始指令](#3-三步驟開始)，看畫面最上面的版本號有沒有變。有新版時，按 <kbd>u</kbd> 的畫面也會提醒你。
+
 ### 不知道哪裡出了問題
 
 按 <kbd>d</kbd>（整台機器的檢查）或 <b>b → d</b>（封鎖功能的檢查）。

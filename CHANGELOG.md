@@ -24,6 +24,17 @@ sshd 相關、這一版討論過但排到之後的功能：
 
 ---
 
+## [1.16.1] - 2026-11-03
+
+### 修正
+
+- **選單開著不關，按 `u` 永遠拿不到新增的工具。** `u` 只會重新下載這一版 ops.sh 認得的工具，
+  選單本身是啟動時用 curl 抓下來的；實際碰到的情況是 v1.15 的選單按了 `u` 還是沒有 1.16 新增的 `n`。
+  現在 `u` 抓完工具後會讀線上 ops.sh 的版本號，比目前的新就提示「離開後重新執行」並附上指令，
+  讀不到就略過。版本逐段比數字，`1.10` 不會被當成比 `1.9` 舊。
+
+---
+
 ## [1.16.0] - 2026-11-03
 
 網路設定上線：主選單多了 `n`，IP 與 DNS 可以增減替換，換 IP 時新舊並存加看門狗，
@@ -1338,7 +1349,8 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
-[Unreleased]: https://github.com/cxhil-yixian/OPS-command/compare/v1.16.0...HEAD
+[Unreleased]: https://github.com/cxhil-yixian/OPS-command/compare/v1.16.1...HEAD
+[1.16.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.16.0...v1.16.1
 [1.16.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.15.0...v1.16.0
 [1.15.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.3...v1.14.0

@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.16
+OPS_VERSION=1.16.1
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -1560,6 +1560,46 @@ act_refresh() {
     row "目標：${CB}${ASSET_DIR}${C0}"
     printf '\n'
     assets_sync force
+    _r=$?
+    ops_self_check
+    return $_r
+}
+
+# $1 比 $2 新就回傳 0。逐段比數字：1.16 > 1.15、1.16 > 1.15.3、1.16 = 1.16.0
+ver_newer() {
+    awk -v a="$1" -v b="$2" 'BEGIN {
+        n = split(a, x, "."); m = split(b, y, "."); k = n > m ? n : m
+        for (i = 1; i <= k; i++) {
+            if (x[i] + 0 > y[i] + 0) exit 0
+            if (x[i] + 0 < y[i] + 0) exit 1
+        }
+        exit 1
+    }'
+}
+
+# 線上 ops.sh 的版本號；下載失敗或讀不到時輸出空字串
+remote_ops_version() {
+    _t="$ASSET_DIR/.ops-sh.part"
+    if fetch_url "$OPS_RAW_BASE/ops.sh" "$_t"; then
+        sed -n 's/^OPS_VERSION=\([0-9][0-9.]*\)$/\1/p' "$_t" 2>/dev/null | head -n 1
+    fi
+    rm -f "$_t" 2>/dev/null
+}
+
+# u 只換得到這一版 ops.sh 認得的工具。選單本身是啟動時 curl 下來的，
+# 開著不關就一直是舊版，新增的工具（例如 1.16 的 n）也不會出現，所以要講出來。
+ops_self_check() {
+    _rv=$(remote_ops_version)
+    if [ -z "$_rv" ]; then
+        dim "   （查不到線上的選單版本，略過檢查）"
+    elif ver_newer "$_rv" "$OPS_VERSION"; then
+        printf '\n'
+        wmsg "選單本身有新版 v$_rv（目前 v$OPS_VERSION）。u 只會更新工具，新增的功能要重新啟動選單才會出現："
+        row "按 q 離開後重新執行：${CB}$RERUN_HINT${C0}"
+    else
+        okmsg "選單已是最新版 v$OPS_VERSION"
+    fi
+    return 0
 }
 
 act_install_deps() {
