@@ -10,8 +10,9 @@
 | [`selfheal-ssh.sh`](#selfheal-sshsh) | 連線取證與即時監看 | POSIX sh | **不會**，純唯讀 |
 
 要封鎖 IP 請用 [`../FAIL2BAN/fail2ban.sh`](../FAIL2BAN/README.md)：這兩支都不封鎖任何東西。
-**用 `ssh-port.sh` 換過埠之後，記得跑 `../FAIL2BAN/fail2ban.sh enable-sshd`** ——
-fail2ban 的 jail 沒跟著改 port 的話，封鎖規則會套在舊埠上，等於沒有防護。
+fail2ban 的 jail 沒跟著改 port 的話，封鎖規則會套在舊埠上，等於沒有防護——
+**`ssh-port.sh` 1.1 起換埠時會自動同步 sshd jail 的監控埠**（見[標準流程](#標準流程)）。
+1.1 之前換過埠的機器，跑一次 `../FAIL2BAN/fail2ban.sh sync-port` 補上。
 
 兩支都是 POSIX sh，Alpine 的 busybox ash 可直接執行，不需要安裝 bash。
 
@@ -42,18 +43,28 @@ fail2ban 的 jail 沒跟著改 port 的話，封鎖規則會套在舊埠上，�
         ├─ 設定「舊埠 + 新埠」同時監聽   ← 現有連線完全不受影響
         ├─ SELinux 標記 / 防火牆放行
         ├─ sshd -t 語法檢查 → 重啟 → 確認新埠真的在 LISTEN
-        └─ 啟動看門狗（預設 600 秒）
+        ├─ 啟動看門狗（預設 600 秒）
+        └─ fail2ban sshd jail 改成監控「舊埠 + 新埠」
         │
         ▼
   ★ 不要關掉這個視窗，另外開一個新終端機：
         ssh -p 58763 user@host
         │
         ├─ 登入成功 ──→ 回原視窗執行 ./ssh-port.sh confirm
-        │                  └─ 收掉舊埠、取消看門狗、移除舊埠防火牆規則
+        │                  └─ 收掉舊埠、取消看門狗、移除舊埠防火牆規則、
+        │                     fail2ban sshd jail 只監控新埠
         │
         └─ 登入失敗 ──→ 什麼都不用做，等看門狗逾時自動還原
                           （或在原視窗執行 ./ssh-port.sh rollback 立刻還原）
+                          還原時 fail2ban sshd jail 也改回舊埠
 ```
+
+**fail2ban 同步**是附帶動作，由 `../FAIL2BAN/fail2ban.sh sync-port` 負責（細節見
+[FAIL2BAN/README.md](../FAIL2BAN/README.md#換-ssh-埠之後sync-port)）：
+
+- 沒裝 fail2ban、沒有 sshd jail、找不到 `fail2ban.sh` → 印一行說明就跳過。
+- 同步失敗**不影響換埠本身**，會提示稍後手動跑 `sync-port`。看門狗在背景還原時也一樣。
+- 同步時會**重啟 fail2ban**（封鎖清單從資料庫還原），不另外詢問。
 
 **為什麼一定要另開視窗測試**：目前這條連線是在舊埠上建立的，改設定不會踢掉它。所以
 「這條連線還活著」完全不能證明新埠可用。只有真的用新埠開一條新連線登入成功，才算數。

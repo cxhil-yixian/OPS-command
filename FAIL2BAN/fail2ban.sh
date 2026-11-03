@@ -16,8 +16,12 @@
 #   ./fail2ban.sh top [n]             封鎖次數最多的來源（讀 fail2ban 日誌）
 #   ./fail2ban.sh log [n]             最近的封鎖 / 解封事件
 #   ./fail2ban.sh tail                即時追蹤 fail2ban 日誌
-#   ./fail2ban.sh bantime [jail] [秒] 查看 / 設定封鎖時長
+#   ./fail2ban.sh tune [jail] [maxretry=N] [findtime=T] [bantime=T|perm]
+#                                     查看 / 修改封鎖門檻（寫進設定檔，重啟後仍有效）
+#   ./fail2ban.sh tune <jail> reset   還原成原本設定檔的門檻
+#   ./fail2ban.sh bantime [jail] [秒] 只改封鎖時長（等同 tune <jail> bantime=…）
 #   ./fail2ban.sh enable-sshd         建立 sshd jail（埠號取實際生效值）
+#   ./fail2ban.sh sync-port [埠…]     把 sshd jail 的監控埠同步成 SSH 實際的埠
 #   ./fail2ban.sh reload              重載設定
 #   ./fail2ban.sh install             安裝並啟用 fail2ban
 #   ./fail2ban.sh doctor              環境檢查（含「設了但不會生效」的常見情況）
@@ -40,7 +44,7 @@ set -u
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
 # os-release 會設 VERSION，所以本腳本自己的版本號不能叫 VERSION（會被 detect_env 蓋掉）
-F2B_SH_VER=1.0
+F2B_SH_VER=1.1
 SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
 
 # FAIL2BAN_TEST_ROOT 僅供測試用，會把所有設定檔路徑加上前綴
@@ -50,6 +54,9 @@ F2B_ETC="${PREFIX}/etc/fail2ban"
 F2B_JAILD="${F2B_ETC}/jail.d"
 IGNORE_FILE="${F2B_JAILD}/zz-ops-ignoreip.local"
 SSHD_JAIL_FILE="${F2B_JAILD}/zz-ops-sshd.local"
+# 門檻另放一個檔：enable-sshd 每次都整個覆寫 zz-ops-sshd.local，調過的值放在那裡
+# 會被蓋掉。檔名排在它後面（jail.d 依字母順序載入），所以這裡的值會勝出。
+TUNE_FILE="${F2B_JAILD}/zz-ops-tune.local"
 
 # 產出檔案跟其他工具收在一起（見 ../SSH/README.md 的「檔案位置」）
 OPS_SSH_DIR="${OPS_SSH_DIR:-/var/log/OPS-ssh}"
@@ -454,7 +461,16 @@ ignore_write() {
 # =========================================================
 live_ssh_ports() {
     _p=''
-    [ "$(id -u)" = 0 ] && has sshd && _p=$(sshd -T 2>/dev/null | awk 'tolower($1)=="port"{print $2}')
+    # socket activation（Ubuntu 24.04 預設）底下 sshd_config 的 Port 完全無效，sshd -T
+    # 照樣回報 22，真正在聽的是 socket 的 ListenStream。判斷方式跟 ssh-port.sh 一致。
+    if [ -z "$PREFIX" ] && [ -d /run/systemd/system ]; then
+        for _u in ssh.socket sshd.socket; do
+            systemctl is-active "$_u" >/dev/null 2>&1 || continue
+            _p=$(systemctl show "$_u" -p Listen 2>/dev/null | tr ' ' '\n' | grep -oE '[0-9]+$')
+            break
+        done
+    fi
+    [ -z "$_p" ] && [ "$(id -u)" = 0 ] && has sshd && _p=$(sshd -T 2>/dev/null | awk 'tolower($1)=="port"{print $2}')
     if [ -z "$_p" ]; then
         _p=$(grep -hiE '^[[:space:]]*Port[[:space:]]+[0-9]+' \
              "${PREFIX}/etc/ssh/sshd_config" "${PREFIX}/etc/ssh/sshd_config.d"/*.conf 2>/dev/null |
@@ -529,18 +545,197 @@ container_kind() {
 # 檔案清單要先濾掉不存在的：awk 開不了檔是 fatal，會整個中止，後面的檔案
 # 一個都不會讀——那會變成「明明寫了 port 卻說沒寫」，比報錯還難查。
 jail_conf_port() {
-    _want="$1"; _files=''
-    for _f in "${F2B_ETC}/jail.conf" "${F2B_ETC}/jail.local" \
-              "${F2B_JAILD}"/*.conf "${F2B_JAILD}"/*.local; do
-        [ -f "$_f" ] && _files="$_files $_f"
+    jail_conf_val "$1" port
+}
+
+# jail 的 port 欄位 → 排序過的數字清單（逗號分隔）。jail.conf 的 [sshd] 寫的是
+# 服務名「ssh」，直接拿去跟 22 比會誤判成「套錯埠」，所以先換成數字。
+port_norm() {
+    printf '%s' "${1:-ssh}" | tr -d ' \t' | tr ',' '\n' | sed 's/^ssh$/22/' | grep -v '^$' |
+        sort -un | tr '\n' ',' | sed 's/,$//'
+}
+
+# fail2ban 實際會讀的設定檔，依載入順序排列（越後面越優先）
+conf_files() {
+    for _f in "${F2B_ETC}/jail.conf" "${F2B_JAILD}"/*.conf \
+              "${F2B_ETC}/jail.local" "${F2B_JAILD}"/*.local; do
+        [ -f "$_f" ] && printf '%s\n' "$_f"
     done
+}
+
+# $1=區段 $2=鍵 → 設定檔裡最後生效的值（區段感知）
+jail_conf_val() {
+    _files=$(conf_files | tr '\n' ' ')
     [ -n "$_files" ] || return 0
     # shellcheck disable=SC2086
-    awk -v want="$_want" '
+    awk -v want="$1" -v key="$2" '
         /^[[:space:]]*\[/ { sec=$0; gsub(/[][[:space:]]/, "", sec) }
-        sec == want && /^[[:space:]]*port[[:space:]]*=/ {
+        sec == want && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
             v=$0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*$/, "", v); print v
         }' $_files 2>/dev/null | tail -1
+}
+
+# 設定檔裡有沒有這個 jail 的區段（fail2ban 沒在跑時用來判斷 jail 存不存在）
+jail_in_conf() {
+    _files=$(conf_files | tr '\n' ' ')
+    [ -n "$_files" ] || return 1
+    # shellcheck disable=SC2086
+    grep -hE '^[[:space:]]*\[[^]]+\]' $_files 2>/dev/null |
+        sed 's/^[[:space:]]*\[//; s/\].*$//; s/[[:space:]]//g' | grep -qx "$1"
+}
+
+# =========================================================
+# 封鎖門檻（tune）
+#   只寫 zz-ops-tune.local，一個 jail 一段。不碰 [DEFAULT]：全域改下去會連帶
+#   改到 recidive 這類本來就該用不同門檻的 jail。
+# =========================================================
+TUNE_KEYS='maxretry findtime bantime'
+
+# 時間字串 → 秒。接受 600 / 10m / 1h / 1d / 1w，bantime 另外接受 perm（回 -1）。
+# 一律換算成秒再寫進設定檔：0.9 不認得 10m 這種寫法，寫進去服務會起不來。
+dur_to_sec() {
+    case "$1" in
+        perm|permanent|forever|-1) printf '%s\n' -1; return 0 ;;
+        ''|*[!0-9smhdwSMHDW]*) return 1 ;;
+    esac
+    printf '%s' "$1" | awk '
+        /^[0-9]+$/        { print $0 + 0; ok = 1; exit }
+        /^[0-9]+[sS]$/    { print substr($0, 1, length($0) - 1) + 0; ok = 1; exit }
+        /^[0-9]+[mM]$/    { print (substr($0, 1, length($0) - 1) + 0) * 60; ok = 1; exit }
+        /^[0-9]+[hH]$/    { print (substr($0, 1, length($0) - 1) + 0) * 3600; ok = 1; exit }
+        /^[0-9]+[dD]$/    { print (substr($0, 1, length($0) - 1) + 0) * 86400; ok = 1; exit }
+        /^[0-9]+[wW]$/    { print (substr($0, 1, length($0) - 1) + 0) * 604800; ok = 1; exit }
+        END { exit ok ? 0 : 1 }'
+}
+
+# 秒 → 人看得懂的寫法（只用在畫面上，設定檔一律寫秒）
+sec_human() {
+    case "$1" in
+        -1) printf '永久\n'; return 0 ;;
+        ''|*[!0-9]*) printf '%s\n' "$1"; return 0 ;;
+    esac
+    awk -v s="$1" 'BEGIN {
+        if (s >= 86400 && s % 86400 == 0) printf "%d 天\n", s / 86400
+        else if (s >= 3600 && s % 3600 == 0) printf "%d 小時\n", s / 3600
+        else if (s >= 60 && s % 60 == 0) printf "%d 分鐘\n", s / 60
+        else printf "%d 秒\n", s }'
+}
+
+# $1=jail $2=鍵 → 目前生效的值。服務在跑就問 fail2ban 本身，沒跑就讀設定檔。
+tune_live() {
+    if f2b_ping; then
+        fail2ban-client get "$1" "$2" 2>/dev/null | tr -d ' \t\r' | tail -1
+    else
+        _v=$(jail_conf_val "$1" "$2")
+        [ -n "$_v" ] || _v=$(jail_conf_val DEFAULT "$2")
+        printf '%s\n' "$_v"
+    fi
+}
+
+# $1=jail $2=鍵 → zz-ops-tune.local 裡寫的值（沒寫就空）
+tune_file_val() {
+    [ -f "$TUNE_FILE" ] || return 0
+    awk -v want="$1" -v key="$2" '
+        /^[[:space:]]*\[/ { sec=$0; gsub(/[][[:space:]]/, "", sec) }
+        sec == want && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+            v=$0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*$/, "", v); print v
+        }' "$TUNE_FILE" | tail -1
+}
+
+# 把 $1 這個 jail 的區段拿掉，其餘原樣輸出
+tune_strip() {
+    [ -f "$TUNE_FILE" ] || return 0
+    awk -v want="$1" '
+        /^[[:space:]]*\[/ { sec=$0; gsub(/[][[:space:]]/, "", sec); skip = (sec == want) }
+        /^# 由 fail2ban.sh 管理/ || /^# 每個 jail 一段/ || /^# 數值一律是秒/ { next }
+        !skip' "$TUNE_FILE" | awk 'NF || prev { print } { prev = NF }'
+}
+
+# $1=jail，其後是 key=value（已驗證、已換算成秒）。沒給的鍵保留檔案裡原本的值。
+# $1=jail 後面沒有任何參數 = 刪掉這個 jail 的區段。
+tune_write() {
+    _wj="$1"; shift
+    _body=''
+    for _k in $TUNE_KEYS; do
+        _v=$(tune_file_val "$_wj" "$_k")
+        for _kv in "$@"; do
+            case "$_kv" in "$_k="*) _v=${_kv#*=} ;; esac
+        done
+        [ -n "$_v" ] && _body="$_body$(printf '%-8s = %s' "$_k" "$_v")
+"
+    done
+    mkdir -p "$F2B_JAILD" 2>/dev/null || die "無法建立 $F2B_JAILD"
+    _rest=$(tune_strip "$_wj")
+    _tmp="${TUNE_FILE}.tmp.$$"
+    {
+        printf '%s\n' "# 由 fail2ban.sh 管理（$SELF tune），手動編輯會被覆寫。"
+        printf '%s\n' "# 每個 jail 一段；檔名排在 zz-ops-sshd.local 後面，這裡的值會蓋過它與 jail.local。"
+        printf '%s\n' "# 數值一律是秒（-1 = 永久），0.9 版看不懂 10m 這種寫法。"
+        [ -n "$_rest" ] && printf '%s\n' "$_rest"
+        if [ $# -gt 0 ] && [ -n "$_body" ]; then
+            printf '\n[%s]\n%s' "$_wj" "$_body"
+        fi
+    } > "$_tmp" || { rm -f "$_tmp"; die "寫入暫存檔失敗"; }
+    # 一個區段都不剩就整個檔刪掉，不留一個只有註解的空殼
+    if grep -qE '^[[:space:]]*\[' "$_tmp"; then
+        cat "$_tmp" > "$TUNE_FILE" && rm -f "$_tmp" || { rm -f "$_tmp"; die "寫入 $TUNE_FILE 失敗"; }
+        chmod 644 "$TUNE_FILE" 2>/dev/null
+    else
+        rm -f "$_tmp" "$TUNE_FILE"
+    fi
+}
+
+# 自己目前的來源有沒有在白名單裡；不在就印出提示。回傳 1 = 有來源不在白名單
+peers_unlisted_warn() {
+    _ig=$(ignore_effective | sort -u | tr '\n' ' ')
+    _miss=''
+    for _p in $(ssh_peers | sort -u); do
+        [ -n "$_p" ] || continue
+        _hit=''
+        for _w in $_ig; do covers "$_w" "$_p" && { _hit=1; break; }; done
+        [ -z "$_hit" ] && _miss="$_miss $_p"
+    done
+    [ -z "$_miss" ] && return 0
+    warn "你目前的來源${_miss} 不在白名單內——自己打錯密碼也會被封"
+    info "建議先加白名單：$SELF allow${_miss}"
+    return 1
+}
+
+# =========================================================
+# sshd jail 的監控埠同步
+#   換 SSH 埠之後 jail 的 port 沒跟著改，封鎖就套在舊埠上——攻擊者從新埠進來完全
+#   沒事。ssh-port.sh 在 set / confirm / rollback 三個階段都會呼叫 sync-port。
+# =========================================================
+# $1=逗號分隔的埠清單。zz-ops-sshd.local 存在就只改 [sshd] 的 port 那一行，
+# 不存在（jail 是發行版內建的，例如 Debian 的 defaults-debian.conf）就建一個只有
+# port 的最小覆蓋檔，不動 enabled / backend / banaction 這些別人的設定。
+sshd_port_write() {
+    mkdir -p "$F2B_JAILD" 2>/dev/null || die "無法建立 $F2B_JAILD"
+    _tmp="${SSHD_JAIL_FILE}.tmp.$$"
+    if [ -f "$SSHD_JAIL_FILE" ] && grep -qE '^[[:space:]]*\[sshd\]' "$SSHD_JAIL_FILE"; then
+        awk -v ports="$1" '
+            /^[[:space:]]*\[/ {
+                if (sec == "sshd" && !done) { printf "port     = %s\n", ports; done = 1 }
+                sec = $0; gsub(/[][[:space:]]/, "", sec)
+            }
+            sec == "sshd" && /^[[:space:]]*port[[:space:]]*=/ {
+                if (!done) { printf "port     = %s\n", ports; done = 1 }
+                next
+            }
+            { print }
+            END { if (sec == "sshd" && !done) printf "port     = %s\n", ports }' \
+            "$SSHD_JAIL_FILE" > "$_tmp" || { rm -f "$_tmp"; die "寫入暫存檔失敗"; }
+    else
+        {
+            printf '%s\n' "# 由 fail2ban.sh 管理（$SELF sync-port），手動編輯會被覆寫。"
+            printf '%s\n' "# 這台的 sshd jail 不是 enable-sshd 建的，這裡只覆蓋監控埠，"
+            printf '%s\n' "# 其他設定（enabled / backend / banaction）沿用原本的。"
+            printf '%s\n' "[sshd]"
+            printf 'port     = %s\n' "$1"
+        } > "$_tmp" || { rm -f "$_tmp"; die "寫入暫存檔失敗"; }
+    fi
+    cat "$_tmp" > "$SSHD_JAIL_FILE" && rm -f "$_tmp" || { rm -f "$_tmp"; die "寫入 $SSHD_JAIL_FILE 失敗"; }
+    chmod 644 "$SSHD_JAIL_FILE" 2>/dev/null
 }
 
 # =========================================================
@@ -620,13 +815,13 @@ cmd_ban() {
                     BANTIME_OK=no
                     fail2ban-client set "$_j" unbanip --time "$BANTIME" >/dev/null 2>&1
                     warn "這個 fail2ban 版本的 banip 不接受指定時長（它把 --time 與秒數也當成 IP 封了，已清掉）"
-                    info "$_ip 已用 jail 本身的 bantime 封鎖；要改 jail 的預設時長：$SELF bantime <jail> <秒>"
+                    info "$_ip 已用 jail 本身的 bantime 封鎖；要改 jail 的預設時長：$SELF tune <jail> bantime=<時長>"
                 elif jail_banned "$_j" | grep -qx "$_ip"; then
                     BANTIME_OK=yes
                 else
                     BANTIME_OK=no
                     warn "這個 fail2ban 版本的 banip 不接受指定時長，改用 jail 本身的 bantime"
-                    info "要改 jail 的預設時長：$SELF bantime <jail> <秒>"
+                    info "要改 jail 的預設時長：$SELF tune <jail> bantime=<時長>"
                     _out=$(fail2ban-client set "$_j" banip "$_ip" 2>&1)
                 fi
             else
@@ -840,29 +1035,233 @@ cmd_tail() {
     log_follow
 }
 
+# 1.1 之前只改執行中的設定、重啟就回到原值；現在一律走 tune，寫進設定檔
 cmd_bantime() {
-    require_f2b
+    [ $# -eq 0 ] && { cmd_tune; return; }
+    [ $# -eq 1 ] && { cmd_tune "$1"; return; }
+    cmd_tune "$1" "bantime=$2"
+}
+
+# 一個 jail 一行：失敗幾次（maxretry）、多久之內（findtime）、封多久（bantime）
+tune_show_row() {
+    _mr=$(tune_live "$1" maxretry); _ft=$(tune_live "$1" findtime); _bt=$(tune_live "$1" bantime)
+    _src=''
+    [ -n "$(tune_file_val "$1" maxretry)$(tune_file_val "$1" findtime)$(tune_file_val "$1" bantime)" ] &&
+        _src="  ${CD}（有用 tune 調整過）${C0}"
+    info "$(printf '%-14s %s內失敗 %s 次 → 封鎖 %s' "$1" \
+        "$(sec_human "${_ft:-?}")" "${_mr:-?}" "$(sec_human "${_bt:-?}")")$_src"
+}
+
+cmd_tune() {
+    need_root
+    has fail2ban-client || die "fail2ban 還沒安裝，先跑：$SELF install"
+    _running=0; f2b_ping && _running=1
+
+    # ---- 沒有參數：列出所有 jail ----
     if [ $# -eq 0 ]; then
-        for _j in $(jails); do
-            info "$(printf '%-20s bantime=%-10s findtime=%-8s maxretry=%s' "$_j" \
-                "$(fail2ban-client get "$_j" bantime 2>/dev/null || echo '?')" \
-                "$(fail2ban-client get "$_j" findtime 2>/dev/null || echo '?')" \
-                "$(fail2ban-client get "$_j" maxretry 2>/dev/null || echo '?')")"
-        done
+        if [ "$_running" = 1 ]; then
+            _js=$(jails)
+        else
+            # 沒在跑就問不到「哪些 jail 啟用中」，jail.conf 裡停用的區段有上百個，
+            # 全列出來沒有意義，只看 sshd
+            _js=''; jail_in_conf sshd && _js=sshd
+            warn "fail2ban 沒在跑，以下是設定檔裡寫的值（只列 sshd；要看別的 jail：$SELF tune <jail>）"
+        fi
+        [ -n "$_js" ] || { info "沒有任何 jail（$SELF enable-sshd 可建立 sshd jail）"; return 0; }
+        step "封鎖門檻（在「多久之內」失敗「幾次」就封鎖「多久」）"
+        for _j in $_js; do tune_show_row "$_j"; done
         info ""
-        info "設定：$SELF bantime <jail> <秒>   （-1 = 永久）"
+        info "修改：$SELF tune sshd maxretry=5 findtime=10m bantime=1h   （bantime=perm 為永久）"
+        info "還原：$SELF tune sshd reset"
         return 0
     fi
-    _j="$1"; _t="${2:-}"
-    jail_exists "$_j" || die "找不到 jail：$_j"
-    [ -n "$_t" ] || { info "$_j bantime = $(fail2ban-client get "$_j" bantime 2>/dev/null)"; return 0; }
-    case "$_t" in -1|[0-9]*) : ;; *) die "秒數要是數字，或 -1 代表永久" ;; esac
-    step "$_j 的 bantime 改為 $_t"
-    warn "這只改執行中的設定，重啟 fail2ban 後會回到設定檔的值"
-    info "要永久生效請寫進 $F2B_JAILD 底下的 .local 檔"
+
+    # ---- 解析：第一個參數不是 key=value 就是 jail 名稱 ----
+    _j=sshd
+    case "$1" in *=*) : ;; *) _j="$1"; shift ;; esac
+
+    if [ "$_running" = 1 ]; then
+        jail_exists "$_j" || die "找不到啟用中的 jail：$_j（現有：$(jails | tr '\n' ' ')）"
+    else
+        jail_in_conf "$_j" || die "設定檔裡找不到 jail：$_j"
+    fi
+
+    if [ $# -eq 0 ]; then
+        step "$_j 的封鎖門檻"
+        tune_show_row "$_j"
+        [ -f "$TUNE_FILE" ] && [ -n "$(tune_file_val "$_j" maxretry)$(tune_file_val "$_j" findtime)$(tune_file_val "$_j" bantime)" ] &&
+            info "調整內容寫在 $TUNE_FILE"
+        return 0
+    fi
+
+    if [ "$1" = reset ]; then
+        _had=$(tune_file_val "$_j" maxretry)$(tune_file_val "$_j" findtime)$(tune_file_val "$_j" bantime)
+        [ -n "$_had" ] || { info "$_j 沒有用 tune 調整過，不需要還原"; return 0; }
+        step "還原 $_j 的封鎖門檻：從 $TUNE_FILE 移除這個 jail 的設定"
+        info "還原後回到 jail.conf / jail.local / jail.d 原本寫的值"
+        [ "$DRY" = 1 ] && { info "（乾跑，不實際執行）"; return 0; }
+        confirm "要還原嗎？" || return 0
+        tune_write "$_j"
+        ok "已從 $TUNE_FILE 移除 $_j"
+        if [ "$_running" = 1 ]; then
+            # 原本的值可能寫成 10m 或引用變數，自己換算不可靠，交給 fail2ban 重新讀設定
+            cmd_reload || return 1
+            tune_show_row "$_j"
+        else
+            info "fail2ban 沒在跑，下次啟動時生效"
+        fi
+        return 0
+    fi
+
+    # ---- 驗證每個 key=value，全部通過才動手 ----
+    _set=''; _risky=''
+    for _kv in "$@"; do
+        case "$_kv" in *=*) : ;; *) die "看不懂的參數：$_kv（要寫成 maxretry=5 這種形式）" ;; esac
+        _k=${_kv%%=*}; _v=${_kv#*=}
+        case "$_k" in
+            maxretry)
+                case "$_v" in ''|*[!0-9]*) die "maxretry 要是正整數：$_v" ;; esac
+                [ "$_v" -ge 1 ] || die "maxretry 至少要 1"
+                [ "$_v" -le 2 ] && _risky="$_risky
+maxretry=$_v：打錯 $_v 次密碼就會被封，很容易封到自己" ;;
+            findtime)
+                _s=$(dur_to_sec "$_v") || die "findtime 看不懂：$_v（寫秒數，或 10m / 1h / 1d / 1w）"
+                [ "$_s" = -1 ] && die "findtime 不能是永久"
+                [ "$_s" -ge 60 ] || die "findtime 至少 60 秒：$_v"
+                _v=$_s ;;
+            bantime)
+                _s=$(dur_to_sec "$_v") || die "bantime 看不懂：$_v（寫秒數，或 10m / 1h / 1d / 1w，perm = 永久）"
+                if [ "$_s" = -1 ]; then
+                    _risky="$_risky
+bantime=永久：被封的 IP（包括你自己）不會自動解除，只能手動 unban"
+                else
+                    [ "$_s" -ge 60 ] || die "bantime 至少 60 秒：$_v"
+                    [ "$_s" -gt 31536000 ] && _risky="$_risky
+bantime=$(sec_human "$_s")：超過一年，效果等同永久封鎖"
+                fi
+                _v=$_s ;;
+            *) die "不能調整 $_k（只有 maxretry / findtime / bantime）" ;;
+        esac
+        _set="$_set $_k=$_v"
+    done
+
+    step "$_j 的封鎖門檻將變成："
+    for _kv in $_set; do
+        _k=${_kv%%=*}; _v=${_kv#*=}
+        _old=$(tune_live "$_j" "$_k")
+        case "$_k" in
+            maxretry) info "$(printf '%-9s %s 次 → %s 次' "$_k" "${_old:-?}" "$_v")" ;;
+            *)        info "$(printf '%-9s %s → %s' "$_k" "$(sec_human "${_old:-?}")" "$(sec_human "$_v")")" ;;
+        esac
+    done
+    info "寫入：$TUNE_FILE"
+    [ "$_running" = 1 ] && info "fail2ban 在跑：會即時套用，不需要 reload" ||
+        info "fail2ban 沒在跑：只寫設定檔，下次啟動時生效"
+
+    if [ -n "$_risky" ]; then
+        printf '%s\n' "$_risky" | grep -v '^$' | while IFS= read -r _l; do warn "$_l"; done
+        peers_unlisted_warn
+    fi
+
     [ "$DRY" = 1 ] && { info "（乾跑，不實際執行）"; return 0; }
     confirm "要套用嗎？" || return 0
-    fail2ban-client set "$_j" bantime "$_t" >/dev/null 2>&1 && ok "已套用" || err "套用失敗"
+    if [ -n "$_risky" ]; then
+        confirm "上面的警告都看過了，確定還是要這樣設？" || return 0
+    fi
+
+    # ---- 先即時套用，再寫檔，最後讀回來比對 ----
+    if [ "$_running" = 1 ]; then
+        for _kv in $_set; do
+            fail2ban-client set "$_j" "${_kv%%=*}" "${_kv#*=}" >/dev/null 2>&1
+        done
+    fi
+    # shellcheck disable=SC2086
+    tune_write "$_j" $_set
+    ok "已寫入 $TUNE_FILE"
+
+    if [ "$_running" = 1 ]; then
+        _bad=''
+        for _kv in $_set; do
+            _now=$(tune_live "$_j" "${_kv%%=*}")
+            [ "$_now" = "${_kv#*=}" ] || _bad="$_bad ${_kv%%=*}（要 ${_kv#*=}，實際 ${_now:-讀不到}）"
+        done
+        if [ -n "$_bad" ]; then
+            err "未完成：fail2ban 讀回來的值跟設定的不一樣：${_bad# }"
+            info "設定檔已經寫好，重啟 fail2ban 後會套用：$SELF reload"
+            return 1
+        fi
+        ok "已即時套用，讀回確認無誤"
+    else
+        info "fail2ban 沒在跑，下次啟動時生效"
+    fi
+    tune_show_row "$_j"
+}
+
+cmd_sync_port() {
+    need_root
+    has fail2ban-client || { info "這台沒有安裝 fail2ban，不需要同步 sshd jail 的監控埠"; return 0; }
+
+    _want="$*"
+    [ -n "$_want" ] || _want=$(live_ssh_ports | tr '\n' ' ')
+    for _p in $_want; do
+        case "$_p" in ''|*[!0-9]*) die "埠號必須是數字：$_p" ;; esac
+        [ "$_p" -ge 1 ] && [ "$_p" -le 65535 ] || die "埠號需在 1-65535 之間：$_p"
+    done
+    # shellcheck disable=SC2086
+    _new=$(printf '%s\n' $_want | sort -un | tr '\n' ',' | sed 's/,$//')
+    [ -n "$_new" ] || die "取不到 SSH 的埠號"
+
+    _running=0; f2b_ping && _running=1
+    if [ "$_running" = 1 ]; then
+        _has=0; jail_exists sshd && _has=1
+    else
+        _has=0; jail_in_conf sshd && _has=1
+    fi
+    if [ "$_has" = 0 ]; then
+        info "沒有 sshd jail，不需要同步監控埠（要建立：$SELF enable-sshd）"
+        return 0
+    fi
+
+    _cur=$(jail_conf_port sshd)
+    if [ "$(port_norm "$_cur")" = "$(port_norm "$_new")" ]; then
+        ok "sshd jail 的監控埠已經是 $_new，不需要變更"
+        return 0
+    fi
+
+    _cur_show=${_cur:-ssh}
+    [ "$_cur_show" != "$(port_norm "$_cur")" ] && _cur_show="$_cur_show（= $(port_norm "$_cur")）"
+    step "sshd jail 監控埠：$_cur_show → $_new"
+    if [ -f "$SSHD_JAIL_FILE" ]; then
+        info "修改 $SSHD_JAIL_FILE 的 port"
+    else
+        info "建立 $SSHD_JAIL_FILE（只覆蓋 port，其他設定沿用原本的 sshd jail）"
+    fi
+    [ "$DRY" = 1 ] && { info "（乾跑，不實際執行）"; return 0; }
+
+    sshd_port_write "$_new"
+    ok "已寫入 $SSHD_JAIL_FILE"
+
+    if [ "$_running" = 0 ]; then
+        info "fail2ban 沒在跑，下次啟動時生效"
+        return 0
+    fi
+
+    # 用重啟而不是 reload：有些 banaction 把埠號寫在每一條封鎖規則裡（firewalld 的
+    # rich rule），reload 不保證會把已經存在的規則改到新埠；重啟時 fail2ban 會從資料庫
+    # 把封鎖重新套用一次，用的就是新埠。順帶也補回 firewalld reload 沖掉的 f2b 鏈。
+    info "重啟 $F2B_SVC 讓新埠生效（封鎖清單會從資料庫還原）"
+    svc_restart >/dev/null 2>&1
+    _i=0
+    while [ "$_i" -lt 10 ] && ! f2b_ping; do sleep 1; _i=$((_i + 1)); done
+    if ! f2b_ping; then
+        err "重啟後 fail2ban 沒有回應，sshd 目前沒有保護（跑 $SELF doctor 看原因）"
+        return 1
+    fi
+    if ! jail_exists sshd; then
+        err "重啟後 sshd jail 沒有起來（跑 $SELF doctor 看原因）"
+        return 1
+    fi
+    ok "sshd jail 現在監控埠 $_new"
 }
 
 cmd_enable_sshd() {
@@ -890,7 +1289,13 @@ cmd_enable_sshd() {
         [ "$_fw" = none ] && warn "這台偵測不到可用的防火牆，封鎖會寫不進去（先跑 doctor）"
         [ "$_fw" != none ] && info "（這個 fail2ban 版本沒有 $(banaction_for "$_fw") 這個 action 檔）"
     fi
-    info "門檻      : maxretry=5 findtime=600 bantime=3600"
+    info "門檻      : maxretry=5 findtime=600 bantime=3600（本檔的預設值）"
+    _tuned=''
+    for _k in $TUNE_KEYS; do
+        _v=$(tune_file_val sshd "$_k")
+        [ -n "$_v" ] && _tuned="$_tuned $_k=$_v"
+    done
+    [ -n "$_tuned" ] && info "            實際以 $TUNE_FILE 為準：${_tuned# }（tune 調過的值不受影響）"
     [ -f "$SSHD_JAIL_FILE" ] && warn "檔案已存在，會被覆寫"
     [ "$DRY" = 1 ] && { info "（乾跑，不實際執行）"; return 0; }
     confirm "要寫入嗎？" || return 0
@@ -1044,15 +1449,15 @@ cmd_doctor() {
             info "sshd jail 沒有明寫 port，用的是預設 ssh（/etc/services 的 22）"
             for _lp in $_live; do
                 [ "$_lp" = 22 ] || { err "SSH 實際在 $_lp，但 jail 用預設 22 — 封鎖規則會套錯埠，等於沒有防護"
-                                     info "修正：$SELF enable-sshd（會把實際埠號寫進去）"; break; }
+                                     info "修正：$SELF sync-port（會把實際埠號寫進去）"; break; }
             done
         else
             info "sshd jail 的 port: $_jp"
             for _lp in $_live; do
-                case ",$(printf '%s' "$_jp" | tr -d ' '),"  in
+                case ",$(port_norm "$_jp"),"  in
                     *",$_lp,"*) : ;;
                     *) err "SSH 實際在 $_lp，但 jail 的 port 是「$_jp」— 封鎖會套錯埠"
-                       info "修正：$SELF enable-sshd" ;;
+                       info "修正：$SELF sync-port" ;;
                 esac
             done
         fi
@@ -2067,8 +2472,13 @@ fail2ban.sh — fail2ban 封鎖管理  v$F2B_SH_VER
   $SELF top [n]             封鎖次數最多的來源，預設 15
   $SELF log [n]             最近的封鎖 / 解除事件，預設 30
   $SELF tail                即時追蹤 fail2ban 日誌
-  $SELF bantime [jail] [秒] 查看 / 設定封鎖時長（-1 = 永久）
+  $SELF tune [jail] [maxretry=N] [findtime=T] [bantime=T|perm]
+                            查看 / 修改封鎖門檻：findtime 內失敗 maxretry 次就封 bantime
+                            時間可寫秒數或 10m / 1h / 1d / 1w；jail 不寫 = sshd
+  $SELF tune <jail> reset   還原成原本設定檔的門檻
+  $SELF bantime [jail] [秒] 只改封鎖時長（等同 tune <jail> bantime=…，-1 = 永久）
   $SELF enable-sshd         建立 sshd jail，埠號取實際生效值
+  $SELF sync-port [埠…]     sshd jail 的監控埠同步成 SSH 實際的埠（換埠後用）
   $SELF reload              重載設定
   $SELF install             安裝並啟用 fail2ban
   $SELF doctor              環境檢查
@@ -2121,6 +2531,7 @@ while [ $# -gt 0 ]; do
                    REPORT_DAYS="$2"; shift 2 ;;
         -o|--out)  [ $# -ge 2 ] || { printf '%s\n' "-o 後面要接輸出檔路徑" >&2; exit 1; }
                    REPORT_OUT="$2"; shift 2 ;;
+        -1)        ARGS="$ARGS $1"; shift ;;     # bantime <jail> -1 的「永久」，不是選項
         -*) printf '%s\n' "未知選項：$1（可用 -j / -t / -y / -n / --force / --days / -o）" >&2; exit 1 ;;
         *)  ARGS="$ARGS $1"; shift ;;
     esac
@@ -2146,7 +2557,9 @@ case "$CMD" in
     log|logs)              cmd_log "$@" ;;
     tail|follow)           cmd_tail ;;
     bantime)               cmd_bantime "$@" ;;
+    tune)                  cmd_tune "$@" ;;
     enable-sshd)           cmd_enable_sshd ;;
+    sync-port)             cmd_sync_port "$@" ;;
     reload)                cmd_reload ;;
     install)               cmd_install ;;
     doctor|check-env)      cmd_doctor ;;
