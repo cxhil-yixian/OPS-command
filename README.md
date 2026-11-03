@@ -28,6 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 這個模式下 `ops.sh` 會把各工具腳本下載到 `/var/lib/ops-command`（非 root 時是
 `~/.cache/ops-command`）再呼叫，選單裡的 `u` 可以隨時重抓最新版。
+`u` 只換得到工具腳本，選單本身（ops.sh）要離開後重新執行那行 curl 才會更新；線上有新版時 `u` 會提示。
 
 > **快取目錄在 `confirm` 完成前不能刪。** 換埠的看門狗是背景執行
 > `/var/lib/ops-command/SSH/ssh-port.sh rollback --auto` 來自動還原的，
