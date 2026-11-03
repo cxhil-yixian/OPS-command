@@ -7,7 +7,7 @@
 | | |
 |---|---|
 | Shell | POSIX sh |
-| 支援改設定 | Ubuntu 22.04 / 24.04、Rocky Linux 9；其他系統只有 `status` / `doctor`，改設定會拒絕 |
+| 支援改設定 | Ubuntu 22.04 / 24.04、Rocky Linux 9、CentOS 7；其他系統只有 `status` / `doctor`，改設定會拒絕 |
 | 需要 root | 是（`status` / `doctor` / `-h` 除外） |
 | 會改系統嗎 | 會：`/etc/netplan/`、`/etc/network/interfaces`、NetworkManager 的連線設定、`/etc/resolv.conf`、網卡上的位址；IP 變更進行中另有 `ops-net-watchdog.service` |
 | 相依 | `iproute2`、`tar`（備份用，Rocky 9 最小安裝沒有，要先 `dnf install -y tar`）；netplan 後端需要 `python3-yaml`（netplan 本身就相依它）；NetworkManager 後端只用 `nmcli` |
@@ -34,7 +34,7 @@
 
 ## 先判斷這台實際用什麼管網路
 
-不依系統版本猜。Ubuntu 22.04 也可能沒有 netplan，廠商映像常見用 ifupdown。Rocky 9 是 NetworkManager。
+不依系統版本猜。Ubuntu 22.04 也可能沒有 netplan，廠商映像常見用 ifupdown。Rocky 9 與 CentOS 7 是 NetworkManager。
 
 | 偵測結果 | IP 寫在哪 |
 |---|---|
@@ -43,6 +43,7 @@
 | 兩邊都有設定 | **拒絕**，判斷不出哪邊生效 |
 | NetworkManager 正在執行，沒有 netplan / ifupdown 設定 | nm（`nmcli` 改網卡目前作用中的連線） |
 | NetworkManager 正在執行，又有 netplan 或 ifupdown 設定 | **拒絕**，判斷不出哪邊生效 |
+| NM 沒在執行，只有 ifcfg（`network.service` 直接管） | **拒絕**，這個組合沒有後端 |
 | 都不是 | **拒絕** |
 
 DNS 看 `/etc/resolv.conf` 的實際來源，跟 IP 後端分開判斷：
@@ -99,8 +100,12 @@ netplan 的 YAML 用 python3-yaml 改寫，**檔案裡的註解會消失**，動
 - 以下情況拒絕：網卡不歸 NM 管；連線沒有設定檔，或設定檔不在 `/etc` 底下（`/run` 或 initrd
   產生的連線，改了會在 `/etc` 生出新檔，備份還原刪不掉）；手動設定的連線要刪最後一個位址。
 - DNS：連線是 DHCP 而且用 DHCP 給的 DNS 時拒絕，因為分不清哪些是誰設的。NM 把 IPv4 與 IPv6 DNS
-  分開存，IPv4 一律排在前面，混著排的順序會被調整並警告。`ipv6.method=disabled` 的連線不接受
-  IPv6 DNS，動手前就拒絕。
+  分開存，IPv4 一律排在前面，混著排的順序會被調整並警告。IPv6 停用的連線（`ipv6.method` 是
+  `disabled` 或 NM 1.18 的 `ignore`）不接受 IPv6 DNS，動手前就拒絕。
+- 同一張網卡還有其他**會自動連線**的連線時警告：開機時 NM 可能啟用到別條，改過的那條就不生效。
+  只警告，不改它們。
+- NM 1.18 寫 ifcfg 時，主位址寫成不帶編號的 `IPADDR=`、放在檔尾，副位址才是 `IPADDR1..n`，
+  還會補上 `GATEWAY=`。看檔案行序會誤以為主位址跑到最後，實際順序以 `nmcli` 為準。
 
 ### 重開機中途
 
@@ -132,21 +137,26 @@ DNS 改錯不會斷 SSH，所以不開看門狗，用實際解析驗證：
 
 ## 實測紀錄
 
-| 項目 | Ubuntu 24.04（netplan，networkd） | Ubuntu 22.04（ifupdown） | Rocky 9.8（NetworkManager 1.54） |
-|---|---|---|---|
-| 偵測後端 / DNS 來源 / 覆寫來源 | 通過 | 通過 | 通過 |
-| 增加、刪除、還原、看門狗逾時 | 公網 IP 通過 | 公網 IP 通過 | 公網 IP 通過，`reapply` 時 SSH 不斷 |
-| 替換副 IP | 公網 IP 通過 | `dummy0` 通過 | 公網 IP 通過，新位址接手原位置 |
-| 替換主 IP，從舊 IP `confirm` 被拒 | 公網 IP 通過 | 公網 IP 通過 | 公網 IP 通過 |
-| 替換主 IP，**從新 IP 登入後 `confirm`** | 公網 IP 通過，舊 IP 確實斷線 | **未驗證** | 公網 IP 通過，舊 IP 確實斷線，新 IP 成為 `address1` |
-| DNS 增加 / 刪除 / 替換 / IPv6 | 通過 | 通過（IPv6 未測） | IPv4 通過；IPv6 只驗了 `ipv6.method=disabled` 時拒絕 |
-| DNS 全掛時自動還原 | 通過（Proxmox VM） | 通過 | 通過 |
-| 重開機後 IP 與 DNS 保留（刪除、加回） | 通過（Proxmox VM） | **未驗證** | 通過 |
-| 未 `confirm` 就重開機：開機後自動還原 / 開機後 `confirm` / 開機後 `rollback` | 通過（Proxmox VM） | **未驗證** | 通過 |
-| 還原後 SELinux 標籤（enforcing） | — | — | 通過，NM 讀得到 |
+| 項目 | Ubuntu 24.04（netplan，networkd） | Ubuntu 22.04（ifupdown） | Rocky 9.8（NetworkManager 1.54） | CentOS 7.9（NM 1.18，ifcfg） |
+|---|---|---|---|---|
+| 偵測後端 / DNS 來源 / 覆寫來源 | 通過 | 通過 | 通過 | 通過，抓到 6 條會自動連線的 `.bak` 連線 |
+| 增加、刪除、還原、看門狗逾時 | 公網 IP 通過 | 公網 IP 通過 | 公網 IP 通過，`reapply` 時 SSH 不斷 | 公網 IP 通過，還原後 ifcfg 與原檔逐字相同 |
+| 替換副 IP | 公網 IP 通過 | `dummy0` 通過 | 公網 IP 通過，新位址接手原位置 | 公網 IP 通過 |
+| 替換主 IP，從舊 IP `confirm` 被拒 | 公網 IP 通過 | 公網 IP 通過 | 公網 IP 通過 | 公網 IP 通過 |
+| 替換主 IP，**從新 IP 登入後 `confirm`** | 公網 IP 通過，舊 IP 確實斷線 | **未驗證** | 公網 IP 通過，舊 IP 確實斷線，新 IP 成為 `address1` | 公網 IP 通過，舊 IP 確實斷線 |
+| DNS 增加 / 刪除 / 替換 / IPv6 | 通過 | 通過（IPv6 未測） | IPv4 通過；IPv6 只驗了 `ipv6.method=disabled` 時拒絕 | IPv4 通過（事先查詢走 python2）；IPv6 只驗了 `ignore` 時拒絕 |
+| DNS 全掛時自動還原 | 通過（Proxmox VM） | 通過 | 通過 | 通過 |
+| 重開機後 IP 與 DNS 保留（刪除、加回） | 通過（Proxmox VM） | **未驗證** | 通過 | 通過（`.bak` 連線先改成不自動連線） |
+| 未 `confirm` 就重開機：開機後自動還原 / 開機後 `confirm` / 開機後 `rollback` | 通過（Proxmox VM） | **未驗證** | 通過 | 通過 |
+| 還原後 SELinux 標籤（enforcing） | — | — | 通過，NM 讀得到 | 通過（`net_conf_t`） |
 
 Rocky 是 Proxmox VM（`ens18`，一條 keyfile 連線，7 個 /26 位址），SELinux enforcing、firewalld 開著、
 沒有 cloud-init。開機約 20 秒，看門狗服務接手後重新倒數完整時限。
+
+CentOS 7.9 是同一台 VM 重裝（`eth0`，ifcfg 格式，NM 與 `network.service` 都在執行），SELinux enforcing、
+沒有 cloud-init、沒有 python3。廠商 setip.sh 留下的 `ifcfg-eth0.bak.<日期>` 被 NM 載入成 6 條同名、
+會自動連線的 eth0 連線，其中幾條是別台 VM 的 IP。重開機測試前先把它們改成 `autoconnect=no`，
+工具本身沒有動它們。
 
 重開機測試在 Ubuntu 24.04.5 的 Proxmox VM 上跑了 9 次，只改 `01-netcfg.yaml` 裡的 `eth0`。
 這台開機時 `systemd-networkd-wait-online` 會卡 2 分鐘，開機接手的倒數確實等它結束才開始，
@@ -165,7 +175,8 @@ cloud-init 網路設定未停用，但 `instance-id` 沒變，開機時記錄 `N
 - **Ubuntu 22.04 + netplan、24.04 + ifupdown** 這兩個組合。
 - **NetworkManager：IPv6 DNS 實際寫入、IPv4 與 IPv6 混排的順序調整。** 測試機的 IPv6 是停用的。
 - **NetworkManager：ifcfg 格式的連線、DHCP 連線上加副 IP、多張網卡。** 測試機只有一條 keyfile 手動連線。
-- **AlmaLinux / RHEL 9。** 理論上相同，但目前只放行 Rocky 9。
+- **AlmaLinux / RHEL 9、RHEL 7。** 理論上相同，但目前只放行 Rocky 9 與 CentOS 7。
+- **CentOS 7 在有多條會自動連線的連線時重開機。** 只驗了警告，沒有讓 NM 真的挑到別條。
 
 ## 實測學到的事
 
@@ -177,6 +188,8 @@ cloud-init 網路設定未停用，但 `instance-id` 沒變，開機時記錄 `N
   核心看的是 `all` 或網卡自己其中一個為 1；`netplan apply` 時 networkd 也會把網卡的值設成 1。
 - **`dig +short` 逾時會把錯誤印在 stdout。** 只看有沒有輸出會把不通的 DNS 當成通的。
 - **Rocky 9 最小安裝沒有 `tar`、`dig`、`nslookup`。** 沒有 tar 時動手前就拒絕；DNS 事先查詢改用 python3。
-- **`ipv6.method=disabled` 時 nmcli 拒收 `ipv6.dns`。** 原本會在備份之後才失敗再還原，現在先擋下。
+- **IPv6 停用時 nmcli 拒收 `ipv6.dns`。** Rocky 9 是 `disabled`，CentOS 7 是 `ignore`。原本會在備份之後才失敗再還原，現在先擋下。
+- **`ifcfg-eth0.bak.<日期>` 不算 `.bak` 結尾。** NM 的 ifcfg-rh 照樣載入成連線，`ONBOOT=yes` 就會自動連線。
+- **CentOS 7 沒有 python3。** DNS 事先查詢改成 python3 / python2 都能跑。
 - **`grep -F "1.2.3.4/"` 會比中 `11.2.3.4/24`。** 刪位址時用它過濾「應該留下的清單」，會把同網卡上
   另一個尾數相同的位址一起拿掉。三個後端共用這段，改成從字首比對。

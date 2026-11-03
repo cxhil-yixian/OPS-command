@@ -1,7 +1,7 @@
 #!/bin/sh
 # net-set.sh — IP 與 DNS 伺服器的增加 / 減少 / 替換
 #
-# 支援（會改設定）：Ubuntu 22.04 / 24.04、Rocky Linux 9
+# 支援（會改設定）：Ubuntu 22.04 / 24.04、Rocky Linux 9、CentOS 7
 # 其餘發行版目前只有 status / doctor，改設定會直接拒絕。
 #
 # 用法：
@@ -178,7 +178,7 @@ detect_env() {
 
 os_supported() {
     case "$OS_ID:$OS_VER" in
-        ubuntu:22.04|ubuntu:24.04|rocky:9|rocky:9.*) return 0 ;;
+        ubuntu:22.04|ubuntu:24.04|rocky:9|rocky:9.*|centos:7|centos:7.*) return 0 ;;
     esac
     return 1
 }
@@ -249,8 +249,11 @@ detect_backend() {
         BACKEND=netplan
     elif [ "$_if" = 1 ]; then
         BACKEND=ifupdown
+    elif ls "$NM_IFCFG_DIR"/ifcfg-* 2>/dev/null | grep -qv 'ifcfg-lo$'; then
+        # CentOS 7 有些映像關掉 NM，改由 network.service 直接讀 ifcfg
+        BACKEND_WHY="網卡由 network-scripts（ifcfg + network.service）管理，NetworkManager 沒有在執行，這個組合還沒有支援"
     else
-        BACKEND_WHY="找不到 netplan 或 ifupdown 的網卡設定"
+        BACKEND_WHY="找不到 netplan、ifupdown 或 NetworkManager 的網卡設定"
     fi
     return 0
 }
@@ -310,6 +313,29 @@ override_sources() {
                 printf '%s\n' "$_f：這份檔案由 cloud-init 產生"
         done
     fi
+    [ "${BACKEND:-}" = nm ] && nm_rival_profiles
+    return 0
+}
+
+# 同一張網卡上其他會自動連線的連線：開機時 NM 可能挑到別條，改過的那條就不生效。
+# 實測 CentOS 7：ifcfg-eth0.bak.<日期> 不算 .bak 結尾，ifcfg-rh 照樣載入成連線
+nm_rival_profiles() {
+    _di=$(default_iface)
+    [ -n "$_di" ] || return 0
+    _cu=$(nmcli -g GENERAL.CON-UUID device show "$_di" 2>/dev/null)
+    [ -n "$_cu" ] || return 0
+    _n=0; _ex=''
+    for _u in $(nmcli -g UUID connection show 2>/dev/null); do
+        [ "$_u" = "$_cu" ] && continue
+        [ "$(nm_get "$_u" connection.interface-name)" = "$_di" ] || continue
+        [ "$(nm_get "$_u" connection.autoconnect)" = yes ] || continue
+        _n=$(( _n + 1 ))
+        [ "$_n" -le 3 ] && _ex="$_ex $(nmcli -t -f UUID,FILENAME connection show 2>/dev/null | awk -F: -v u="$_u" '$1 == u { sub(/^[^:]*:/, ""); print; exit }')"
+    done
+    [ "$_n" -gt 0 ] || return 0
+    printf '%s\n' "NetworkManager：$_di 另有 $_n 條會自動連線的連線，開機時可能啟用到別條，這次的變更就不生效"
+    for _f in $_ex; do printf '%s\n' "  $_f"; done
+    [ "$_n" -gt 3 ] && printf '%s\n' "  …其餘 $(( _n - 3 )) 條用 nmcli connection show 查看"
     return 0
 }
 
@@ -1108,7 +1134,7 @@ change_guard() {
             die "看門狗需要本腳本的實體路徑，請改用 ops.sh 或 git clone 後執行" ;;
     esac
     [ -f "$SELF" ] || die "看門狗需要本腳本的實體路徑，請改用 ops.sh 或 git clone 後執行"
-    os_supported || die "${OS_NAME:-這個系統} 還沒有支援改設定（目前只支援 Ubuntu 22.04 / 24.04、Rocky Linux 9）"
+    os_supported || die "${OS_NAME:-這個系統} 還沒有支援改設定（目前只支援 Ubuntu 22.04 / 24.04、Rocky Linux 9、CentOS 7）"
     detect_backend
     [ "$BACKEND" != none ] || die "拒絕變更：$BACKEND_WHY"
     has ip || die "找不到 ip 指令"
@@ -1394,21 +1420,25 @@ dns_probe() {
     if has nslookup; then
         nslookup -timeout=2 "$TESTNAME" "$1" >/dev/null 2>&1; return $?
     fi
-    if has python3; then
-        python3 - "$1" "$TESTNAME" <<'PY'
+    # CentOS 7 只有 python2，所以這段要兩邊都能跑：bytearray 取位元組、例外不能只接 OSError
+    _py=''
+    for _p in python3 python2 python; do has "$_p" && { _py=$_p; break; }; done
+    if [ -n "$_py" ]; then
+        "$_py" - "$1" "$TESTNAME" <<'PY'
 import socket, struct, sys
 srv, name = sys.argv[1:3]
 q = struct.pack(">HHHHHH", 0x4f50, 0x100, 1, 0, 0, 0)
-q += b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
-q += struct.pack(">HH", 1, 1)
+for p in name.split("."):
+    q += struct.pack("B", len(p)) + p.encode("ascii")
+q += struct.pack(">BHH", 0, 1, 1)
 s = socket.socket(socket.AF_INET6 if ":" in srv else socket.AF_INET, socket.SOCK_DGRAM)
 s.settimeout(2)
 try:
     s.sendto(q, (srv, 53))
-    r = s.recv(1024)
-except OSError:
+    r = bytearray(s.recv(1024))
+except Exception:
     sys.exit(1)
-sys.exit(0 if len(r) > 12 and r[3] & 15 == 0 and r[6:8] != b"\0\0" else 1)
+sys.exit(0 if len(r) > 12 and r[3] & 15 == 0 and (r[6] or r[7]) else 1)
 PY
         return $?
     fi
@@ -1476,7 +1506,7 @@ resolves_now() {
 
 dns_guard() {
     need_root
-    os_supported || die "${OS_NAME:-這個系統} 還沒有支援改設定（目前只支援 Ubuntu 22.04 / 24.04、Rocky Linux 9）"
+    os_supported || die "${OS_NAME:-這個系統} 還沒有支援改設定（目前只支援 Ubuntu 22.04 / 24.04、Rocky Linux 9、CentOS 7）"
     detect_backend
     detect_dns_mode
     [ "$DNS_MODE" != none ] || die "拒絕變更：$DNS_WHY"
@@ -1513,11 +1543,14 @@ dns_change() {
             info "寫入 netplan 的 $(dns_iface) nameservers，再由 systemd-resolved 套用"
             warn_comment_loss "$(dns_iface)" ;;
         nm)
-            # 實測 Rocky 9.8：method=disabled 時 nmcli 直接拒收 ipv6.dns，而 ipv4.dns 只收 IPv4
+            # IPv6 停用時 nmcli 直接拒收 ipv6.dns，而 ipv4.dns 只收 IPv4。
+            # 實測 Rocky 9.8 是 disabled，CentOS 7（NM 1.18，IPV6INIT=no）是 ignore
             case " $* " in
                 *:*)
-                    [ "$(nm_get "$NM_UUID" ipv6.method)" = disabled ] && \
-                        die "連線「$NM_NAME」的 IPv6 已停用（ipv6.method=disabled），NetworkManager 不接受 IPv6 DNS" ;;
+                    _m6=$(nm_get "$NM_UUID" ipv6.method)
+                    case "$_m6" in disabled|ignore)
+                        die "連線「$NM_NAME」的 IPv6 已停用（ipv6.method=$_m6），NetworkManager 不接受 IPv6 DNS" ;;
+                    esac ;;
             esac
             info "寫入 NetworkManager 連線「$NM_NAME」的 ipv4.dns / ipv6.dns，再由它改寫 $RESOLV"
             [ $# -gt 3 ] && warn "glibc 只會用前 3 台，第 4 台之後不會被查" ;;
@@ -1671,7 +1704,7 @@ cmd_doctor() {
     for _t in ip ss tar getent; do
         has "$_t" && ok "$_t" || err "缺少 $_t"
     done
-    { has dig || has nslookup; } || info "沒有 dig / nslookup，事先查詢改用 python3"
+    { has dig || has nslookup; } || info "沒有 dig / nslookup，事先查詢改用 python"
     # 核心看的是 all 跟網卡自己其中一個為 1
     _pd=$(default_iface)
     if [ -n "$_pd" ] && [ "$(sysctl -n net.ipv4.conf.all.promote_secondaries 2>/dev/null)" != 1 ] && \

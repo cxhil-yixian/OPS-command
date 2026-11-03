@@ -14,7 +14,7 @@
 ### 新增
 
 - **網路設定：IP 與 DNS 的增加 / 減少 / 替換**（`NET/net-set.sh` 1.0，主選單 `n`）。第一階段支援
-  Ubuntu 22.04 / 24.04、Rocky Linux 9，其他系統只有 `status` / `doctor`，改設定會拒絕。
+  Ubuntu 22.04 / 24.04、Rocky Linux 9、CentOS 7，其他系統只有 `status` / `doctor`，改設定會拒絕。
   - 依實際生效的管理方式分流，不依版本猜：`netplan`、`ifupdown`、`nm`（NetworkManager，只用 nmcli）
     三個後端，有衝突或判斷不出來就拒絕。NM 用 `device reapply` 套用，不重連網卡。
   - IP 變更先備份、開看門狗（預設 5 分鐘）。`ip-replace` 分兩階段：新舊並存，從新 IP 登入 `confirm`
@@ -30,6 +30,9 @@
   - 實測 Rocky 9.8（NetworkManager 1.54，SELinux enforcing，Proxmox VM）：增刪換、主 IP 替換從新 IP
     `confirm`、DNS、重開機的各種情況都通過。抓到的事：最小安裝沒有 `tar`（改成動手前拒絕）、
     `ipv6.method=disabled` 不收 IPv6 DNS（改成動手前拒絕）、tar 還原後要 `restorecon`。
+  - 實測 CentOS 7.9（NM 1.18，ifcfg，SELinux enforcing）：同一套項目全部通過。抓到的事：
+    `ifcfg-eth0.bak.<日期>` 被 NM 載入成會自動連線的連線（新增警告：同網卡還有其他會自動連線的連線）、
+    IPv6 停用在 1.18 是 `ignore`、沒有 python3（DNS 事先查詢改成 python2 也能跑）。
   - 刪位址時用 `grep -F "IP/"` 過濾，會連尾數相同的另一個位址（`1.2.3.4` 對 `11.2.3.4`）一起拿掉，
     三個後端都改成從字首比對。
 
