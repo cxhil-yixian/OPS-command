@@ -158,6 +158,8 @@
     <li class="sub"><a href="#case-apps">安裝常用工具</a></li>
     <li class="sub"><a href="#case-mirror">下載太慢</a></li>
     <li class="sub"><a href="#case-stress">測試機器效能</a></li>
+    <li class="sub"><a href="#case-netip">增加或更換 IP</a></li>
+    <li class="sub"><a href="#case-dns">更換 DNS</a></li>
     <li><a href="#trouble">出問題怎麼辦</a></li>
     <li><a href="#rules">四條安全守則</a></li>
     <li><a href="#words">名詞小辭典</a></li>
@@ -179,6 +181,7 @@
   <li><strong>換 SSH 連接埠</strong>：換錯了會自動還原，不會把自己關在門外。</li>
   <li><strong>封鎖一直猜密碼的 IP</strong>：封鎖之前會先檢查，不會封到你自己。</li>
   <li><strong>看誰在連你的伺服器</strong>。</li>
+  <li><strong>增加、刪除、更換 IP 與 DNS</strong>：換 IP 時新舊兩個同時存在，你從新 IP 登入確認之後才拿掉舊的。</li>
   <li><strong>改時區、校正時間、裝常用軟體、換下載來源、測試效能</strong>。</li>
 </ul>
 <div class="note tip">
@@ -210,6 +213,7 @@
   </tbody>
 </table>
 </div>
+<p><strong>網路設定（<kbd>n</kbd>）</strong>目前只能在 Ubuntu 22.04 / 24.04、Rocky Linux 9、CentOS 7 上修改，其他系統只能查看。</p>
 <p>不知道自己的系統是哪一個？輸入這行就會顯示：</p>
 <div class="cmd"><pre>cat /etc/os-release</pre></div>
 <div class="note warn">
@@ -244,7 +248,7 @@
 <h2 id="menu"><span class="num">4</span>主選單一覽</h2>
 <p>打開後會看到這個畫面（上半部是這台機器目前的狀態）：</p>
 <pre class="screen"><span class="dim">────────────────────────────────────────────────────</span>
- OPS-command 運維工具箱  v1.15
+ OPS-command 運維工具箱  v1.16
 <span class="dim">────────────────────────────────────────────────────</span>
  系統   Rocky Linux 9.4
  SSH    服務 sshd = active   埠 22
@@ -257,7 +261,7 @@
    <span class="hl">4</span>) 立即還原
  SSH 監控與取證
    <span class="hl">5</span>) 即時監看   <span class="hl">6</span>) 一次性取證   <span class="hl">7</span>) 追蹤認證日誌   <span class="hl">8</span>) 解析排查
- <span class="hl">b</span>) 封鎖管理   <span class="hl">s</span>) 壓力測試   <span class="hl">t</span>) 時間與時區   <span class="hl">a</span>) 常用軟體
+ <span class="hl">b</span>) 封鎖管理   <span class="hl">s</span>) 壓力測試   <span class="hl">t</span>) 時間與時區   <span class="hl">a</span>) 常用軟體   <span class="hl">n</span>) 網路設定
  <span class="hl">9</span>) 更換套件來源鏡像   <span class="hl">d</span>) 環境自我診斷   <span class="hl">i</span>) 安裝缺少的相依套件
  <span class="hl">q</span>) 離開
  請選擇：</pre>
@@ -276,6 +280,7 @@
     <tr><td class="key"><kbd>s</kbd></td><td>壓力測試：把 CPU、記憶體、硬碟操到滿，看機器撐不撐得住</td></tr>
     <tr><td class="key"><kbd>t</kbd></td><td>時間與時區：改時區、校正時間</td></tr>
     <tr><td class="key"><kbd>a</kbd></td><td>一鍵安裝常用軟體（docker、nginx、git…）</td></tr>
+    <tr><td class="key"><kbd>n</kbd></td><td>網路設定：增加、刪除、更換 IP 與 DNS（<a href="#case-netip">怎麼換 IP</a>）</td></tr>
     <tr><td class="key"><kbd>9</kbd></td><td>換成國內的下載來源，讓安裝軟體變快</td></tr>
     <tr><td class="key"><kbd>d</kbd></td><td>檢查這台機器缺什麼（<strong>不確定時就按它</strong>）</td></tr>
     <tr><td class="key"><kbd>i</kbd></td><td>把 <kbd>d</kbd> 檢查出來缺的東西裝起來</td></tr>
@@ -466,6 +471,59 @@
   </ol>
 </div>
 
+<!-- 案例 J -->
+<div class="case" id="case-netip">
+  <h3>案例 J：增加或更換 IP</h3>
+  <p class="when">什麼時候用：機房或雲端多給了這台一個 IP，要把它加上去；或是要把主要的 IP 換成另一個。</p>
+  <div class="note danger">
+    <b class="label">⛔ IP 不能自己編</b>
+    <p>要加或換的 IP，必須是機房或雲端<strong>已經分配給這台</strong>的，否則加上去也連不到，還可能搶到別人的 IP。雲端主機要先在雲端後台把 IP 綁到這台。</p>
+  </div>
+  <p>進入 <span class="path">主選單 → n</span>，上面會先列出這台的網卡、IP、閘道和 DNS。</p>
+  <p><strong>增加一個 IP</strong></p>
+  <ol>
+    <li>按 <kbd>1</kbd>，輸入要加的 IP，例如 <code>203.0.113.6</code>。跟現有 IP 同一個網段的話，不用寫 <code>/24</code> 這種前綴。</li>
+    <li>問「加在哪張網卡」時直接按 <kbd>Enter</kbd>，讓它自己判斷。</li>
+    <li>畫面會列出要改的東西，確認後輸入 <kbd>y</kbd>。</li>
+    <li>確認連線都正常後，按 <kbd>c</kbd> 確認。<strong>5 分鐘內沒按 <kbd>c</kbd>，剛加的 IP 會自動拿掉。</strong></li>
+  </ol>
+  <p><strong>刪除一個 IP</strong>：按 <kbd>2</kbd>，輸入 IP，輸入 <kbd>y</kbd>，再按 <kbd>c</kbd> 確認。你現在連線用的那個 IP 不能刪，要換請用下面的「更換」。</p>
+  <p><strong>更換 IP（包括你現在連線用的那個）</strong></p>
+  <ol>
+    <li>按 <kbd>3</kbd>，依序輸入舊 IP 和新 IP，確認後輸入 <kbd>y</kbd>。這時新舊兩個 IP 同時存在。</li>
+    <li><strong>不要關掉這個視窗！</strong>另外開一個新的終端機，用<strong>新 IP</strong> 登入：
+      <div class="cmd"><pre>ssh 你的帳號@新IP</pre></div>
+      SSH 換過埠的話記得加 <code>-p 埠號</code>。
+    </li>
+    <li>
+      <strong>登入成功</strong> → <strong>在新視窗裡</strong>切換成 root、打開選單，到 <span class="path">n → c</span> 確認。舊 IP 會在這一步拿掉，舊視窗跟著斷線是正常的。<br>
+      <strong>登入失敗</strong> → 什麼都不用做，5 分鐘後會自動還原。等不及的話在舊視窗按 <kbd>r</kbd>，立刻還原。
+    </li>
+  </ol>
+  <div class="note tip">
+    <p><b>為什麼一定要從新 IP 確認？</b>能從新 IP 登入，才證明新 IP 真的通。在舊視窗按 <kbd>c</kbd> 會被拒絕，免得你還沒試過就把舊 IP 拿掉。</p>
+    <p>沒確認就重開機也不怕：開機後一樣會倒數，時間到就自動還原。</p>
+  </div>
+</div>
+
+<!-- 案例 K -->
+<div class="case" id="case-dns">
+  <h3>案例 K：更換 DNS</h3>
+  <p class="when">什麼時候用：伺服器查不到網址（<code>ping google.com</code> 說找不到主機），或想換成別家的 DNS，例如 <code>1.1.1.1</code>、<code>8.8.8.8</code>。</p>
+  <ol>
+    <li>主選單按 <kbd>n</kbd>，畫面最上面的「DNS」那一行就是目前用的。</li>
+    <li>依需要按：<br>
+      <kbd>4</kbd> 增加：輸入 DNS 的 IP。問「放在最前面嗎」時，想優先用它就輸入 <kbd>y</kbd>，否則按 <kbd>Enter</kbd>。<br>
+      <kbd>5</kbd> 刪除：輸入要拿掉的 DNS。最後一台不能刪。<br>
+      <kbd>6</kbd> 替換：依序輸入舊的和新的，新的會放在舊的原本的位置。
+    </li>
+    <li>確認後輸入 <kbd>y</kbd>。</li>
+  </ol>
+  <div class="note tip">
+    <p>加入之前，工具會先向那台 DNS 查一次。查不到會警告並問你要不要繼續，看不懂就按 <kbd>Enter</kbd> 取消。改完之後要是反而查不到網址，會自動改回原本的設定。改 DNS 不會讓 SSH 斷線，所以不需要按 <kbd>c</kbd>。</p>
+  </div>
+</div>
+
 <!-- ───────────────────────── 6 ───────────────────────── -->
 <h2 id="trouble"><span class="num">6</span>出問題怎麼辦</h2>
 
@@ -477,6 +535,15 @@
   <li>先確認雲端後台的「安全群組」有沒有放行新的埠。</li>
   <li><strong>不要關掉原本的視窗</strong>，等 10 分鐘就會自動還原。也可以在原本的視窗按 <kbd>4</kbd>，再輸入 <kbd>y</kbd>，立刻還原。</li>
 </ul>
+
+<h3>換了 IP，新 IP 連不進來</h3>
+<ul>
+  <li>先確認這個 IP 真的已經分配給這台（問機房，或看雲端後台）。</li>
+  <li><strong>不要關掉原本的視窗</strong>，等 5 分鐘就會自動還原。也可以在原本的視窗到 <span class="path">n → r</span>，立刻還原。</li>
+</ul>
+
+<h3>畫面說 IP「不在設定裡」或「可能是 DHCP」</h3>
+<p>這台的 IP 是機房或雲端自動發的，不是寫在這台的設定檔裡，在這裡改了也沒用。請到雲端後台或請機房更換。</p>
 
 <h3>自己被封鎖了，連不進伺服器</h3>
 <ol>
@@ -496,7 +563,7 @@
 <!-- ───────────────────────── 7 ───────────────────────── -->
 <h2 id="rules"><span class="num">7</span>四條安全守則</h2>
 <ol>
-  <li><strong>換 SSH 埠時，舊視窗不要關。</strong>它是你的退路。</li>
+  <li><strong>換 SSH 埠或換 IP 時，舊視窗不要關。</strong>它是你的退路。</li>
   <li><strong>開啟自動封鎖之前，先把自己的 IP 加進白名單。</strong></li>
   <li><strong>壓力測試只在測試機跑。</strong></li>
   <li><strong>看不懂就不要按 y。</strong>先按 <kbd>d</kbd> 檢查，或問懂的人。</li>
@@ -509,17 +576,19 @@
   <dt>埠（port）</dt><dd>伺服器上的「門牌號碼」。SSH 預設走 22 號門。</dd>
   <dt>root</dt><dd>Linux 的最高管理員帳號，改系統設定都要用它。</dd>
   <dt>IP</dt><dd>網路上每台電腦的地址，例如 <code>203.0.113.5</code>。</dd>
+  <dt>網段</dt><dd>同一組 IP 的範圍。<code>203.0.113.5/24</code> 的意思是 <code>203.0.113.1</code> – <code>203.0.113.254</code> 都在同一個網段。</dd>
+  <dt>DNS</dt><dd>把網址（例如 <code>google.com</code>）翻成 IP 的服務。DNS 不通，伺服器就查不到任何網址。</dd>
   <dt>fail2ban</dt><dd>自動封鎖的程式。發現某個 IP 一直猜錯密碼，就把它擋在門外一段時間。</dd>
   <dt>白名單</dt><dd>永遠不會被封鎖的 IP 清單。</dd>
-  <dt>看門狗</dt><dd>換埠時的保險計時器。時間到了還沒確認，就自動把設定改回原樣。</dd>
+  <dt>看門狗</dt><dd>換埠或換 IP 時的保險計時器。時間到了還沒確認，就自動把設定改回原樣。</dd>
   <dt>安全群組</dt><dd>雲端主機在雲端後台的防火牆，跟伺服器裡面的防火牆是兩回事，兩邊都要放行。</dd>
   <dt>時區</dt><dd>時間的顯示方式。台北和上海是 UTC+8，所以設錯會差 8 小時。</dd>
   <dt>鏡像（下載來源）</dt><dd>安裝軟體時從哪裡下載。換成離你近的來源，下載會變快。</dd>
 </dl>
 
 <footer>
-  <p>OPS-command · Linux 新手指南 · 對應版本 v1.15</p>
-  <p>想直接下指令、不用選單，或想看更多細節，請看專案的 README：各工具資料夾（SSH、FAIL2BAN、TIME、APPS、STRESS）裡都有完整說明。Windows 的版本在 <a href="windows.html">windows.html</a>。</p>
+  <p>OPS-command · Linux 新手指南 · 對應版本 v1.16</p>
+  <p>想直接下指令、不用選單，或想看更多細節，請看專案的 README：各工具資料夾（SSH、FAIL2BAN、TIME、APPS、STRESS、NET）裡都有完整說明。Windows 的版本在 <a href="windows.html">windows.html</a>。</p>
 </footer>
 
 </main>

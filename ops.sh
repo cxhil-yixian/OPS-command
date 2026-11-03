@@ -1,7 +1,7 @@
 #!/bin/sh
 # ops.sh — OPS-command 視覺化操作選單
 #
-# 一支入口把 SSH/、FAIL2BAN/、STRESS/、TIME/ 與 APPS/ 底下的工具包起來，用選單操作，不必記參數。
+# 一支入口把 SSH/、FAIL2BAN/、STRESS/、TIME/、APPS/ 與 NET/ 底下的工具包起來，用選單操作，不必記參數。
 #
 # 支援：CentOS 7.9 / RHEL 7-10 / Rocky / AlmaLinux
 #       Ubuntu 18.04-24.04 / Debian 9-12 / Alpine (OpenRC + busybox)
@@ -27,7 +27,7 @@ set -u
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 
-OPS_VERSION=1.15
+OPS_VERSION=1.16
 
 # 遠端來源。想指到自己的 fork、內網鏡像或其他分支，執行前設 OPS_RAW_BASE 即可：
 #   OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
@@ -42,6 +42,7 @@ F2B_REL='FAIL2BAN/fail2ban.sh'
 STRESS_REL='STRESS/stress-test.sh'
 TIME_REL='TIME/time-set.sh'
 APPS_REL='APPS/apps.sh'
+NET_REL='NET/net-set.sh'
 MIRROR_URL_REL='REPO/URL'
 
 # 各工具腳本產出的東西統一收在這裡；export 讓它們沿用同一個值
@@ -106,6 +107,7 @@ F2B_SH="$ASSET_DIR/$F2B_REL"
 STRESS_SH="$ASSET_DIR/$STRESS_REL"
 TIME_SH="$ASSET_DIR/$TIME_REL"
 APPS_SH="$ASSET_DIR/$APPS_REL"
+NET_SH="$ASSET_DIR/$NET_REL"
 MIRROR_URL_FILE="$ASSET_DIR/$MIRROR_URL_REL"
 
 FETCH_ERR=''
@@ -175,7 +177,7 @@ assets_sync() {
 
     _mode="${1:-}"
     _rc=0; _n=0; _fail=''
-    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL" "$F2B_REL" "$STRESS_REL" "$TIME_REL" "$APPS_REL"; do
+    for _rel in "$SSH_PORT_REL" "$SELFHEAL_REL" "$F2B_REL" "$STRESS_REL" "$TIME_REL" "$APPS_REL" "$NET_REL"; do
         if [ "$_mode" = force ] || [ "$_mode" = update ] || [ ! -f "$ASSET_DIR/$_rel" ]; then
             [ "$_mode" = update ] || printf ' 取得 %s … ' "$_rel"
             if fetch_script "$_rel"; then
@@ -554,6 +556,9 @@ menu() {
     printf '\n'
     sect "常用軟體  (APPS/apps.sh)"
     row "a) 進入安裝選單    ${CD}docker / nc / tcpping / mtr / nginx / tree / git / snmp${C0}"
+    printf '\n'
+    sect "網路設定  (NET/net-set.sh)"
+    row "n) 進入網路選單    ${CD}增減替換 IP 與 DNS，IP 變更有看門狗，不會把自己鎖在門外${C0}"
     printf '\n'
     sect "系統"
     row "9) 更換套件來源鏡像 ${CD}呼叫 linuxmirrors.cn 的外部腳本${C0}"
@@ -1147,6 +1152,112 @@ act_time_menu() {
 }
 
 # =========================================================
+# 網路設定（net-set.sh）
+#   跟時間選單同樣的分工：這裡只把參數問完，防鎖死的判斷、會動到什麼的說明
+#   與確認都留在 net-set.sh 裡一份。
+# =========================================================
+net_ask() {   # $1 = 提示；空字串 = 取消
+    ask_default "$1（Enter 取消）" ""
+    [ -n "$REPLY_VAL" ] || { dim " 已取消"; return 1; }
+    return 0
+}
+
+net_ip_add() {
+    printf '\n'
+    dim " 同網段可省略前綴；跨網段要帶前綴（例：10.0.0.5/24），不會動預設閘道。"
+    net_ask "要增加的 IP" || return 0
+    _ip=$REPLY_VAL
+    ask_default "加在哪張網卡？（Enter = 自動判斷）" ""
+    sh "$NET_SH" ip-add "$_ip" ${REPLY_VAL:+-i "$REPLY_VAL"}
+}
+
+net_ip_del() {
+    printf '\n'
+    dim " 目前 SSH 連線正在用的 IP 不能刪，要換請用替換。"
+    net_ask "要刪除的 IP" || return 0
+    sh "$NET_SH" ip-del "$REPLY_VAL"
+}
+
+net_ip_replace() {
+    printf '\n'
+    dim " 只支援同網段、閘道不變。先新舊並存，從新 IP 登入後選 c 才移除舊 IP。"
+    net_ask "舊 IP" || return 0
+    _old=$REPLY_VAL
+    net_ask "新 IP" || return 0
+    sh "$NET_SH" ip-replace "$_old" "$REPLY_VAL"
+}
+
+net_dns_add() {
+    printf '\n'
+    net_ask "要增加的 DNS" || return 0
+    _dns=$REPLY_VAL
+    ask_bool "放在最前面（優先使用）？" false
+    if [ "$REPLY_VAL" = true ]; then
+        sh "$NET_SH" dns-add "$_dns" --first
+    else
+        sh "$NET_SH" dns-add "$_dns"
+    fi
+}
+
+net_dns_del() {
+    printf '\n'
+    net_ask "要刪除的 DNS" || return 0
+    sh "$NET_SH" dns-del "$REPLY_VAL"
+}
+
+net_dns_replace() {
+    printf '\n'
+    net_ask "舊 DNS" || return 0
+    _old=$REPLY_VAL
+    net_ask "新 DNS" || return 0
+    sh "$NET_SH" dns-replace "$_old" "$REPLY_VAL"
+}
+
+act_net_menu() {
+    require_script "$NET_SH" "$NET_REL" || return 0
+    while :; do
+        clear 2>/dev/null || printf '\n\n'
+        hr
+        printf '%s 網路設定%s  %sNET/net-set.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
+        hr
+        sh "$NET_SH" status bare 2>/dev/null
+        hr
+        sect "IP"
+        row "1) 增加 IP         ${CD}看門狗保護，時限內要確認${C0}"
+        row "2) 刪除 IP         ${CD}SSH 正在用的 IP 不能刪${C0}"
+        row "3) 替換 IP         ${CD}同網段；新舊並存，從新 IP 登入後才移除舊的${C0}"
+        row "c) 確認 IP 變更    ${CD}取消看門狗；替換時在這一步移除舊 IP${C0}"
+        row "r) 立即還原        ${CD}回到變更前的設定${C0}"
+        printf '\n'
+        sect "DNS"
+        row "4) 增加 DNS        ${CD}先向新 DNS 查一次，可放最前面${C0}"
+        row "5) 刪除 DNS        ${CD}不能刪最後一台${C0}"
+        row "6) 替換 DNS        ${CD}保留原本的順序位置${C0}"
+        printf '\n'
+        sect "其他"
+        row "d) 環境檢查        ${CD}含「重開機會被蓋回去」的來源${C0}"
+        row "b) 返回主選單"
+        printf '\n 請選擇：'
+        read -r _c 2>/dev/null || return 0
+        printf '\n'
+        case "$_c" in
+            1) net_ip_add ;;
+            2) net_ip_del ;;
+            3) net_ip_replace ;;
+            c|C) sh "$NET_SH" confirm ;;
+            r|R) sh "$NET_SH" rollback ;;
+            4) net_dns_add ;;
+            5) net_dns_del ;;
+            6) net_dns_replace ;;
+            d|D) sh "$NET_SH" doctor ;;
+            b|B|q|Q|'') return 0 ;;
+            *) nomsg "無此選項：$_c" ;;
+        esac
+        pause
+    done
+}
+
+# =========================================================
 # 常用軟體（apps.sh）
 #   跟時間選單同樣的分工：這裡只負責選要裝什麼，「會跑什麼指令、會改到什麼」
 #   的說明與確認都留在 apps.sh 裡一份。已經裝好的由它自己略過。
@@ -1369,7 +1480,7 @@ act_doctor() {
     check_deps
     hr
     sect "腳本"
-    for _s in "$SSH_PORT_SH" "$SELFHEAL_SH" "$F2B_SH" "$STRESS_SH" "$TIME_SH" "$APPS_SH"; do
+    for _s in "$SSH_PORT_SH" "$SELFHEAL_SH" "$F2B_SH" "$STRESS_SH" "$TIME_SH" "$APPS_SH" "$NET_SH"; do
         if [ -f "$_s" ]; then
             [ -x "$_s" ] && okmsg "$_s" || wmsg "$_s（無執行權限，本選單以 sh/bash 呼叫故仍可用）"
         elif [ "$RUN_MODE" = remote ]; then
@@ -1554,6 +1665,8 @@ ops.sh — OPS-command 視覺化操作選單  v$OPS_VERSION
                    預設是執行 ops.sh 時所在的目錄，目前：$OPS_STRESS_DIR
     OPS_NTP_SERVER 時間選單「立刻校時」預設要問哪台 NTP 伺服器
                    （內網機器連不到 pool.ntp.org 時設它）
+    OPS_NET_TESTNAME  網路選單驗證 DNS 時要解析的網域（預設 cloudflare.com，
+                   內網 DNS 查不到外部網域時設成內部網域）
     OPS_DOCKER_MIRROR  安裝 docker 時交給 get-docker.sh 的 --mirror
                    （Aliyun / AzureChinaCloud，連不到 download.docker.com 時用）
     NO_COLOR       關閉顏色
@@ -1607,6 +1720,7 @@ if [ ! -t 0 ]; then
     printf '%s\n' "    DUR=60 bash $STRESS_SH cpu"
     printf '%s\n' "    sh $TIME_SH status"
     printf '%s\n' "    sh $APPS_SH install nc mtr -y"
+    printf '%s\n' "    sh $NET_SH status"
     printf '%s\n' "或執行 ops.sh doctor 做環境檢查。"
     exit 1
 fi
@@ -1634,6 +1748,7 @@ while :; do
         s|S) act_stress_menu ;;
         t|T) act_time_menu ;;
         a|A) act_apps_menu ;;
+        n|N) act_net_menu ;;
         d|D) act_doctor ;;
         i|I) act_install_deps ;;
         u|U) act_refresh ;;

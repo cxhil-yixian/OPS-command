@@ -5,6 +5,7 @@
 另附一組壓力測試（CPU / 記憶體 / 磁碟 / SWAP / NTP），跑之前先把會發生什麼攤開來問。
 時區與系統時間也能改，改時鐘之前先算出差多少、往哪個方向、會弄壞什麼。
 常用軟體（docker / nc / tcpping / mtr / nginx / tree / git / snmp）可以一鍵裝，依發行版挑對的裝法。
+IP 與 DNS 可以增減替換，換 IP 時新舊並存加看門狗，從新 IP 登入確認後才移除舊的（目前支援 Ubuntu 22.04 / 24.04、Rocky Linux 9、CentOS 7）。
 Linux 以外還有一支 Windows 10/11 的管理工具，換 RDP Port 同樣有看門狗。
 
 所有工具都能單獨執行，也可以透過 `ops.sh` 的視覺化選單操作。
@@ -64,7 +65,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.15
+ OPS-command 運維工具箱  v1.16
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
@@ -96,6 +97,9 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
  常用軟體  (APPS/apps.sh)
    a) 進入安裝選單    docker / nc / tcpping / mtr / nginx / tree / git / snmp
 
+ 網路設定  (NET/net-set.sh)
+   n) 進入網路選單    增減替換 IP 與 DNS，IP 變更有看門狗，不會把自己鎖在門外
+
  系統
    9) 更換套件來源鏡像 呼叫 linuxmirrors.cn 的外部腳本
    d) 環境自我診斷     檢查相依套件與已知相容性問題
@@ -120,6 +124,10 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 已經跑過的工作，往前撥會讓該跑的被跳過），最後才問。校時服務正在跑時手動設的時間會被
 拉回去，這種情況會停下來問要不要先停用它——`-y` 免確認模式一律拒絕，要你先明確
 `ntp off`。細節見 [TIME/README.md](TIME/README.md)。
+
+網路選單（`n`）先偵測這台實際用哪種方式管網路，再決定改哪裡，不依系統版本猜——Ubuntu 22.04
+也可能是 ifupdown。判斷不出來或有衝突就拒絕。SSH 正在用的 IP 不能直接刪，`-y` 也不能跳過。
+細節見 [NET/README.md](NET/README.md)。
 
 封鎖選單（`b`）的 `r` 產生**報告**，回答「這台的 fail2ban 實際做了哪些事」：什麼時候被攻擊、
 偵測到的失敗有多少變成封鎖、誰一再回來、現在封了誰還剩多久、封鎖有沒有真的落到防火牆裡、
@@ -162,6 +170,8 @@ OPS-command/
 │   └── time-set.sh     時區與系統時間：改時區 / 改時鐘 / 校時 / 硬體時鐘
 ├── APPS/               → 詳見 APPS/README.md
 │   └── apps.sh         常用軟體安裝：docker / nc / tcpping / mtr / nginx / tree / git / snmp
+├── NET/                → 詳見 NET/README.md
+│   └── net-set.sh      IP 與 DNS 的增加 / 減少 / 替換（看門狗 + 新舊並存）
 ├── WINDOWS/            → 詳見 WINDOWS/README.md
 │   ├── ops-win.ps1         一行指令的進入點（下載主腳本到 %ProgramData% 再執行）
 │   ├── Win_Admin_Tool.bat  本機進入點（雙擊即可）
@@ -304,8 +314,8 @@ CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假
 > 只用假的 `fail2ban-client` 跑過邏輯測試（60 項）。尤其是 `sync-port` 重啟 fail2ban 之後封鎖是否
 > 確實用新埠重建、firewalld 環境下被沖掉的鏈是否補回，要等真的 fail2ban 跑過才算數。
 
-**`ops.sh` 與六支工具腳本中的五支全部是 POSIX sh**（`SSH/` 的兩支、`FAIL2BAN/`、`TIME/`、
-`APPS/`），**Alpine 的 busybox ash 可以直接執行，不需要安裝 bash。** 需要 bash 的只有兩處：
+**`ops.sh` 與七支工具腳本中的六支全部是 POSIX sh**（`SSH/` 的兩支、`FAIL2BAN/`、`TIME/`、
+`APPS/`、`NET/`），**Alpine 的 busybox ash 可以直接執行，不需要安裝 bash。** 需要 bash 的只有兩處：
 選單第 9 項呼叫的第三方換源腳本，以及壓測用的 `STRESS/stress-test.sh`——兩者都會在執行前
 檢查，缺 bash 就擋下並提示安裝。
 

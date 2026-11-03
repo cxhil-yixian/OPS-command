@@ -11,22 +11,6 @@
 
 ## [Unreleased]
 
-### 新增
-
-- **`WIKI/`：給新手的使用指南**，Linux 與 Windows 各一份，HTML 與 Markdown 兩種格式
-  （`linux.html` / `linux.md` / `windows.html` / `windows.md`）。內容是「三步驟開始、主選單每個鍵的
-  白話說明、照情境寫的使用案例、出問題怎麼辦」，每個按鍵與提問都對照過程式碼。HTML 版是單一檔案、
-  不連外部資源，離線打開即可；Markdown 版給 GitHub 網頁直接閱讀。
-
-### 修正
-
-- **Windows 工具有三種提示還停在分類選單之前的編號**，新手照著畫面按會找不到：
-  - 停止 Windows 更新後說「回主選單選『3. 還原 Windows 更新』」，實際位置是 **C → 2**。
-  - 換 RDP Port 後說「回本選單選『確認新 Port 可用』」，重新連線後是從主選單開始，改成明寫 **A → 2**。
-  - Ping、防火牆 Port、CredSSP、Store、時間同步、RDP 多開這六個掛在分類選單底下的子選單，
-    `0` 寫「返回主選單」，實際是回到分類選單，改成「返回上一層」。
-  只改提示文字，程式行為不變；語法解析 0 錯誤、token 數與改動前相同。
-
 ### 規劃中（還沒做）
 
 sshd 相關、這一版討論過但排到之後的功能：
@@ -37,6 +21,54 @@ sshd 相關、這一版討論過但排到之後的功能：
   但還沒有切換的入口。
 - **會一直存在的黑名單**（`deny` / `undeny`）：目前手動封鎖只存在 fail2ban 的資料庫裡，沒有可管理的清單。
 - **封鎖通知**（Telegram / Webhook）：這一版討論後決定先不做。
+
+---
+
+## [1.16.0] - 2026-11-03
+
+網路設定上線：主選單多了 `n`，IP 與 DNS 可以增減替換，換 IP 時新舊並存加看門狗，
+從新 IP 登入確認後才移除舊的。支援 Ubuntu 22.04 / 24.04、Rocky Linux 9、CentOS 7。
+
+### 新增
+
+- **網路設定：IP 與 DNS 的增加 / 減少 / 替換**（`NET/net-set.sh` 1.0，主選單 `n`）。第一階段支援
+  Ubuntu 22.04 / 24.04、Rocky Linux 9、CentOS 7，其他系統只有 `status` / `doctor`，改設定會拒絕。
+  - 依實際生效的管理方式分流，不依版本猜：`netplan`、`ifupdown`、`nm`（NetworkManager，只用 nmcli）
+    三個後端，有衝突或判斷不出來就拒絕。NM 用 `device reapply` 套用，不重連網卡。
+  - IP 變更先備份、開看門狗（預設 5 分鐘）。`ip-replace` 分兩階段：新舊並存，從新 IP 登入 `confirm`
+    才移除舊 IP。SSH 正在用的 IP 不能 `ip-del`，從舊 IP `confirm` 也會被拒絕，`-y` 都不能跳過。
+  - 未 `confirm` 就重開機，由 `ops-net-watchdog.service` 接手：等開機的網路就緒後重新倒數，
+    時間到自動還原。服務只在變更進行中存在。
+  - 第一版只做 IPv4、同網段替換、不改閘道。DNS 接受 IPv4 與 IPv6，變更前後都實際解析驗證，
+    解析被改壞會自動還原；不能刪最後一台。
+  - `rsService`、cloud-init 這類覆寫來源只警告，不停用。
+  - 實測：Ubuntu 24.04（netplan，含 Proxmox VM 重開機 9 次）與 Ubuntu 22.04（ifupdown）實機，範圍與未驗證項目見
+    [NET/README.md](NET/README.md)。實測抓到的事都寫進了程式：`dig` 逾時把錯誤印在 stdout、
+    閘道代答 ARP 會讓 `arping` 誤判衝突、`promote_secondaries=0` 時刪主位址會連副位址一起消失。
+  - 實測 Rocky 9.8（NetworkManager 1.54，SELinux enforcing，Proxmox VM）：增刪換、主 IP 替換從新 IP
+    `confirm`、DNS、重開機的各種情況都通過。抓到的事：最小安裝沒有 `tar`（改成動手前拒絕）、
+    `ipv6.method=disabled` 不收 IPv6 DNS（改成動手前拒絕）、tar 還原後要 `restorecon`。
+  - 實測 CentOS 7.9（NM 1.18，ifcfg，SELinux enforcing）：同一套項目全部通過。抓到的事：
+    `ifcfg-eth0.bak.<日期>` 被 NM 載入成會自動連線的連線（新增警告：同網卡還有其他會自動連線的連線）、
+    IPv6 停用在 1.18 是 `ignore`、沒有 python3（DNS 事先查詢改成 python2 也能跑）。
+  - 刪位址時用 `grep -F "IP/"` 過濾，會連尾數相同的另一個位址（`1.2.3.4` 對 `11.2.3.4`）一起拿掉，
+    三個後端都改成從字首比對。
+
+- **`WIKI/`：給新手的使用指南**，Linux 與 Windows 各一份，HTML 與 Markdown 兩種格式
+  （`linux.html` / `linux.md` / `windows.html` / `windows.md`）。內容是「三步驟開始、主選單每個鍵的
+  白話說明、照情境寫的使用案例、出問題怎麼辦」，每個按鍵與提問都對照過程式碼。HTML 版是單一檔案、
+  不連外部資源，離線打開即可；Markdown 版給 GitHub 網頁直接閱讀。
+  - Linux 版補上網路設定：主選單的 `n`、案例 J「增加或更換 IP」、案例 K「更換 DNS」，以及
+    「新 IP 連不進來」「IP 不在設定裡」兩條排錯。
+
+### 修正
+
+- **Windows 工具有三種提示還停在分類選單之前的編號**，新手照著畫面按會找不到：
+  - 停止 Windows 更新後說「回主選單選『3. 還原 Windows 更新』」，實際位置是 **C → 2**。
+  - 換 RDP Port 後說「回本選單選『確認新 Port 可用』」，重新連線後是從主選單開始，改成明寫 **A → 2**。
+  - Ping、防火牆 Port、CredSSP、Store、時間同步、RDP 多開這六個掛在分類選單底下的子選單，
+    `0` 寫「返回主選單」，實際是回到分類選單，改成「返回上一層」。
+  只改提示文字，程式行為不變；語法解析 0 錯誤、token 數與改動前相同。
 
 ---
 
@@ -1306,7 +1338,8 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
-[Unreleased]: https://github.com/cxhil-yixian/OPS-command/compare/v1.15.0...HEAD
+[Unreleased]: https://github.com/cxhil-yixian/OPS-command/compare/v1.16.0...HEAD
+[1.16.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.15.0...v1.16.0
 [1.15.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.14.0...v1.15.0
 [1.14.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.3...v1.14.0
 [1.13.3]: https://github.com/cxhil-yixian/OPS-command/compare/v1.13.2...v1.13.3
