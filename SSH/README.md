@@ -129,6 +129,8 @@ override。所以就算新埠完全連不上、你連視窗都關了，時限到
 | `/var/log/OPS-ssh/selfheal.rate` / `.lock` | 連線速率基準與取證的重入鎖 |
 | `/var/log/OPS-ssh/fail2ban-ops.log` | `../FAIL2BAN/fail2ban.sh` 的操作稽核 |
 | `/var/log/OPS-ssh/time-ops.log` | `../TIME/time-set.sh` 的操作稽核（改時區 / 改時鐘 / 校時） |
+| `/var/log/OPS-ssh/net-ops.log` | `../NET/net-set.sh` 的操作稽核（IP / DNS 變更） |
+| `/var/log/OPS-ssh/net-set/` | IP 變更的狀態、看門狗與設定備份，同樣不能在 `confirm` 前清掉 |
 | `/etc/ssh/sshd_config.d/00-ssh-port.conf` | drop-in（僅 OpenSSH 8.2+），**這是設定檔不是產出物** |
 
 > 目錄權限 750（報告裡有來源 IP、被嘗試的帳號、`authorized_keys` 時間戳，不該讓其他

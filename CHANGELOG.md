@@ -13,6 +13,20 @@
 
 ### 新增
 
+- **網路設定：IP 與 DNS 的增加 / 減少 / 替換**（`NET/net-set.sh` 1.0，主選單 `n`）。第一階段支援
+  Ubuntu 22.04 / 24.04，其他系統只有 `status` / `doctor`，改設定會拒絕。
+  - 依實際生效的管理方式分流，不依版本猜：`netplan` 與 `ifupdown` 兩個後端，有衝突或判斷不出來就拒絕。
+  - IP 變更先備份、開看門狗（預設 5 分鐘）。`ip-replace` 分兩階段：新舊並存，從新 IP 登入 `confirm`
+    才移除舊 IP。SSH 正在用的 IP 不能 `ip-del`，從舊 IP `confirm` 也會被拒絕，`-y` 都不能跳過。
+  - 未 `confirm` 就重開機，由 `ops-net-watchdog.service` 接手：等開機的網路就緒後重新倒數，
+    時間到自動還原。服務只在變更進行中存在。
+  - 第一版只做 IPv4、同網段替換、不改閘道。DNS 接受 IPv4 與 IPv6，變更前後都實際解析驗證，
+    解析被改壞會自動還原；不能刪最後一台。
+  - `rsService`、cloud-init 這類覆寫來源只警告，不停用。
+  - 實測：Ubuntu 24.04（netplan，含 Proxmox VM 重開機 9 次）與 Ubuntu 22.04（ifupdown）實機，範圍與未驗證項目見
+    [NET/README.md](NET/README.md)。實測抓到的事都寫進了程式：`dig` 逾時把錯誤印在 stdout、
+    閘道代答 ARP 會讓 `arping` 誤判衝突、`promote_secondaries=0` 時刪主位址會連副位址一起消失。
+
 - **常用軟體多三項：`tree`、`git`、`snmp`**（`apps.sh` 1.1，選單 `a` 的 6 / 7 / 8，「全部」改為 9）。
   - `snmp` 同時裝 **snmpd 代理與 snmpwalk / snmpget 查詢工具**：RHEL 系 `net-snmp net-snmp-utils`、
     Debian 系 `snmpd snmp`、Alpine `net-snmp net-snmp-tools`、zypper / pacman `net-snmp`。兩個指令都在
