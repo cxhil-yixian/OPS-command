@@ -65,7 +65,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 
 ```
 ────────────────────────────────────────────────────────────────────
- OPS-command 運維工具箱  v1.16
+ OPS-command 運維工具箱  v1.16.1
 ────────────────────────────────────────────────────────────────────
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
