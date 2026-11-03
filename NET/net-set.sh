@@ -1,7 +1,7 @@
 #!/bin/sh
 # net-set.sh — IP 與 DNS 伺服器的增加 / 減少 / 替換
 #
-# 支援（會改設定）：Ubuntu 22.04 / 24.04
+# 支援（會改設定）：Ubuntu 22.04 / 24.04、Rocky Linux 9
 # 其餘發行版目前只有 status / doctor，改設定會直接拒絕。
 #
 # 用法：
@@ -27,7 +27,8 @@
 #   5. DNS 改錯不會斷 SSH，所以不開看門狗，改用變更前後的實際解析來驗證。
 #   6. rsService、cloud-init 這類覆寫來源只警告，不停用 —— 那是廠商的東西。
 #
-# 以 POSIX sh 撰寫。netplan 後端需要 python3-yaml（netplan 本身的相依）。
+# 以 POSIX sh 撰寫。netplan 後端需要 python3-yaml（netplan 本身的相依）；
+# NetworkManager 後端只用 nmcli。
 
 set -u
 
@@ -49,6 +50,8 @@ WD_UNIT_FILE="/etc/systemd/system/$WD_UNIT"
 IFACES_MAIN=/etc/network/interfaces
 IFACES_DIR=/etc/network/interfaces.d
 NETPLAN_DIR=/etc/netplan
+NM_CONN_DIR=/etc/NetworkManager/system-connections
+NM_IFCFG_DIR=/etc/sysconfig/network-scripts
 RESOLV=/etc/resolv.conf
 
 # 驗證解析用的網域。內網 DNS 查不到外部網域時，設 OPS_NET_TESTNAME 指到內部網域。
@@ -175,7 +178,7 @@ detect_env() {
 
 os_supported() {
     case "$OS_ID:$OS_VER" in
-        ubuntu:22.04|ubuntu:24.04) return 0 ;;
+        ubuntu:22.04|ubuntu:24.04|rocky:9|rocky:9.*) return 0 ;;
     esac
     return 1
 }
@@ -211,7 +214,7 @@ netplan_used() {
     has netplan && [ -n "$(netplan_files)" ]
 }
 
-# BACKEND = netplan | ifupdown | none；BACKEND_WHY 是拒絕時要講的原因
+# BACKEND = netplan | ifupdown | nm | none；BACKEND_WHY 是拒絕時要講的原因
 detect_backend() {
     BACKEND=none; BACKEND_WHY=''
     _np=0; _if=0
@@ -222,7 +225,16 @@ detect_backend() {
         return 0
     fi
     if svc_active NetworkManager; then
-        BACKEND_WHY="NetworkManager 正在執行，這個版本還沒有 NetworkManager 後端"
+        # 有 netplan / ifupdown 設定又有 NM 在跑（Ubuntu 桌面版那種），分不出誰說了算
+        if [ "$_np" = 1 ] || [ "$_if" = 1 ]; then
+            BACKEND_WHY="NetworkManager 正在執行，同時又有 netplan 或 ifupdown 設定，無法判斷哪一邊生效"
+            return 0
+        fi
+        if ! has nmcli; then
+            BACKEND_WHY="NetworkManager 正在執行，但找不到 nmcli"
+            return 0
+        fi
+        BACKEND=nm
         return 0
     fi
     if [ "$_np" = 1 ]; then
@@ -244,7 +256,7 @@ detect_backend() {
 }
 
 # 拿 resolv.conf 的實際來源判斷 DNS 要寫哪裡。
-# DNS_MODE = file | netplan-resolved | none
+# DNS_MODE = file | netplan-resolved | nm | none
 detect_dns_mode() {
     DNS_MODE=none; DNS_WHY=''
     if [ -L "$RESOLV" ]; then
@@ -262,7 +274,7 @@ detect_dns_mode() {
         esac
     elif [ -f "$RESOLV" ]; then
         if svc_active NetworkManager; then
-            DNS_WHY="NetworkManager 可能改寫 $RESOLV，這個版本還沒有支援"
+            nm_dns_mode
         else
             DNS_MODE=file
         fi
@@ -293,6 +305,10 @@ override_sources() {
         printf '%s\n' "cloud-init：網路設定未停用，開機時可能重新產生"
         [ -f "$NETPLAN_DIR/50-cloud-init.yaml" ] && \
             printf '%s\n' "$NETPLAN_DIR/50-cloud-init.yaml：這份檔案由 cloud-init 產生"
+        for _f in "$NM_CONN_DIR"/* "$NM_IFCFG_DIR"/ifcfg-*; do
+            [ -f "$_f" ] && grep -qsi 'cloud-init' "$_f" && \
+                printf '%s\n' "$_f：這份檔案由 cloud-init 產生"
+        done
     fi
     return 0
 }
@@ -664,13 +680,139 @@ warn_comment_loss() {
 }
 
 # =========================================================
+# NetworkManager 後端（Rocky 9）
+#   只透過 nmcli 改連線設定，不直接編 keyfile / ifcfg；
+#   套用用 device reapply，不做 connection up，避免整張網卡斷線重連。
+# =========================================================
+# -g 是 terse 模式：值裡的 ":" 會被跳脫成 "\:"，多值以逗號分隔
+nm_get() {   # $1 連線 UUID $2 欄位
+    nmcli -g "$2" connection show "$1" 2>/dev/null | sed 's/\\:/:/g'
+}
+
+# 「位址/前綴」清單依位址過濾。grep -F "1.2.3.4/" 會連 11.2.3.4/24 一起比中，所以從開頭比
+addr_drop() { awk -v p="$1/" 'index($0, p) != 1'; }
+addr_keep() { awk -v p="$1/" 'index($0, p) == 1'; }
+
+nm_split() { tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'; }
+
+# 網卡目前用的連線。成功時設定 NM_UUID / NM_NAME / NM_FILE，失敗時 NM_WHY 是原因
+nm_iface_check() {   # $1 網卡
+    NM_UUID=''; NM_NAME=''; NM_FILE=''; NM_WHY=''
+    _st=$(nmcli -g GENERAL.STATE device show "$1" 2>/dev/null)
+    case "$_st" in
+        100*) : ;;
+        *) NM_WHY="$1 不是由 NetworkManager 管理中的連線（狀態：${_st:-查不到}）"; return 1 ;;
+    esac
+    NM_UUID=$(nmcli -g GENERAL.CON-UUID device show "$1" 2>/dev/null)
+    NM_NAME=$(nmcli -g GENERAL.CONNECTION device show "$1" 2>/dev/null)
+    [ -n "$NM_UUID" ] || { NM_WHY="$1 沒有作用中的 NetworkManager 連線"; return 1; }
+    NM_FILE=$(nmcli -t -f UUID,FILENAME connection show 2>/dev/null | \
+        awk -F: -v u="$NM_UUID" '$1 == u { sub(/^[^:]*:/, ""); print; exit }')
+    # 設定檔不在 /etc（initrd 或 /run 產生的暫時連線）時，nmcli 改了會在 /etc 生出新檔，
+    # 備份還原刪不掉它，等於還原不乾淨
+    case "$NM_FILE" in
+        "$NM_CONN_DIR"/*|"$NM_IFCFG_DIR"/*) : ;;
+        '') NM_WHY="連線「$NM_NAME」沒有設定檔（只存在記憶體），還原不乾淨，這裡不處理"; return 1 ;;
+        *) NM_WHY="連線「$NM_NAME」的設定檔在 $NM_FILE，不在 /etc 底下，還原不乾淨，這裡不處理"; return 1 ;;
+    esac
+    return 0
+}
+
+nm_iface_guard() { nm_iface_check "$1" || die "$NM_WHY"; }
+
+nm_addrs() {   # $1 網卡 → 連線設定裡的 IPv4 位址，一行一個
+    nm_iface_check "$1" || return 1
+    nm_get "$NM_UUID" ipv4.addresses | nm_split
+}
+
+nm_addrs_set() {   # $1 網卡 $2 位址清單（一行一個）
+    nm_iface_check "$1" || { err "$NM_WHY"; return 1; }
+    _l=$(printf '%s\n' "$2" | sed '/^$/d' | paste -sd, -)
+    if ! _o=$(nmcli connection modify "$NM_UUID" ipv4.addresses "$_l" 2>&1); then
+        err "nmcli 修改失敗：$_o"
+        return 1
+    fi
+}
+
+# 讓 NM 重新讀檔（還原時檔案是被換掉的），再把連線設定套到網卡上
+nm_apply() {   # $1 網卡
+    nmcli connection reload >/dev/null 2>&1
+    if ! _o=$(nmcli device reapply "$1" 2>&1); then
+        err "nmcli device reapply 失敗：$_o"
+        return 1
+    fi
+    return 0
+}
+
+nm_dns_list() {   # $1 網卡
+    nm_iface_check "$1" || return 1
+    { nm_get "$NM_UUID" ipv4.dns | nm_split; nm_get "$NM_UUID" ipv6.dns | nm_split; }
+}
+
+nm_dns_order() {   # $@ → IPv4 在前、IPv6 在後，各自保持原順序
+    _v4=''; _v6=''
+    for _d in "$@"; do
+        case "$_d" in *:*) _v6="$_v6 $_d" ;; *) _v4="$_v4 $_d" ;; esac
+    done
+    printf '%s' "$_v4$_v6" | sed 's/^ //'
+}
+
+nm_dns_set() {   # $1 網卡 其餘 = 新清單
+    _if=$1; shift
+    nm_iface_check "$_if" || { err "$NM_WHY"; return 1; }
+    _v4=''; _v6=''
+    for _d in "$@"; do
+        case "$_d" in *:*) _v6="$_v6${_v6:+,}$_d" ;; *) _v4="$_v4${_v4:+,}$_d" ;; esac
+    done
+    set -- ipv4.dns "$_v4"
+    # ipv6.method=disabled 的連線不一定收 ipv6.dns，沒有要改就不碰
+    if [ -n "$_v6" ] || [ -n "$(nm_get "$NM_UUID" ipv6.dns)" ]; then
+        set -- "$@" ipv6.dns "$_v6"
+    fi
+    if ! _o=$(nmcli connection modify "$NM_UUID" "$@" 2>&1); then
+        err "nmcli 修改失敗：$_o"
+        return 1
+    fi
+}
+
+# NM 自己怎麼處理 resolv.conf。defaults 在 --print-config 裡是註解行，讀不到就是預設值
+nm_dns_mode() {
+    _cfg=$(NetworkManager --print-config 2>/dev/null)
+    _dns=$(printf '%s\n' "$_cfg" | awk -F= '/^\[/ { s = $0 } s == "[main]" && $1 == "dns" { print $2 }')
+    _rc=$(printf '%s\n' "$_cfg" | awk -F= '/^\[/ { s = $0 } s == "[main]" && $1 == "rc-manager" { print $2 }')
+    if [ "$_dns" = none ] || [ "$_rc" = unmanaged ]; then
+        DNS_MODE=file
+        return 0
+    fi
+    case "$_dns" in
+        ''|default) : ;;
+        *) DNS_WHY="NetworkManager 的 dns=$_dns，這個模式還沒有支援"; return 0 ;;
+    esac
+    if [ "$BACKEND" != nm ]; then
+        DNS_WHY="NetworkManager 會改寫 $RESOLV，但網卡不是它管理，這個組合還沒有支援"
+        return 0
+    fi
+    _di=$(default_iface)
+    if ! nm_iface_check "$_di"; then
+        DNS_WHY=$NM_WHY
+        return 0
+    fi
+    # DHCP 給的 DNS 會跟手動設的混在一起，改了也算不清楚哪些是誰的
+    if [ "$(nm_get "$NM_UUID" ipv4.method)" = auto ] && [ "$(nm_get "$NM_UUID" ipv4.ignore-auto-dns)" != yes ]; then
+        DNS_WHY="連線「$NM_NAME」是 DHCP 且採用 DHCP 給的 DNS，這個組合還沒有支援"
+        return 0
+    fi
+    DNS_MODE=nm
+}
+
+# =========================================================
 # 備份與狀態
 # =========================================================
 backup_net() {
     mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
     BACKUP="$STATE_DIR/backup-$(date +%Y%m%d-%H%M%S).tar"
     _l=''
-    for _p in "$RESOLV" "$IFACES_MAIN" "$IFACES_DIR" "$NETPLAN_DIR"; do
+    for _p in "$RESOLV" "$IFACES_MAIN" "$IFACES_DIR" "$NETPLAN_DIR" "$NM_CONN_DIR" "$NM_IFCFG_DIR"; do
         [ -e "$_p" ] && _l="$_l ${_p#/}"
     done
     # shellcheck disable=SC2086
@@ -680,9 +822,32 @@ backup_net() {
     ls -1t "$STATE_DIR"/backup-*.tar 2>/dev/null | sed 1,20d | while IFS= read -r _o; do rm -f "$_o"; done
 }
 
+# 備份與還原都靠 tar。Rocky 9 最小安裝沒有 tar，到備份那步才失敗太晚
+tar_guard() {
+    has tar && return 0
+    if has dnf; then die "缺少 tar，備份要用到。請先安裝：dnf install -y tar"; fi
+    die "缺少 tar，備份要用到，請先安裝"
+}
+
 restore_backup() {
     [ -f "$1" ] || { err "找不到備份 $1"; return 1; }
-    tar -xpf "$1" -C / 2>/dev/null
+    tar -xpf "$1" -C / 2>/dev/null || return 1
+    # tar 解出來的是新檔，SELinux 標籤不一定對；標籤錯了 NetworkManager 會讀不到
+    if has restorecon; then
+        for _p in "$RESOLV" "$NM_CONN_DIR" "$NM_IFCFG_DIR"; do
+            [ -e "$_p" ] && restorecon -R "$_p" >/dev/null 2>&1
+        done
+    fi
+    return 0
+}
+
+# 還原檔案之後讓後端重新讀設定
+backend_reload() {
+    case "$BACKEND" in
+        netplan) np_apply ;;
+        nm) nm_apply "$IFACE" ;;
+    esac
+    return 0
 }
 
 state_set() {
@@ -873,11 +1038,15 @@ apply_add() {   # $1 位址 $2 前綴
             np addr-add "$IFACE" "$1/$2" || return 1
             np_apply || return 1
             live_add "$IFACE" "$1/$2" '' ;;
+        nm)
+            nm_addrs_set "$IFACE" "$(nm_addrs "$IFACE"; printf '%s\n' "$1/$2")" || return 1
+            nm_apply "$IFACE" || return 1
+            live_add "$IFACE" "$1/$2" '' ;;
     esac
 }
 
 apply_del() {   # $1 位址
-    _want=$(live_addrs "$IFACE" | grep -vF "$1/" | tr '\n' ' ')
+    _want=$(live_addrs "$IFACE" | addr_drop "$1" | tr '\n' ' ')
     promote_on "$IFACE"
     case "$BACKEND" in
         ifupdown)
@@ -888,6 +1057,10 @@ apply_del() {   # $1 位址
             np addr-del "$IFACE" "$1" || { promote_off "$IFACE"; return 1; }
             np_apply || { promote_off "$IFACE"; return 1; }
             live_del "$IFACE" "$1" ;;
+        nm)
+            nm_addrs_set "$IFACE" "$(nm_addrs "$IFACE" | addr_drop "$1")" || { promote_off "$IFACE"; return 1; }
+            nm_apply "$IFACE" || { promote_off "$IFACE"; return 1; }
+            live_del "$IFACE" "$1" ;;
     esac
     promote_off "$IFACE"
     ensure_addrs "$IFACE" "$_want"
@@ -895,7 +1068,7 @@ apply_del() {   # $1 位址
 
 # 第二階段：讓新位址接手舊位址在設定檔裡的位置，再從網卡拿掉舊的
 apply_finish_replace() {   # $1 舊 $2 新 $3 前綴
-    _want=$(live_addrs "$IFACE" | grep -vF "$1/" | tr '\n' ' ')
+    _want=$(live_addrs "$IFACE" | addr_drop "$1" | tr '\n' ' ')
     promote_on "$IFACE"
     case "$BACKEND" in
         ifupdown)
@@ -908,6 +1081,12 @@ apply_finish_replace() {   # $1 舊 $2 新 $3 前綴
             np addr-replace "$IFACE" "$1" "$2/$3" || { promote_off "$IFACE"; return 1; }
             np_apply || { promote_off "$IFACE"; return 1; }
             live_del "$IFACE" "$1" ;;
+        nm)
+            # 新位址接手舊位址在清單裡的位置：NM 把第一個當主位址
+            _l=$(nm_addrs "$IFACE" | addr_drop "$2" | awk -v o="$1/" -v n="$2/$3" 'index($0, o) == 1 { print n; next } { print }')
+            nm_addrs_set "$IFACE" "$_l" || { promote_off "$IFACE"; return 1; }
+            nm_apply "$IFACE" || { promote_off "$IFACE"; return 1; }
+            live_del "$IFACE" "$1" ;;
     esac
     promote_off "$IFACE"
     ensure_addrs "$IFACE" "$_want"
@@ -915,7 +1094,7 @@ apply_finish_replace() {   # $1 舊 $2 新 $3 前綴
 
 do_rollback() {
     restore_backup "$BACKUP" || return 1
-    [ "$BACKEND" = netplan ] && np_apply
+    backend_reload
     ensure_addrs "$IFACE" "$ADDRS_BEFORE"
     ensure_gw "$GW_BEFORE" "$GWDEV_BEFORE" || err "預設閘道還原失敗，請從主控台確認"
     rm -f "$STATE"
@@ -929,10 +1108,11 @@ change_guard() {
             die "看門狗需要本腳本的實體路徑，請改用 ops.sh 或 git clone 後執行" ;;
     esac
     [ -f "$SELF" ] || die "看門狗需要本腳本的實體路徑，請改用 ops.sh 或 git clone 後執行"
-    os_supported || die "${OS_NAME:-這個系統} 還沒有支援改設定（目前只支援 Ubuntu 22.04 / 24.04）"
+    os_supported || die "${OS_NAME:-這個系統} 還沒有支援改設定（目前只支援 Ubuntu 22.04 / 24.04、Rocky Linux 9）"
     detect_backend
     [ "$BACKEND" != none ] || die "拒絕變更：$BACKEND_WHY"
     has ip || die "找不到 ip 指令"
+    tar_guard
     mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
     pending_guard
 }
@@ -954,6 +1134,10 @@ managed_guard() {   # $1 位址 $2 網卡
         netplan)
             np_has_addr "$2" "$1" || \
                 die "$1 不在 netplan 設定裡（可能是 DHCP 或暫時加上的），這裡不處理" ;;
+        nm)
+            nm_iface_guard "$2"
+            [ -n "$(nm_addrs "$2" | addr_keep "$1")" ] || \
+                die "$1 不在 NetworkManager 連線「$NM_NAME」的 ipv4.addresses 裡（可能是 DHCP 或暫時加上的），這裡不處理" ;;
     esac
 }
 
@@ -1010,6 +1194,7 @@ cmd_ip_add() {
     fi
     ip_usable "$NEW_IP" "$PREFIX" || die "$NEW_IP/$PREFIX 不能設在網卡上（網路位址、廣播或保留位址）"
     [ "$NEW_IP" != "$(default_gw)" ] || die "$NEW_IP 是預設閘道"
+    [ "$BACKEND" = nm ] && nm_iface_guard "$IFACE"
     if ip_taken "$NEW_IP" "$IFACE"; then
         die "$NEW_IP 在網路上已經有人回應，疑似被使用中"
     fi
@@ -1055,6 +1240,11 @@ cmd_ip_del() {
             *) [ "$(if_base_count "$_lbl")" -gt 1 ] || \
                    die "$OLD_IP 是 $_lbl 唯一的主位址，不能刪除。要換位址請用 ip-replace" ;;
         esac
+    fi
+
+    if [ "$BACKEND" = nm ] && [ "$(nm_get "$NM_UUID" ipv4.method)" = manual ] && \
+       [ -z "$(nm_addrs "$IFACE" | addr_drop "$OLD_IP")" ]; then
+        die "$OLD_IP 是連線「$NM_NAME」唯一的位址，手動設定的連線至少要留一個。要換位址請用 ip-replace"
     fi
 
     # 預設閘道要還到得了：刪掉之後同網卡必須還有位址跟閘道同網段
@@ -1190,6 +1380,7 @@ dns_list() {
     case "$DNS_MODE" in
         file) awk '$1 == "nameserver" { print $2 }' "$RESOLV" ;;
         netplan-resolved) np show "$(dns_iface)" 2>/dev/null | awk '$1 == "dns" { print $2 }' ;;
+        nm) nm_dns_list "$(dns_iface)" ;;
     esac
 }
 
@@ -1261,7 +1452,18 @@ dns_write() {
         netplan-resolved)
             np dns-set "$(dns_iface)" "$@" || return 1
             np_apply ;;
+        nm)
+            nm_dns_set "$(dns_iface)" "$@" || return 1
+            nm_apply "$(dns_iface)" ;;
     esac
+}
+
+dns_reload() {
+    case "$DNS_MODE" in
+        netplan-resolved) np_apply ;;
+        nm) nm_apply "$(dns_iface)" ;;
+    esac
+    return 0
 }
 
 # systemd-resolved 有快取，不先清掉的話 DNS 全壞了也查得到
@@ -1274,10 +1476,12 @@ resolves_now() {
 
 dns_guard() {
     need_root
-    os_supported || die "${OS_NAME:-這個系統} 還沒有支援改設定（目前只支援 Ubuntu 22.04 / 24.04）"
+    os_supported || die "${OS_NAME:-這個系統} 還沒有支援改設定（目前只支援 Ubuntu 22.04 / 24.04、Rocky Linux 9）"
     detect_backend
     detect_dns_mode
     [ "$DNS_MODE" != none ] || die "拒絕變更：$DNS_WHY"
+    [ "$DNS_MODE" = nm ] && nm_iface_guard "$(dns_iface)"
+    tar_guard
     # 在 netplan 模式下還原 IP 會把同一份檔案蓋回去，所以不交錯進行
     pending_guard
     DNS_CUR=$(dns_list | tr '\n' ' ' | sed 's/ $//')
@@ -1286,6 +1490,15 @@ dns_guard() {
 # $1 = 動作說明；其餘 = 新清單
 dns_change() {
     _what=$1; shift
+    if [ "$DNS_MODE" = nm ]; then
+        # NM 把 IPv4 與 IPv6 分開存，寫進 resolv.conf 時 IPv4 在前，混著排的順序留不住
+        _ord=$(nm_dns_order "$@")
+        if [ "$_ord" != "$*" ]; then
+            warn "NetworkManager 的 IPv4 DNS 一律排在 IPv6 前面，順序改為：$_ord"
+            # shellcheck disable=SC2086
+            set -- $_ord
+        fi
+    fi
     step "$_what"
     info "目前：${DNS_CUR:-（空）}"
     info "改為：$*"
@@ -1299,6 +1512,15 @@ dns_change() {
         netplan-resolved)
             info "寫入 netplan 的 $(dns_iface) nameservers，再由 systemd-resolved 套用"
             warn_comment_loss "$(dns_iface)" ;;
+        nm)
+            # 實測 Rocky 9.8：method=disabled 時 nmcli 直接拒收 ipv6.dns，而 ipv4.dns 只收 IPv4
+            case " $* " in
+                *:*)
+                    [ "$(nm_get "$NM_UUID" ipv6.method)" = disabled ] && \
+                        die "連線「$NM_NAME」的 IPv6 已停用（ipv6.method=disabled），NetworkManager 不接受 IPv6 DNS" ;;
+            esac
+            info "寫入 NetworkManager 連線「$NM_NAME」的 ipv4.dns / ipv6.dns，再由它改寫 $RESOLV"
+            [ $# -gt 3 ] && warn "glibc 只會用前 3 台，第 4 台之後不會被查" ;;
     esac
     warn_overrides
     [ "$DRY" = 1 ] && { info "乾跑：不做任何變更"; return 0; }
@@ -1310,7 +1532,7 @@ dns_change() {
     if ! dns_write "$@"; then
         err "寫入失敗，還原"
         restore_backup "$BACKUP"
-        [ "$DNS_MODE" = netplan-resolved ] && np_apply
+        dns_reload
         exit 1
     fi
 
@@ -1318,7 +1540,7 @@ dns_change() {
     if [ "$_now" != "$*" ]; then
         err "回讀不符：$_now"
         restore_backup "$BACKUP"
-        [ "$DNS_MODE" = netplan-resolved ] && np_apply
+        dns_reload
         exit 1
     fi
 
@@ -1327,7 +1549,7 @@ dns_change() {
     elif [ "$_base" = 1 ]; then
         err "變更後解析不了 $TESTNAME，變更前可以，還原"
         restore_backup "$BACKUP"
-        [ "$DNS_MODE" = netplan-resolved ] && np_apply
+        dns_reload
         exit 1
     else
         warn "解析 $TESTNAME 失敗，但變更前也失敗，不視為這次變更造成"
@@ -1455,6 +1677,14 @@ cmd_doctor() {
     if [ -n "$_pd" ] && [ "$(sysctl -n net.ipv4.conf.all.promote_secondaries 2>/dev/null)" != 1 ] && \
        [ "$(sysctl -n "net.ipv4.conf.$_pd.promote_secondaries" 2>/dev/null)" != 1 ]; then
         info "$_pd 的 promote_secondaries 沒開：刪主位址時核心會連副位址一起移除，工具動手時會暫時打開"
+    fi
+    _pd=$(default_iface)
+    if [ "$BACKEND" = nm ] && [ -n "$_pd" ]; then
+        if nm_iface_check "$_pd"; then
+            ok "$_pd 由 NetworkManager 連線「$NM_NAME」管理（$NM_FILE，ipv4.method=$(nm_get "$NM_UUID" ipv4.method)）"
+        else
+            err "$NM_WHY"
+        fi
     fi
     if [ "$BACKEND" = ifupdown ] && [ "$DNS_MODE" = file ] && \
        grep -hqE '^[[:space:]]*dns-nameservers' $(ifupdown_files) 2>/dev/null; then

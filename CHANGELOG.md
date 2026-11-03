@@ -14,8 +14,9 @@
 ### 新增
 
 - **網路設定：IP 與 DNS 的增加 / 減少 / 替換**（`NET/net-set.sh` 1.0，主選單 `n`）。第一階段支援
-  Ubuntu 22.04 / 24.04，其他系統只有 `status` / `doctor`，改設定會拒絕。
-  - 依實際生效的管理方式分流，不依版本猜：`netplan` 與 `ifupdown` 兩個後端，有衝突或判斷不出來就拒絕。
+  Ubuntu 22.04 / 24.04、Rocky Linux 9，其他系統只有 `status` / `doctor`，改設定會拒絕。
+  - 依實際生效的管理方式分流，不依版本猜：`netplan`、`ifupdown`、`nm`（NetworkManager，只用 nmcli）
+    三個後端，有衝突或判斷不出來就拒絕。NM 用 `device reapply` 套用，不重連網卡。
   - IP 變更先備份、開看門狗（預設 5 分鐘）。`ip-replace` 分兩階段：新舊並存，從新 IP 登入 `confirm`
     才移除舊 IP。SSH 正在用的 IP 不能 `ip-del`，從舊 IP `confirm` 也會被拒絕，`-y` 都不能跳過。
   - 未 `confirm` 就重開機，由 `ops-net-watchdog.service` 接手：等開機的網路就緒後重新倒數，
@@ -26,6 +27,11 @@
   - 實測：Ubuntu 24.04（netplan，含 Proxmox VM 重開機 9 次）與 Ubuntu 22.04（ifupdown）實機，範圍與未驗證項目見
     [NET/README.md](NET/README.md)。實測抓到的事都寫進了程式：`dig` 逾時把錯誤印在 stdout、
     閘道代答 ARP 會讓 `arping` 誤判衝突、`promote_secondaries=0` 時刪主位址會連副位址一起消失。
+  - 實測 Rocky 9.8（NetworkManager 1.54，SELinux enforcing，Proxmox VM）：增刪換、主 IP 替換從新 IP
+    `confirm`、DNS、重開機的各種情況都通過。抓到的事：最小安裝沒有 `tar`（改成動手前拒絕）、
+    `ipv6.method=disabled` 不收 IPv6 DNS（改成動手前拒絕）、tar 還原後要 `restorecon`。
+  - 刪位址時用 `grep -F "IP/"` 過濾，會連尾數相同的另一個位址（`1.2.3.4` 對 `11.2.3.4`）一起拿掉，
+    三個後端都改成從字首比對。
 
 - **常用軟體多三項：`tree`、`git`、`snmp`**（`apps.sh` 1.1，選單 `a` 的 6 / 7 / 8，「全部」改為 9）。
   - `snmp` 同時裝 **snmpd 代理與 snmpwalk / snmpget 查詢工具**：RHEL 系 `net-snmp net-snmp-utils`、
