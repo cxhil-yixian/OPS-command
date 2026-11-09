@@ -1381,6 +1381,397 @@ function Show-RdpLoginsPanel {
 
 # ================= 帳號與安全 =================
 
+# ---- RDP 暴力破解自動封鎖（Windows 版 fail2ban，E2）----
+# 帳號鎖定擋不住來源：攻擊者一直猜，被鎖的是合法使用者（見 README「已知限制」）。
+# 這裡改成依「來源 IP」封鎖：Security 4625（登入失敗）的 IpAddress，同一個 IP 在
+# 時間窗內失敗次數達到門檻，就建一條本工具自己的防火牆封鎖規則，到期自動解封。
+#
+# 安全設計（同 W2 看門狗）：
+#   - 以 SYSTEM 執行的排程（OPS-RdpGuard，每 1 分鐘），程式碼用 -EncodedCommand 放進排程本身，
+#     不落地成檔案；一般使用者改不到。
+#   - 設定與封鎖清單存 HKLM:\SOFTWARE\OPS-command\RdpGuard（只有 Administrators / SYSTEM 可寫）：
+#       Threshold / WindowMin / BanMin / Scope(Rdp|All) / Whitelist(MultiString)
+#       Bans\<IP>    = "到期時間|失敗次數"
+#       Forgive\<IP> = 解封時間；這之前的失敗不再計數（否則剛解封就被時間窗裡的舊紀錄再封一次）
+#       LastRun / LastResult / RuleSig / TotalBans
+#   - SYSTEM 不寫任何檔案，紀錄寫 Windows 事件記錄（應用程式，來源 OPS-command）：
+#       300 = 封鎖、301 = 解封（到期／白名單／手動）、302 = 守護執行失敗
+#     （100 是 RDP 看門狗，200/201 是操作記錄）
+#   - 白名單一定生效：127.0.0.0/8、::1、本機自己的位址固定加入；啟用時把目前連進來的來源
+#     （Established 且本機端是監聽中的 Port）自動加入。已封鎖的 IP 後來進了白名單，下一輪就解封。
+#   - 防火牆規則名稱固定 OPS-RdpGuard-<IP>-TCP / -UDP / -ALL，群組 OPS-RdpGuard；只刪自己建的。
+#   - 預設只擋 RDP Port（TCP+UDP，登錄檔實際值；換 Port 看門狗進行中時新舊兩個都擋），
+#     SSH 等其他管道留著當救援；可改成「全部連入」。4625 不分服務（RDP、SMB、SSH 都會產生），
+#     攻擊者若同時打別的服務，選「全部連入」才擋得完。
+#
+# 下面 $Script:RdpGuardCoreFunctions 列的函式會原封不動放進排程，所以它們只能用字面值、
+# 不能用 $Script: 變數或這支腳本的其他函式。Get-RdpGuardPlan 是純函式（不讀系統），
+# 測試時可以餵假事件驗證門檻、時間窗與到期。
+$Script:RdpGuardKey  = 'HKLM:\SOFTWARE\OPS-command\RdpGuard'
+$Script:RdpGuardTask = 'OPS-RdpGuard'
+$Script:RdpGuardAuditGuid = '{0CCE9215-69AE-11D9-BED3-505054503030}'   # 稽核「登入」子類別（zh-TW 名稱是中文，用 GUID 查）
+$Script:RdpGuardCoreFunctions = @('Test-RdpGuardIpIn', 'Get-RdpGuardPlan', 'Get-RdpGuardFailures', 'Write-RdpGuardEvent',
+    'Set-RdpGuardRule', 'Remove-RdpGuardRule', 'Get-RdpGuardList', 'Remove-RdpGuardBan', 'Invoke-RdpGuard')
+
+# IP 是否在清單裡；清單可以是單一 IP 或 CIDR（IPv4 / IPv6 都可）
+function Test-RdpGuardIpIn {
+    param([string]$Ip, [string[]]$List)
+    $a = $null
+    if (-not [Net.IPAddress]::TryParse(($Ip -replace '^::ffff:', ''), [ref]$a)) { return $false }
+    foreach ($w in @($List)) {
+        $w = "$w".Trim()
+        if (-not $w) { continue }
+        $p = $w -split '/'
+        $n = $null
+        if (-not [Net.IPAddress]::TryParse($p[0], [ref]$n) -or $n.AddressFamily -ne $a.AddressFamily) { continue }
+        if ($p.Count -eq 1) { if ($n.Equals($a)) { return $true }; continue }
+        $bits = 0
+        if (-not [int]::TryParse($p[1], [ref]$bits)) { continue }
+        $x = $a.GetAddressBytes(); $y = $n.GetAddressBytes(); $ok = $true
+        for ($i = 0; $i -lt $x.Length -and $bits -gt 0; $i++) {
+            $m = if ($bits -ge 8) { 255 } else { (0xFF -shl (8 - $bits)) -band 0xFF }
+            if (($x[$i] -band $m) -ne ($y[$i] -band $m)) { $ok = $false; break }
+            $bits -= 8
+        }
+        if ($ok) { return $true }
+    }
+    $false
+}
+
+# 純判斷：給事件（Time, Ip）、現在時間、設定、目前封鎖與寬恕清單，回傳要封、要解封的 IP。
+# 門檻是「達到」就封（同 fail2ban 的 maxretry）。
+function Get-RdpGuardPlan {
+    param([object[]]$Events, [datetime]$Now, [int]$Threshold, [int]$WindowMin, [int]$BanMin,
+          [string[]]$Whitelist, [hashtable]$Bans = @{}, [hashtable]$Forgive = @{})
+    $since = $Now.AddMinutes(-$WindowMin)
+    $count = @{}
+    foreach ($e in @($Events)) {
+        if (-not $e) { continue }
+        $ip = ([string]$e.Ip).Trim() -replace '^::ffff:', ''
+        if (-not $ip -or $ip -eq '-') { continue }
+        $t = [datetime]$e.Time
+        if ($t -lt $since -or $t -gt $Now) { continue }
+        if ($Forgive.ContainsKey($ip) -and $t -le $Forgive[$ip]) { continue }
+        if (Test-RdpGuardIpIn $ip $Whitelist) { continue }
+        $count[$ip] = 1 + [int]$count[$ip]
+    }
+    $ban = @(foreach ($ip in $count.Keys) {
+        if ($count[$ip] -ge $Threshold -and -not $Bans.ContainsKey($ip)) {
+            [pscustomobject]@{ Ip = $ip; Count = $count[$ip]; Until = $Now.AddMinutes($BanMin) }
+        }
+    }) | Sort-Object Count -Descending
+    $unban = @(foreach ($ip in @($Bans.Keys)) {
+        if (Test-RdpGuardIpIn $ip $Whitelist) { [pscustomobject]@{ Ip = $ip; Reason = '在白名單內' } }
+        elseif ($Bans[$ip] -le $Now) { [pscustomobject]@{ Ip = $ip; Reason = '封鎖到期' } }
+    })
+    @{ Ban = @($ban); Unban = $unban; Counts = $count }
+}
+
+# Security 4625 的 IpAddress 是第 20 個欄位（Properties[19]）。沒有事件不是錯誤。
+function Get-RdpGuardFailures {
+    param([datetime]$Since)
+    try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4625; StartTime = $Since } -MaxEvents 20000 -ErrorAction Stop) }
+    catch {
+        if ($_.FullyQualifiedErrorId -match 'NoMatchingEventsFound|NoMatchingProvidersFound') { return @() }
+        throw "讀不到 Security 記錄檔（需要管理員權限）：$($_.Exception.Message)"
+    }
+    foreach ($e in $ev) { [pscustomobject]@{ Time = $e.TimeCreated; Ip = [string]$e.Properties[19].Value } }
+}
+
+function Write-RdpGuardEvent {
+    param([int]$Id, [string]$Message, [string]$Type = 'Information')
+    try {
+        if (-not [Diagnostics.EventLog]::SourceExists('OPS-command')) { [Diagnostics.EventLog]::CreateEventSource('OPS-command', 'Application') }
+        [Diagnostics.EventLog]::WriteEntry('OPS-command', $Message, $Type, $Id)
+    } catch { }
+}
+
+function Remove-RdpGuardRule {
+    param([string]$Ip)
+    Get-NetFirewallRule -Name "OPS-RdpGuard-$Ip-TCP", "OPS-RdpGuard-$Ip-UDP", "OPS-RdpGuard-$Ip-ALL" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+}
+
+function Set-RdpGuardRule {
+    param([string]$Ip, [string]$Scope, [int[]]$Ports)
+    Remove-RdpGuardRule $Ip
+    $common = @{ Group = 'OPS-RdpGuard'; Direction = 'Inbound'; Action = 'Block'; RemoteAddress = $Ip; Description = 'OPS-command RDP brute-force guard'; ErrorAction = 'Stop' }
+    if ($Scope -eq 'All') { New-NetFirewallRule -Name "OPS-RdpGuard-$Ip-ALL" -DisplayName "OPS-RdpGuard-$Ip-ALL" @common | Out-Null; return }
+    foreach ($pr in 'TCP', 'UDP') { New-NetFirewallRule -Name "OPS-RdpGuard-$Ip-$pr" -DisplayName "OPS-RdpGuard-$Ip-$pr" -Protocol $pr -LocalPort $Ports @common | Out-Null }
+}
+
+# 讀 HKLM 底下的子機碼（Bans / Forgive），回傳 @{ IP = 時間 }
+function Get-RdpGuardList {
+    param([string]$Name)
+    $k = "HKLM:\SOFTWARE\OPS-command\RdpGuard\$Name"
+    $h = @{}
+    if (-not (Test-Path $k)) { return $h }
+    $p = Get-ItemProperty -Path $k
+    foreach ($n in (Get-Item -Path $k).Property) {
+        try { $h[$n] = [datetime]::ParseExact((([string]$p.$n) -split '\|')[0], 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture) } catch { }
+    }
+    $h
+}
+
+function Remove-RdpGuardBan {
+    param([string]$Ip, [string]$Reason, [datetime]$Now = (Get-Date))
+    $k = 'HKLM:\SOFTWARE\OPS-command\RdpGuard'
+    Remove-RdpGuardRule $Ip
+    Remove-ItemProperty -Path "$k\Bans" -Name $Ip -ErrorAction SilentlyContinue
+    if (-not (Test-Path "$k\Forgive")) { New-Item -Path "$k\Forgive" -Force | Out-Null }
+    Set-ItemProperty -Path "$k\Forgive" -Name $Ip -Value $Now.ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+    Write-RdpGuardEvent 301 "RdpGuard 解封 $Ip（$Reason）"
+}
+
+# 一輪：讀設定 → 讀 4625 → 判斷 → 解封 / 封鎖 → 補回被刪掉的規則。回傳給人看的文字。
+#   -Events  測試用：不讀 Security，用這些假事件（Time, Ip）
+#   -Now     測試用：假裝現在是這個時間（驗證到期解封）
+#   -Config  用這組設定而不是登錄檔（試算用）
+#   -DryRun  只回報會做什麼，不動防火牆與登錄檔
+#   -SyncOnly 不更新「上次執行」（套用設定時順手同步用）
+function Invoke-RdpGuard {
+    param([object[]]$Events, [datetime]$Now = (Get-Date), [hashtable]$Config, [switch]$DryRun, [switch]$SyncOnly)
+    $k = 'HKLM:\SOFTWARE\OPS-command\RdpGuard'
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $c = if ($Config) { $Config } else { Get-ItemProperty -Path $k -ErrorAction SilentlyContinue }
+    if (-not $c -or -not $c.Threshold) { throw '尚未設定（請先按「啟用／套用設定」）。' }
+    $th = [int]$c.Threshold; $win = [int]$c.WindowMin; $banMin = [int]$c.BanMin
+    $scope = if ($c.Scope -eq 'All') { 'All' } else { 'Rdp' }
+    $wl = @($c.Whitelist) + @('127.0.0.0/8', '::1') + @(Get-NetIPAddress -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress -replace '%.*$', '' })
+    $bans = Get-RdpGuardList 'Bans'
+    $forgive = Get-RdpGuardList 'Forgive'
+    if (-not $PSBoundParameters.ContainsKey('Events')) { $Events = @(Get-RdpGuardFailures $Now.AddMinutes(-$win)) }
+    $plan = Get-RdpGuardPlan -Events $Events -Now $Now -Threshold $th -WindowMin $win -BanMin $banMin -Whitelist $wl -Bans $bans -Forgive $forgive
+    $ports = @(@((Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -ErrorAction SilentlyContinue).PortNumber,
+                 (Get-ItemProperty -Path 'HKLM:\SOFTWARE\OPS-command\RdpPort' -ErrorAction SilentlyContinue).OldPort) | Where-Object { $_ } | ForEach-Object { [int]$_ } | Sort-Object -Unique)
+    if (-not $ports.Count) { $ports = @(3389) }
+    $sig = if ($scope -eq 'All') { 'All' } else { 'Rdp:' + ($ports -join ',') }
+
+    $out = New-Object System.Collections.ArrayList
+    [void]$out.Add(('最近 {0} 分鐘有 {1} 筆登入失敗，{2} 個來源（白名單與沒有 IP 的不算）；門檻 {3} 次。' -f $win, @($Events).Count, $plan.Counts.Count, $th))
+    foreach ($ip in @($plan.Counts.Keys | Sort-Object { $plan.Counts[$_] } -Descending | Select-Object -First 10)) {
+        [void]$out.Add(('  {0,-40} {1} 次' -f $ip, $plan.Counts[$ip]))
+    }
+    $newBans = @($plan.Ban | Select-Object -First 100)
+    if ($DryRun) {
+        foreach ($b in $newBans) { [void]$out.Add("[試算] 會封鎖 $($b.Ip)（$($b.Count) 次），到 $($b.Until.ToString('yyyy-MM-dd HH:mm:ss', $inv))") }
+        foreach ($u in $plan.Unban) { [void]$out.Add("[試算] 會解封 $($u.Ip)（$($u.Reason)）") }
+        if (-not $newBans.Count -and -not @($plan.Unban).Count) { [void]$out.Add('[試算] 這一輪不會封鎖或解封任何 IP。') }
+        return $out
+    }
+
+    foreach ($u in $plan.Unban) { Remove-RdpGuardBan -Ip $u.Ip -Reason $u.Reason -Now $Now; $bans.Remove($u.Ip); $forgive[$u.Ip] = $Now; [void]$out.Add("解封 $($u.Ip)（$($u.Reason)）") }
+    if (-not (Test-Path "$k\Bans")) { New-Item -Path "$k\Bans" -Force | Out-Null }
+    $total = [int]$c.TotalBans
+    foreach ($b in $newBans) {
+        try { Set-RdpGuardRule -Ip $b.Ip -Scope $scope -Ports $ports }
+        catch { Write-RdpGuardEvent 302 "RdpGuard 封鎖 $($b.Ip) 失敗：$($_.Exception.Message)" 'Error'; [void]$out.Add("[錯誤] 封鎖 $($b.Ip) 失敗：$($_.Exception.Message)"); continue }
+        $until = $b.Until.ToString('yyyy-MM-dd HH:mm:ss', $inv)
+        Set-ItemProperty -Path "$k\Bans" -Name $b.Ip -Value "$until|$($b.Count)"
+        $bans[$b.Ip] = $b.Until; $total++
+        $what = if ($scope -eq 'All') { '全部連入' } else { "RDP Port $($ports -join ',')" }
+        Write-RdpGuardEvent 300 "RdpGuard 封鎖 $($b.Ip)：$win 分鐘內登入失敗 $($b.Count) 次（門檻 $th），封鎖 $what 到 $until" 'Warning'
+        [void]$out.Add("封鎖 $($b.Ip)（$($b.Count) 次），到 $until")
+    }
+    # 規則被別人刪掉、或 RDP Port / 封鎖範圍變了：照目前設定重建
+    $fresh = @($newBans | ForEach-Object { $_.Ip })
+    $sigChanged = $c.RuleSig -and $c.RuleSig -ne $sig
+    foreach ($ip in @($bans.Keys | Where-Object { $fresh -notcontains $_ })) {
+        $need =if ($scope -eq 'All') { @("OPS-RdpGuard-$ip-ALL") } else { @("OPS-RdpGuard-$ip-TCP", "OPS-RdpGuard-$ip-UDP") }
+        $have = @(Get-NetFirewallRule -Name $need -ErrorAction SilentlyContinue).Count
+        if ($sigChanged -or $have -ne $need.Count) {
+            try { Set-RdpGuardRule -Ip $ip -Scope $scope -Ports $ports; [void]$out.Add("重建 $ip 的封鎖規則") }
+            catch { Write-RdpGuardEvent 302 "RdpGuard 重建 $ip 的規則失敗：$($_.Exception.Message)" 'Error' }
+        }
+    }
+    foreach ($ip in @($forgive.Keys)) { if ($forgive[$ip] -lt $Now.AddMinutes(-$win)) { Remove-ItemProperty -Path "$k\Forgive" -Name $ip -ErrorAction SilentlyContinue } }
+    if (-not $Config) {
+        Set-ItemProperty -Path $k -Name RuleSig -Value $sig
+        Set-ItemProperty -Path $k -Name TotalBans -Value $total -Type DWord
+        if (-not $SyncOnly) {
+            $summary = '失敗 {0} 筆，新封鎖 {1}，解封 {2}，封鎖中 {3}' -f @($Events).Count, $newBans.Count, @($plan.Unban).Count, $bans.Count
+            Set-ItemProperty -Path $k -Name LastRun -Value $Now.ToString('yyyy-MM-dd HH:mm:ss', $inv)
+            Set-ItemProperty -Path $k -Name LastResult -Value $summary
+            [void]$out.Add($summary)
+        }
+    }
+    $out
+}
+
+# ---- 以下只在介面裡用 ----
+
+# 把上面的核心函式組成一段獨立的程式碼（排程與背景作業共用同一份）。
+# 去掉註解行與縮排，排程的命令列有 32767 字元上限，Base64 會把長度放大約 2.7 倍。
+function Get-RdpGuardScript {
+    $parts = foreach ($n in $Script:RdpGuardCoreFunctions) { "function $n {`n" + (Get-Item "function:$n").ScriptBlock.ToString() + "`n}" }
+    $lines = ($parts -join "`n") -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not $_.StartsWith('#') }
+    "`$ErrorActionPreference = 'Continue'`n" + ($lines -join "`n")
+}
+
+function Register-RdpGuardTask {
+    param([string]$TaskName = $Script:RdpGuardTask, [string]$Invocation = 'Invoke-RdpGuard | Out-Null', [int]$EveryMinutes = 1)
+    $body = (Get-RdpGuardScript) + "`ntry { $Invocation } catch { Write-RdpGuardEvent 302 ('RdpGuard 執行失敗：' + `$_.Exception.Message) 'Error' }"
+    $arg = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($body))
+    if ($arg.Length -gt 32000) { throw "排程指令太長（$($arg.Length) 字元），Windows 命令列上限 32767。" }
+    $ps        = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action    = New-ScheduledTaskAction -Execute $ps -Argument $arg
+    $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(20) -RepetitionInterval (New-TimeSpan -Minutes $EveryMinutes)
+    $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    $settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
+        -Description 'OPS-command：RDP 暴力破解自動封鎖。設定在 HKLM\SOFTWARE\OPS-command\RdpGuard，紀錄在應用程式事件記錄（來源 OPS-command，300/301/302）。' -Force -ErrorAction Stop | Out-Null
+}
+
+# 稽核「登入」的失敗沒開，就不會有 4625，守護等於沒作用。auditpol /r 的欄位名稱是英文。
+function Get-RdpGuardAudit {
+    $raw = & auditpol.exe /get "/subcategory:$($Script:RdpGuardAuditGuid)" /r 2>&1
+    if ($LASTEXITCODE -ne 0) { return @{ Known = $false; Failure = $false; Text = '讀不到（需要管理員權限）' } }
+    $row = @($raw | Where-Object { $_ -match ',' } | ConvertFrom-Csv) | Select-Object -First 1
+    $set = [string]$row.'Inclusion Setting'
+    @{ Known = $true; Failure = ($set -match 'Failure'); Text = $set }
+}
+
+# 目前連進來的來源：Established 且本機端是監聽中的 Port（排除本機連出去的，例如 Windows Update）
+function Get-RdpGuardConnectedIps {
+    $listen = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object { $_.LocalPort } | Sort-Object -Unique)
+    @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | Where-Object { $listen -contains $_.LocalPort } |
+        ForEach-Object { $_.RemoteAddress -replace '^::ffff:', '' } |
+        Where-Object { $_ -and $_ -notmatch '^(127\.|::1$|0\.0\.0\.0$|::$)' } | Sort-Object -Unique)
+}
+
+function Split-RdpGuardList {
+    param([string]$Text)
+    @(($Text -split '[\s,;，、]+') | Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Get-RdpGuardStatus {
+    $c = Get-ItemProperty -Path $Script:RdpGuardKey -ErrorAction SilentlyContinue
+    $t = Get-ScheduledTask -TaskName $Script:RdpGuardTask -ErrorAction SilentlyContinue
+    if ($t) {
+        $info = Get-ScheduledTaskInfo -TaskName $Script:RdpGuardTask -ErrorAction SilentlyContinue
+        "守護排程：已啟用（$($Script:RdpGuardTask)，每 1 分鐘以 SYSTEM 執行，排程狀態 $($t.State)）" + $(if ($info -and $info.LastTaskResult -and $info.LastTaskResult -ne 267011) { "　上次結束代碼 $($info.LastTaskResult)" } else { '' })
+    } else { '守護排程：未啟用' }
+    if ($c -and $c.Threshold) {
+        "上次執行：$(if ($c.LastRun) { "$($c.LastRun)　$($c.LastResult)" } else { '還沒執行過' })"
+        "規則：$($c.WindowMin) 分鐘內登入失敗 $($c.Threshold) 次 → 封鎖 $($c.BanMin) 分鐘，" + $(if ($c.Scope -eq 'All') { '擋全部連入' } else { '只擋 RDP Port' })
+        "白名單：$(@($c.Whitelist) -join '、')"
+    } else { '尚未設定。' }
+    $a = Get-RdpGuardAudit
+    '稽核登入失敗：' + $(if (-not $a.Known) { $a.Text } elseif ($a.Failure) { "已開啟（$($a.Text)）" } else { "沒開（$($a.Text)）→ 不會產生 4625，守護抓不到任何人，請按「開啟稽核登入失敗」" })
+    $off = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { -not $_.Enabled } | ForEach-Object { $_.Name })
+    if ($off.Count) { "[注意] 防火牆設定檔 $($off -join '、') 是關閉的，封鎖規則在這些網路上不會生效。" }
+    $recent = 0
+    try { $recent = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'OPS-command'; Id = 300; StartTime = (Get-Date).AddHours(-24) } -ErrorAction Stop).Count } catch { }
+    "最近 24 小時封鎖 $recent 次；累計 $(if ($c) { [int]$c.TotalBans } else { 0 }) 次"
+    $bans = Get-RdpGuardList 'Bans'
+    if (-not $bans.Count) { '封鎖中：無' } else {
+        "封鎖中 $($bans.Count) 個（到期時間）："
+        $bans.GetEnumerator() | Sort-Object Value | Select-Object -First 15 | ForEach-Object { "　$($_.Key)　到 $($_.Value.ToString('MM-dd HH:mm'))" }
+        if ($bans.Count -gt 15) { "　…另外 $($bans.Count - 15) 個" }
+    }
+}
+
+# 確認視窗用：把輸入整理成設定，並列出會自動加入白名單的目前連線
+function Get-RdpGuardPending {
+    param([hashtable]$v)
+    $list = Split-RdpGuardList $v.Whitelist
+    $bad = @($list | Where-Object { $_ -ne '-' -and -not (Test-RdpGuardIpIn ($_ -split '/')[0] @(($_ -split '/')[0])) })
+    if ($bad.Count) { throw "白名單裡有看不懂的項目：$($bad -join '、')（只接受 IP、CIDR 或 -）" }
+    $auto = @(@('127.0.0.1', '::1', '-') + @(Get-RdpGuardConnectedIps) | Where-Object { $list -notcontains $_ })
+    @{ Whitelist = @($list + $auto); Auto = $auto; Scope = $(if ($v.Scope -like '全部*') { 'All' } else { 'Rdp' })
+       Threshold = [int]$v.Threshold; WindowMin = [int]$v.WindowMin; BanMin = [int]$v.BanMin }
+}
+
+function Enable-RdpGuard {
+    param([hashtable]$v)
+    $p = Get-RdpGuardPending $v
+    $k = $Script:RdpGuardKey
+    New-Item -Path $k -Force -ErrorAction Stop | Out-Null   # -Force 對已存在的機碼不會清掉內容
+    Set-ItemProperty -Path $k -Name Threshold -Value $p.Threshold -Type DWord -ErrorAction Stop
+    Set-ItemProperty -Path $k -Name WindowMin -Value $p.WindowMin -Type DWord
+    Set-ItemProperty -Path $k -Name BanMin -Value $p.BanMin -Type DWord
+    Set-ItemProperty -Path $k -Name Scope -Value $p.Scope
+    Set-ItemProperty -Path $k -Name Whitelist -Value ([string[]]$p.Whitelist) -Type MultiString
+    # 已封鎖但現在進了白名單的，馬上解封（空事件跑一輪：只做解封與規則同步，不會新封鎖）
+    $sync = @(Invoke-RdpGuard -Events @() -SyncOnly | Where-Object { $_ -match '^(解封|重建)' })
+    Register-RdpGuardTask
+    "[完成] 守護已啟用：$($p.WindowMin) 分鐘內失敗 $($p.Threshold) 次就封鎖 $($p.BanMin) 分鐘，每 1 分鐘檢查一次。"
+    if ($p.Auto.Count) { "已自動加入白名單：$($p.Auto -join '、')" }
+    $sync
+    $a = Get-RdpGuardAudit
+    if ($a.Known -and -not $a.Failure) { '[注意] 稽核登入失敗沒開，不會產生 4625 事件，守護抓不到任何人。請按「開啟稽核登入失敗」。' }
+}
+
+function Disable-RdpGuard {
+    Unregister-ScheduledTask -TaskName $Script:RdpGuardTask -Confirm:$false -ErrorAction SilentlyContinue
+    $n = Unblock-RdpGuardAll
+    "[完成] 守護排程已刪除，解封 $n 個 IP。設定保留在 $($Script:RdpGuardKey)，下次啟用沿用。"
+}
+
+function Unblock-RdpGuardAll {
+    $bans = Get-RdpGuardList 'Bans'
+    foreach ($ip in @($bans.Keys)) { Remove-RdpGuardBan -Ip $ip -Reason '手動解封全部' }
+    # 登錄檔裡沒有、但規則還在的（例如狀態被手動刪掉）一併清掉；只動群組 OPS-RdpGuard
+    Get-NetFirewallRule -Group 'OPS-RdpGuard' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    $bans.Count
+}
+
+function Show-RdpGuardPanel {
+    $c = Get-ItemProperty -Path $Script:RdpGuardKey -ErrorAction SilentlyContinue
+    $wl = if ($c -and $c.Whitelist) { @($c.Whitelist) } else { @('127.0.0.1', '::1', '-') + @(Get-RdpGuardConnectedIps) }
+    # 背景作業看不到這支腳本的函式，把核心函式整段帶過去
+    $worker = "param([hashtable]`$Cfg, [bool]`$Dry)`n" + (Get-RdpGuardScript) + "`nif (`$Dry) { Invoke-RdpGuard -Config `$Cfg -DryRun } else { Invoke-RdpGuard }"
+    Show-FeaturePanel -Title 'RDP 暴力破解自動封鎖' -Subtitle '同一個來源 IP 登入失敗太多次，就用防火牆擋掉，到期自動解封（Windows 版 fail2ban）' -Width 980 -Height 800 `
+        -Note '讀 Security 4625（登入失敗）的來源 IP；任何服務的登入失敗都算。白名單裡的 IP 永遠不封，啟用時會把目前連進來的來源自動加入——請確認你自己的 IP 在裡面。設定改完要按「啟用／套用設定」才生效。紀錄在應用程式事件記錄：來源 OPS-command，300 封鎖、301 解封、302 失敗。' `
+        -Status { Get-RdpGuardStatus } `
+        -Inputs @(
+            @{ Name = 'Threshold'; Label = '門檻（失敗幾次）'; Type = 'Number'; Min = 2; Max = 100; Default = $(if ($c -and $c.Threshold) { [int]$c.Threshold } else { 5 }) }
+            @{ Name = 'WindowMin'; Label = '統計時間窗（分鐘）'; Type = 'Number'; Min = 1; Max = 1440; Default = $(if ($c -and $c.WindowMin) { [int]$c.WindowMin } else { 10 }) }
+            @{ Name = 'BanMin'; Label = '封鎖時間（分鐘）'; Type = 'Number'; Min = 1; Max = 43200; Default = $(if ($c -and $c.BanMin) { [int]$c.BanMin } else { 60 }) }
+            @{ Name = 'Scope'; Label = '封鎖範圍'; Type = 'Combo'; Items = @('只擋 RDP Port（TCP + UDP）', '全部連入（含 SSH 等救援管道）'); Default = $(if ($c -and $c.Scope -eq 'All') { '全部連入（含 SSH 等救援管道）' } else { '只擋 RDP Port（TCP + UDP）' }) }
+            @{ Name = 'Whitelist'; Label = '白名單（逗號分隔，IP 或 CIDR）'; Width = 600; Default = ($wl -join ', ') }
+            @{ Name = 'UnbanIp'; Label = '要解封的 IP'; Width = 260; Default = '' }
+        ) `
+        -Actions @(
+            @{ Text = '啟用／套用設定'; Style = 'success'; Admin = $true
+               Confirm = { param($v)
+                   $p = Get-RdpGuardPending $v
+                   "每 1 分鐘以 SYSTEM 檢查一次：$($p.WindowMin) 分鐘內同一 IP 登入失敗 $($p.Threshold) 次，就封鎖 $($p.BanMin) 分鐘（" + $(if ($p.Scope -eq 'All') { '全部連入' } else { '只擋 RDP Port' }) + "）。`r`n`r`n" +
+                   "白名單（永遠不封）：`r`n  $($p.Whitelist -join "`r`n  ")`r`n`r`n" +
+                   $(if ($p.Auto.Count) { "其中這些是自動加入的（本機與目前連進來的來源）：$($p.Auto -join '、')`r`n`r`n" } else { '' }) +
+                   "你自己連進來的 IP 在上面嗎？不在的話請先按「否」、把它加進白名單。確定啟用？" }
+               Run = { param($v) Enable-RdpGuard $v } }
+            @{ Text = '停用'; Style = 'danger'; Admin = $true
+               Confirm = '停用會刪除守護排程，並解封目前所有被封鎖的 IP（設定保留）。確定？'
+               Run = { Disable-RdpGuard } }
+            @{ Text = '立即執行一次'; Style = 'primary'; Admin = $true
+               Confirm = '用已儲存的設定立即跑一輪，達到門檻的 IP 會真的被封鎖。確定？'
+               Worker = $worker; WorkerArgs = { $null, $false } }
+            @{ Text = '試算（不封鎖）'; Style = 'light'
+               Worker = $worker; WorkerArgs = { param($v) (Get-RdpGuardPending $v), $true } }
+            @{ Text = '解封指定 IP'; Style = 'primary'; Admin = $true
+               Run = { param($v)
+                   $ip = $v.UnbanIp.Trim()
+                   $a = $null
+                   if (-not [Net.IPAddress]::TryParse($ip, [ref]$a)) { throw "「$ip」不是有效的 IP。" }
+                   $bans = Get-RdpGuardList 'Bans'
+                   $rules = @(Get-NetFirewallRule -Name "OPS-RdpGuard-$ip-TCP", "OPS-RdpGuard-$ip-UDP", "OPS-RdpGuard-$ip-ALL" -ErrorAction SilentlyContinue)
+                   if (-not $bans.ContainsKey($ip) -and -not $rules.Count) { throw "$ip 目前沒有被封鎖。" }
+                   Remove-RdpGuardBan -Ip $ip -Reason '手動解封'
+                   "[完成] 已解封 $ip。它之前的失敗紀錄不再計數；之後再失敗達到門檻還是會被封——要永遠放行請加進白名單。"
+               } }
+            @{ Text = '解封全部'; Style = 'danger'; Admin = $true
+               Confirm = '解封目前所有被封鎖的 IP（守護繼續運作）。確定？'
+               Run = { "[完成] 已解封 $(Unblock-RdpGuardAll) 個 IP。" } }
+            @{ Text = '開啟稽核登入失敗'; Style = 'light'; Admin = $true
+               Run = {
+                   $out = & auditpol.exe /set "/subcategory:$($Script:RdpGuardAuditGuid)" /failure:enable 2>&1
+                   $a = Get-RdpGuardAudit
+                   if (-not $a.Failure) { throw "設定後讀回來還是「$($a.Text)」：$($out -join ' ')。可能被網域群組原則覆寫。" }
+                   "[完成] 稽核「登入」的失敗已開啟（目前：$($a.Text)），之後登入失敗會產生 4625 事件。"
+               } }
+        )
+}
+
 function Show-AdminAccountPanel {
     Show-FeaturePanel -Title '內建 Administrator 帳戶' -Subtitle '以 SID 結尾 -500 辨識，帳號被改名也找得到' `
         -Status {
@@ -2190,6 +2581,7 @@ function Show-WindowsPanel {
     )
     & $addSection '帳號與安全' @(
         @{Title='帳號鎖定防護';Action={Show-LockoutPolicyPanel};Style='info'}
+        @{Title='RDP 暴力破解自動封鎖';Action={Show-RdpGuardPanel};Style='danger'}
         @{Title='內建 Administrator 帳戶';Action={Show-AdminAccountPanel};Style='info'}
         @{Title='變更本機帳號密碼';Action={Set-UserPasswordPanel};Style='info'}
     )
