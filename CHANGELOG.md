@@ -11,6 +11,34 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **換 SSH 埠時，firewalld 可以選擇保留或停用**（`ssh-port.sh` 1.2）。偵測到 firewalld 在跑，
+  `set` 會先講清楚「firewalld reload / 重啟會清掉直接用 iptables 加的規則（fail2ban 的 `iptables-*`
+  封鎖、手動規則、Docker）」，再讓你選：
+  - **保留**（預設）：放行新埠改用「立即生效一次 + 寫入永久設定一次」，**完全不 reload**。
+  - **停用**：先列出 firewalld 目前放行的服務、埠與 rich rule 數量，警告停用後這台等於沒有本機
+    防火牆，再確認一次才 `stop` + `disable`。停用跟著換埠的成敗走：`rollback`（含看門狗）或 `set`
+    中途失敗會把 firewalld 恢復，`confirm` 才定案。
+  - `-y` 與看門狗自動還原沒人能回答，一律保留；不是 systemd 管理的 firewalld 不提供停用。
+- **`fail2ban.sh sync-port` 也修正封鎖方式。** firewalld 停用後 `firewallcmd-*` 寫不進任何地方、
+  firewalld 在跑時 `iptables-*` 會被 reload 清掉，這兩種對不上的情況會自動改成跟防火牆一致的
+  banaction 並重啟；ufw、自訂 action 不碰。重啟後另外確認 jail 有 action。
+
+### 變更
+
+- `ssh-port.sh` 在 firewalld 上放行 / 移除埠**不再 `firewall-cmd --reload`**。以前每個階段都 reload，
+  直接用 iptables 加的規則會在換埠時被清掉。
+- `ssh-port.sh -h` 改成印到檔頭註解結束為止；原本寫死印第 3–30 行，檔頭一變長就會截斷。
+
+### 已驗證
+
+firewalld 的處理**只做了邏輯測試**：用會記錄呼叫的假 `firewall-cmd` / `systemctl` 跑 19 項（保留時確實
+沒有 `--reload`、詢問的各種回答、停不下來時改回保留、恢復後後端回到 firewalld、`-h` 印完整檔頭），
+`sync-port` 的封鎖方式切換另外 10 項（停用 / 恢復兩個方向、已一致不重啟、ufw 與引用變數不碰、
+埠與封鎖方式同時改只重啟一次），連同原本 60 項共 70 項全過。ShellCheck 在改動的行上沒有新的告警。
+**沒有在真的 firewalld 機器上跑過**停用 → confirm / rollback 的完整流程。
+
 ### 規劃中（還沒做）
 
 sshd 相關、這一版討論過但排到之後的功能：

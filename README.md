@@ -425,6 +425,9 @@ CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假
   Debian 系裝完立刻啟動但只聽本機。要對外給監控主機查之前，先改 `/etc/snmp/snmpd.conf`。
 - **手動封鎖前先確認會不會封到自己**。`fail2ban.sh` 會擋下涵蓋你目前 SSH 來源、
   本機位址或 loopback 的目標，CIDR 是真的做網段計算的；要硬幹得加 `--force`。
+- **firewalld 的 reload / 重啟會清掉直接用 iptables 加的規則**（fail2ban 的 `iptables-*` 封鎖、
+  手動規則、Docker）。`ssh-port.sh` 換埠時不 reload，也可以選擇停用 firewalld——停用後這台等於沒有
+  本機防火牆，請確認雲端安全群組有在擋。細節見 [SSH/README.md](SSH/README.md#firewalld保留還是停用)。
 - **fail2ban 的 jail 要跟上 SSH 的埠**。jail 的 `port` 沒跟著改的話，fail2ban 照樣記錄、
   照樣「封鎖成功」，但規則套在舊埠上，等於完全沒有防護。用 `ssh-port.sh` 或選單換埠時會
   自動同步；自己手動改過 sshd 埠的話跑 `fail2ban.sh sync-port`。`fail2ban.sh doctor` 會比對這兩個值。

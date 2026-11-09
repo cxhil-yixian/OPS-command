@@ -608,6 +608,8 @@ act_port_set() {
     printf '\n'
     row "目前的埠：${CB}${PORTS}${C0}"
     [ -n "$SOCKET_UNIT" ] && wmsg "$SOCKET_UNIT 接管中，實際生效的是 ListenStream，腳本會一併處理"
+    [ "$FW" = firewalld ] && \
+        wmsg "防火牆是 firewalld：實際執行時會問你要保留還是停用（保留的話不會 reload）"
     [ "$OS_FAMILY" = rhel ] && [ "$SELINUX" != disabled ] && \
         wmsg "SELinux 為 $SELINUX，腳本會用 semanage 標記新埠為 ssh_port_t"
     # 看門狗是背景執行「$SSH_PORT_SH rollback --auto」，遠端模式下這是快取檔案，

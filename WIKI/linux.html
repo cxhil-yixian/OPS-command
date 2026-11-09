@@ -304,7 +304,9 @@
     <li>主選單按 <kbd>2</kbd>。</li>
     <li>輸入新的埠號，例如 <code>58763</code>（建議在 10000 – 65535 之間挑一個）。</li>
     <li>問「看門狗時限」時直接按 <kbd>Enter</kbd>（10 分鐘）。</li>
-    <li>畫面會列出接下來要改的東西，確認後輸入 <kbd>y</kbd>。之後會再問一次「確定要繼續嗎」，一樣輸入 <kbd>y</kbd>。</li>
+    <li>畫面會列出接下來要改的東西，確認後輸入 <kbd>y</kbd>。</li>
+    <li>CentOS、Rocky 這類系統會多問一題「要怎麼處理 firewalld」，<strong>直接按 <kbd>Enter</kbd>（保留）</strong>就好。</li>
+    <li>最後會再問一次「確定要繼續嗎」，輸入 <kbd>y</kbd>。</li>
     <li><strong>不要關掉這個視窗！</strong>另外開一個新的終端機，用新埠登入看看：
       <div class="cmd"><pre>ssh -p 58763 你的帳號@伺服器IP</pre></div>
     </li>

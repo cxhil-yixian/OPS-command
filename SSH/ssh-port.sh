@@ -16,6 +16,9 @@
 #   有裝 fail2ban 的話，三個階段都會把 sshd jail 的監控埠跟著同步
 #   （set：新舊埠都監控；confirm：只剩新埠；rollback：回到舊埠）。
 #
+#   防火牆是 firewalld 時，set 會問要保留還是停用它。保留就用「不 reload」的方式
+#   放行新埠（reload 會清掉直接用 iptables 加的規則）；停用的話 rollback 會把它恢復。
+#
 # 用法：
 #   ./ssh-port.sh set 58763          變更為 58763（雙埠並存 + 看門狗）
 #   ./ssh-port.sh set 58763 -t 900   看門狗時限改 900 秒（預設 600）
@@ -28,7 +31,7 @@
 
 set -u
 
-VERSION=1.1
+VERSION=1.2
 SELF=$(readlink -f "$0" 2>/dev/null || echo "$0")
 # 同一個 repo（或 ops.sh 的下載快取）裡的 fail2ban 工具，兩種情況相對位置都一樣
 F2B_SH="$(dirname "$SELF")/../FAIL2BAN/fail2ban.sh"
@@ -151,7 +154,8 @@ primary_ip() {
 }
 
 usage() {
-    sed -n '3,30p' "$SELF" | sed 's/^# \{0,1\}//'
+    # 印出檔頭的註解區塊（第 3 行起，到第一個非註解行為止），檔頭長度變了也不會截斷
+    awk 'NR < 3 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$SELF"
     exit 0
 }
 
@@ -222,7 +226,11 @@ detect_env() {
         [ "$(cat /sys/fs/selinux/enforce)" = 1 ] && SELINUX=enforcing || SELINUX=permissive
     fi
 
-    # --- 防火牆 ---
+    detect_fw
+}
+
+# 防火牆後端。獨立出來是因為停用 / 恢復 firewalld 之後要重新判斷一次。
+detect_fw() {
     FW=none
     if has firewall-cmd && firewall-cmd --state >/dev/null 2>&1; then
         FW=firewalld
@@ -342,6 +350,7 @@ state_set() {
         echo "USE_DROPIN='$USE_DROPIN'"
         echo "FW='$FW'"
         echo "FW_ADDED='$FW_ADDED'"
+        echo "FWD_DISABLED='$FWD_DISABLED'"
         echo "SEL_ADDED='$SEL_ADDED'"
         echo "SSH_SVC='$SSH_SVC'"
         echo "STAMP='$(date -Is 2>/dev/null || date)'"
@@ -493,10 +502,17 @@ fw_add() {
     FW_ADDED=0
     case "$FW" in
         firewalld)
-            step "firewalld：放行 $NEW_PORT/tcp"
-            firewall-cmd --permanent --add-port="${NEW_PORT}/tcp" >/dev/null 2>&1 \
-                && firewall-cmd --reload >/dev/null 2>&1 \
-                && { FW_ADDED=1; ok "已放行並重新載入"; } || warn "firewalld 設定失敗，請手動確認"
+            # 不用 --reload：reload 會把整套規則丟掉再照 firewalld 自己的設定重建，
+            # 繞過 firewalld 直接用 iptables 加的規則（fail2ban 的 iptables-* 封鎖、手動規則、
+            # Docker）會一起消失。改成「立即生效一次 + 存檔一次」，效果相同但不觸發 reload。
+            step "firewalld：放行 $NEW_PORT/tcp（不 reload，不影響其他 iptables 規則）"
+            if firewall-cmd --add-port="${NEW_PORT}/tcp" >/dev/null 2>&1 &&
+               firewall-cmd --permanent --add-port="${NEW_PORT}/tcp" >/dev/null 2>&1 &&
+               firewall-cmd --query-port="${NEW_PORT}/tcp" >/dev/null 2>&1; then
+                FW_ADDED=1; ok "已放行（立即生效，並寫入永久設定）"
+            else
+                warn "firewalld 設定失敗，請手動確認：firewall-cmd --list-ports"
+            fi
             ;;
         ufw)
             step "ufw：放行 $NEW_PORT/tcp"
@@ -527,8 +543,14 @@ fw_del_port() {
     _p="$1"
     case "$FW" in
         firewalld)
-            firewall-cmd --permanent --remove-port="${_p}/tcp" >/dev/null 2>&1 \
-                && firewall-cmd --reload >/dev/null 2>&1 && ok "firewalld：已移除 ${_p}/tcp" ;;
+            # 同 fw_add：立即移除一次 + 永久設定移除一次，不 reload
+            firewall-cmd --remove-port="${_p}/tcp" >/dev/null 2>&1
+            firewall-cmd --permanent --remove-port="${_p}/tcp" >/dev/null 2>&1
+            if firewall-cmd --query-port="${_p}/tcp" >/dev/null 2>&1; then
+                warn "firewalld：${_p}/tcp 還在放行清單裡，請手動確認：firewall-cmd --list-ports"
+            else
+                ok "firewalld：已移除 ${_p}/tcp"
+            fi ;;
         ufw)
             ufw delete allow "${_p}/tcp" >/dev/null 2>&1 && ok "ufw：已移除 ${_p}/tcp" ;;
         iptables)
@@ -536,6 +558,97 @@ fw_del_port() {
                 && ok "iptables：已移除 ${_p}/tcp" ;;
         *) : ;;
     esac
+}
+
+# =========================================================
+# firewalld：保留還是停用
+#   firewalld 自認是防火牆唯一的管理者，reload 或重啟時會把整套規則丟掉再照自己的
+#   設定重建——繞過它、直接用 iptables 加的規則都會消失。換埠讓使用者決定要不要留它。
+#   停用是換埠的一部分：rollback（含看門狗）會把它一起恢復，confirm 之後才算定案。
+# =========================================================
+FWD_CHOICE=keep        # keep / disable：本次換埠的決定
+FWD_DISABLED=0         # 1 = 本次換埠真的停用了 firewalld（寫進狀態檔，還原時要恢復）
+
+fwd_ask() {
+    [ "$FW" = firewalld ] || return 0
+    if [ "$INIT" != systemd ]; then
+        info "firewalld 在跑但不是 systemd 管理的，不提供停用選項，維持原樣"
+        return 0
+    fi
+    printf '\n'
+    step "這台的防火牆是 firewalld"
+    info "firewalld 只要 reload 或重啟，就會把「不是透過它加的 iptables 規則」全部清掉："
+    info "  · fail2ban 用 iptables-* 方式寫的封鎖（清單裡還有、防火牆已經不擋）"
+    info "  · 自己用 iptables 指令手動加的規則"
+    info "  · Docker 寫的連接埠轉發規則"
+    printf '\n'
+    info "  1) 保留 firewalld（建議）"
+    info "     本工具改用「不 reload」的方式放行新埠，這次換埠不會清掉上面那些規則。"
+    info "     但之後只要有人 reload / 重啟 firewalld，它們一樣會被清掉。"
+    info "  2) 停用 firewalld"
+    info "     停用後 firewalld 管的所有放行與阻擋都會消失，這台等於沒有本機防火牆。"
+    printf '要怎麼處理 firewalld？[1/2]（Enter = 1）'
+    read -r _a || _a=''
+    case "$_a" in
+        2) : ;;
+        *) FWD_CHOICE=keep
+           ok "保留 firewalld，放行新埠時不 reload"
+           return 0 ;;
+    esac
+
+    # ---- 停用前把會失去的東西攤開 ----
+    printf '\n'
+    _zone=$(firewall-cmd --get-default-zone 2>/dev/null)
+    warn "停用 firewalld 之後，以下這些「放行 / 阻擋」都不再生效（預設區域：${_zone:-未知}）："
+    _sv=$(firewall-cmd --list-services 2>/dev/null)
+    _pt=$(firewall-cmd --list-ports 2>/dev/null)
+    info "  服務：${_sv:-（無）}"
+    info "  埠  ：${_pt:-（無）}"
+    _rr=$(firewall-cmd --list-rich-rules 2>/dev/null | grep -c . )
+    [ "${_rr:-0}" -gt 0 ] 2>/dev/null && info "  rich rule：$_rr 條（fail2ban 的 firewallcmd-* 封鎖就是這種，會一起消失）"
+    warn "所有服務的埠都會直接對外開放，請確認雲端安全群組 / 上層防火牆有在擋"
+    if has fail2ban-client; then
+        info "fail2ban 會改用 iptables 方式封鎖並重啟，目前的封鎖會從資料庫還原"
+    fi
+    info "換埠失敗還原（含看門狗自動還原）時，firewalld 會一起恢復；confirm 之後才算定案"
+    printf '確定要停用 firewalld 嗎？[y/N] '
+    read -r _a || _a=''
+    case "$_a" in
+        y|Y|yes|YES) FWD_CHOICE=disable ;;
+        *) FWD_CHOICE=keep; ok "改為保留 firewalld，放行新埠時不 reload" ;;
+    esac
+}
+
+fwd_disable() {
+    [ "$FWD_CHOICE" = disable ] || return 0
+    step "停用 firewalld"
+    systemctl stop firewalld >/dev/null 2>&1
+    systemctl disable firewalld >/dev/null 2>&1
+    if firewall-cmd --state >/dev/null 2>&1; then
+        warn "firewalld 停不下來，改為保留（放行新埠時不 reload）"
+        FWD_CHOICE=keep
+        return 0
+    fi
+    FWD_DISABLED=1
+    ok "firewalld 已停止並取消開機啟動"
+    # 後端換了，重新判斷：通常會變成 none（不需要另外放行新埠）
+    detect_fw
+    info "防火牆後端改為：$FW"
+}
+
+# 換埠失敗或 rollback 時把 firewalld 開回來
+fwd_restore() {
+    [ "${FWD_DISABLED:-0}" = 1 ] || return 0
+    step "恢復 firewalld"
+    systemctl enable firewalld >/dev/null 2>&1
+    systemctl start firewalld >/dev/null 2>&1
+    if firewall-cmd --state >/dev/null 2>&1; then
+        ok "firewalld 已重新啟用（規則照它原本的設定重建）"
+        FWD_DISABLED=0
+        detect_fw
+    else
+        err "firewalld 起不來，請手動處理：systemctl enable --now firewalld"
+    fi
 }
 
 # =========================================================
@@ -704,7 +817,13 @@ cmd_set() {
         if [ "$OS_FAMILY" = rhel ] && [ "$SELINUX" != disabled ]; then
             info "3. semanage port -a -t ssh_port_t -p tcp $NEW_PORT"
         fi
-        info "4. 防火牆($FW) 放行 $NEW_PORT/tcp"
+        if [ "$FW" = firewalld ]; then
+            info "4. 防火牆是 firewalld：實際執行時會問你要保留還是停用"
+            info "   保留 → 放行 $NEW_PORT/tcp，不 reload（不會清掉其他 iptables 規則）"
+            info "   停用 → 停止並取消開機啟動 firewalld，失敗還原時會一起恢復"
+        else
+            info "4. 防火牆($FW) 放行 $NEW_PORT/tcp"
+        fi
         info "5. sshd -t 檢查後重啟服務"
         info "6. 啟動 ${TIMEOUT}s 看門狗"
         has fail2ban-client && info "7. fail2ban sshd jail 的監控埠改為 $OLD_PORTS $NEW_PORT（會重啟 fail2ban）"
@@ -712,9 +831,14 @@ cmd_set() {
     fi
 
     if [ "$ASSUME_YES" != 1 ]; then
+        fwd_ask
+        printf '\n'
         printf '確定要繼續嗎？新舊埠將同時監聽 [y/N] '
         read -r _a
         case "$_a" in y|Y|yes|YES) : ;; *) die "已取消" ;; esac
+    elif [ "$FW" = firewalld ]; then
+        # -y 沒有人能回答，一律保留，而且不 reload
+        info "防火牆是 firewalld：-y 模式不詢問，保留 firewalld，放行新埠時不 reload"
     fi
     printf '\n'
 
@@ -724,21 +848,22 @@ cmd_set() {
     [ -n "$SOCKET_UNIT" ] && write_socket_ports "$OLD_PORTS $NEW_PORT"
 
     selinux_add
+    fwd_disable
     fw_add
 
     if ! config_test; then
         err "設定檔有誤，還原後中止"
-        restore_backup; svc_restart; exit 1
+        restore_backup; fwd_restore; svc_restart; exit 1
     fi
 
     if ! svc_restart; then
         err "服務重啟失敗，還原後中止"
-        restore_backup; svc_restart; exit 1
+        restore_backup; fwd_restore; svc_restart; exit 1
     fi
 
     if ! verify_port "$NEW_PORT"; then
         err "新埠未能監聽，還原後中止"
-        restore_backup; svc_restart; exit 1
+        restore_backup; fwd_restore; svc_restart; exit 1
     fi
 
     state_set
@@ -798,6 +923,10 @@ cmd_confirm() {
 
     printf '\n'
     ok "完成。SSH 現在只監聽埠 $NEW_PORT"
+    if [ "${FWD_DISABLED:-0}" = 1 ]; then
+        warn "firewalld 維持停用，這台目前沒有本機防火牆"
+        info "要再啟用：systemctl enable --now firewalld（記得先放行 $NEW_PORT/tcp）"
+    fi
     info "備份保留在 $BACKUP，確認穩定後可自行刪除"
     info "若要還原：$SELF rollback"
 }
@@ -828,6 +957,8 @@ cmd_rollback() {
     step "還原 SSH 埠設定"
     watchdog_cancel
     restore_backup
+    # 換埠時停用了 firewalld 的話先開回來：舊埠的放行本來就在它的設定裡，恢復後照樣有效
+    fwd_restore
     [ "${FW_ADDED:-0}" = 1 ] && fw_del_port "$NEW_PORT"
     selinux_del
 
@@ -874,6 +1005,8 @@ cmd_status() {
         printf '\n'
         warn "有進行中的變更尚未確認："
         sed 's/^/      /' "$STATE"
+        grep -q "^FWD_DISABLED='1'" "$STATE" 2>/dev/null &&
+            warn "這次換埠停用了 firewalld；rollback（含看門狗）會把它恢復，confirm 則維持停用"
         if [ -f "${STATE_DIR}/watchdog.pid" ] && kill -0 "$(cat "${STATE_DIR}/watchdog.pid")" 2>/dev/null; then
             warn "看門狗執行中，逾時將自動還原。確認可用請執行：$SELF confirm"
         fi

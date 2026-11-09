@@ -28,7 +28,7 @@
 ./fail2ban.sh tune <jail> reset   還原成原本設定檔的門檻
 ./fail2ban.sh bantime [jail] [秒] 只改封鎖時長（等同 tune <jail> bantime=…）
 ./fail2ban.sh enable-sshd         建立 sshd jail（埠號取實際生效值）
-./fail2ban.sh sync-port [埠…]     sshd jail 的監控埠同步成 SSH 實際的埠
+./fail2ban.sh sync-port [埠…]     sshd jail 的監控埠同步成 SSH 實際的埠（封鎖方式對不上防火牆時一併修正）
 ./fail2ban.sh reload              重載設定
 ./fail2ban.sh install             安裝並啟用 fail2ban
 ./fail2ban.sh doctor              環境檢查
@@ -135,7 +135,7 @@ flowchart LR
 | `tune` / `bantime` | `set <jail> maxretry / findtime / bantime`，再 `get` 讀回比對；`reset` 走 `reload` | `zz-ops-tune.local` | 目前生效的三個值 |
 | `allow` / `disallow` | `addignoreip`（不支援就 `reload`） | `zz-ops-ignoreip.local` | 目前生效的 ignoreip（先讀回再合併） |
 | `enable-sshd` | `reload` | `zz-ops-sshd.local` | `sshd -T` 的埠、偵測到的防火牆 |
-| `sync-port` | 重啟服務（不是 reload，原因見[換 SSH 埠之後](#換-ssh-埠之後sync-port)） | `zz-ops-sshd.local` 的 `port` 那一行 | `sshd -T` 或 `ssh.socket` 的埠 |
+| `sync-port` | 重啟服務（不是 reload，原因見[換 SSH 埠之後](#換-ssh-埠之後sync-port)） | `zz-ops-sshd.local` 的 `port` / `banaction` 那一行 | `sshd -T` 或 `ssh.socket` 的埠、偵測到的防火牆 |
 | `reload` | `reload` | — | — |
 | `status` / `list` | `status` | — | — |
 | `check` | `status` | — | fail2ban 日誌（歷史封鎖次數） |
@@ -497,17 +497,35 @@ jail 本身的封鎖時長用 [`tune`](#封鎖門檻tune) 改。
 
 - `zz-ops-sshd.local`（`enable-sshd` 建的）存在 → **只改 `[sshd]` 的 `port` 那一行**，其他設定原封不動。
 - 不存在（sshd jail 是發行版內建的，例如 Debian / Ubuntu 的 `defaults-debian.conf`）→ 建一個
-  **只有 `[sshd] port = …` 的最小覆蓋檔**，`enabled` / `backend` / `banaction` 都沿用原本的。
+  **只有 `[sshd] port = …` 的最小覆蓋檔**，`enabled` / `backend` 都沿用原本的。
   之後跑 `enable-sshd` 會用完整內容覆寫它，兩者不衝突。
 - 沒有 sshd jail、沒裝 fail2ban → 印一行說明就跳過，**換埠流程照常進行**。
 
-改完會**重啟** fail2ban，而不是 reload：有些 banaction 把埠號寫進每一條封鎖規則（firewalld 的
-rich rule），reload 不保證會把已經存在的規則改到新埠；重啟時 fail2ban 會從資料庫把封鎖重新套用
-一次，用的就是新埠。這也順帶補回換埠時 `firewall-cmd --reload` 可能沖掉的 f2b 鏈
-（見[四種「設了但不會生效」](#四種設了但不會生效)第 3 種）。
+**封鎖方式（banaction）對不上防火牆時也一併修正。** `ssh-port.sh` 換埠時可以選擇停用 firewalld
+（見 [SSH/README.md](../SSH/README.md#firewalld保留還是停用)），失敗還原時又會把它開回來，
+封鎖方式要跟著換。只處理兩種明確對不上的情況：
 
-> **未在實機驗證**：重啟後封鎖是否確實用新埠重建、firewalld 環境下被沖掉的鏈是否補回，
-> 目前只做過邏輯測試（假的 fail2ban-client），還沒在真的 fail2ban 上跑過。
+| 情況 | 改成 | 不改會怎樣 |
+|---|---|---|
+| `firewallcmd-*`，但 firewalld 沒在跑 | 偵測到的後端（通常是 `iptables-multiport`） | 封鎖寫不進任何地方，全部失效 |
+| `iptables-*` / `nftables-*`，但 firewalld 在跑 | `firewallcmd-rich-rules` | firewalld 一 reload，封鎖就被清掉 |
+
+ufw、自訂 action、引用變數的值（`%(…)s`）一律不碰。改的是 `[sshd]` 的 `banaction` 一行，
+判斷時先看 `[sshd]`，沒寫才看 `[DEFAULT]`（RHEL 的 fail2ban-firewalld 套件就是寫在 `[DEFAULT]`）。
+
+改完會**重啟** fail2ban，而不是 reload：
+
+- 有些 banaction 把埠號寫進每一條封鎖規則（firewalld 的 rich rule），reload 不保證會把已經存在的
+  規則改到新埠；重啟時 fail2ban 會從資料庫把封鎖重新套用一次，用的就是新埠。
+- 改了 banaction 只做 reload，jail 會變成一個 action 都沒有（見[四種「設了但不會生效」](#四種設了但不會生效)第 4 種）。
+
+重啟後會確認 sshd jail 有起來、而且有 action，不然就講明失敗。
+
+> `ssh-port.sh` 1.2 起保留 firewalld 時改成**不 reload**，換埠本身已經不會沖掉 f2b 鏈。
+> 但別人手動 reload / 重啟 firewalld 時一樣會沖掉，那時跑一次 `sync-port`（或 `systemctl restart fail2ban`）補回。
+
+> **未在實機驗證**：重啟後封鎖是否確實用新埠 / 新的封鎖方式重建，目前只做過邏輯測試
+> （假的 fail2ban-client 與 firewall-cmd），還沒在真的 fail2ban 上跑過。
 
 ---
 
@@ -517,7 +535,7 @@ rich rule），reload 不保證會把已經存在的規則改到新埠；重啟�
 |---|---|
 | `/var/log/OPS-ssh/fail2ban-ops.log` | 本腳本的操作稽核（誰在什麼時候封了誰） |
 | `/etc/fail2ban/jail.d/zz-ops-ignoreip.local` | `allow` / `disallow` 管理的白名單 |
-| `/etc/fail2ban/jail.d/zz-ops-sshd.local` | `enable-sshd` 產生的 sshd jail；`sync-port` 只改其中的 `port`（檔案不存在時建一個只有 port 的覆蓋檔） |
+| `/etc/fail2ban/jail.d/zz-ops-sshd.local` | `enable-sshd` 產生的 sshd jail；`sync-port` 只改其中的 `port` / `banaction`（檔案不存在時建一個只有這兩項的覆蓋檔） |
 | `/etc/fail2ban/jail.d/zz-ops-tune.local` | `tune` 管理的封鎖門檻，一個 jail 一段 |
 
 產出目錄跟其他工具共用，見 [../SSH/README.md](../SSH/README.md#檔案位置)；

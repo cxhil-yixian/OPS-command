@@ -21,7 +21,8 @@
 #   ./fail2ban.sh tune <jail> reset   還原成原本設定檔的門檻
 #   ./fail2ban.sh bantime [jail] [秒] 只改封鎖時長（等同 tune <jail> bantime=…）
 #   ./fail2ban.sh enable-sshd         建立 sshd jail（埠號取實際生效值）
-#   ./fail2ban.sh sync-port [埠…]     把 sshd jail 的監控埠同步成 SSH 實際的埠
+#   ./fail2ban.sh sync-port [埠…]     把 sshd jail 的監控埠同步成 SSH 實際的埠，
+#                                     封鎖方式跟防火牆對不上時一併修正
 #   ./fail2ban.sh reload              重載設定
 #   ./fail2ban.sh install             安裝並啟用 fail2ban
 #   ./fail2ban.sh doctor              環境檢查（含「設了但不會生效」的常見情況）
@@ -706,32 +707,32 @@ peers_unlisted_warn() {
 #   換 SSH 埠之後 jail 的 port 沒跟著改，封鎖就套在舊埠上——攻擊者從新埠進來完全
 #   沒事。ssh-port.sh 在 set / confirm / rollback 三個階段都會呼叫 sync-port。
 # =========================================================
-# $1=逗號分隔的埠清單。zz-ops-sshd.local 存在就只改 [sshd] 的 port 那一行，
+# $1=鍵（port / banaction）$2=值。zz-ops-sshd.local 存在就只改 [sshd] 的那一行，
 # 不存在（jail 是發行版內建的，例如 Debian 的 defaults-debian.conf）就建一個只有
-# port 的最小覆蓋檔，不動 enabled / backend / banaction 這些別人的設定。
-sshd_port_write() {
+# 這個鍵的最小覆蓋檔，不動 enabled / backend 這些別人的設定。
+sshd_key_write() {
     mkdir -p "$F2B_JAILD" 2>/dev/null || die "無法建立 $F2B_JAILD"
     _tmp="${SSHD_JAIL_FILE}.tmp.$$"
     if [ -f "$SSHD_JAIL_FILE" ] && grep -qE '^[[:space:]]*\[sshd\]' "$SSHD_JAIL_FILE"; then
-        awk -v ports="$1" '
+        awk -v key="$1" -v val="$2" '
             /^[[:space:]]*\[/ {
-                if (sec == "sshd" && !done) { printf "port     = %s\n", ports; done = 1 }
+                if (sec == "sshd" && !done) { printf "%-8s = %s\n", key, val; done = 1 }
                 sec = $0; gsub(/[][[:space:]]/, "", sec)
             }
-            sec == "sshd" && /^[[:space:]]*port[[:space:]]*=/ {
-                if (!done) { printf "port     = %s\n", ports; done = 1 }
+            sec == "sshd" && $0 ~ "^[[:space:]]*" key "[[:space:]]*=" {
+                if (!done) { printf "%-8s = %s\n", key, val; done = 1 }
                 next
             }
             { print }
-            END { if (sec == "sshd" && !done) printf "port     = %s\n", ports }' \
+            END { if (sec == "sshd" && !done) printf "%-8s = %s\n", key, val }' \
             "$SSHD_JAIL_FILE" > "$_tmp" || { rm -f "$_tmp"; die "寫入暫存檔失敗"; }
     else
         {
             printf '%s\n' "# 由 fail2ban.sh 管理（$SELF sync-port），手動編輯會被覆寫。"
-            printf '%s\n' "# 這台的 sshd jail 不是 enable-sshd 建的，這裡只覆蓋監控埠，"
-            printf '%s\n' "# 其他設定（enabled / backend / banaction）沿用原本的。"
+            printf '%s\n' "# 這台的 sshd jail 不是 enable-sshd 建的，這裡只覆蓋監控埠與封鎖方式，"
+            printf '%s\n' "# 其他設定（enabled / backend）沿用原本的。"
             printf '%s\n' "[sshd]"
-            printf 'port     = %s\n' "$1"
+            printf '%-8s = %s\n' "$1" "$2"
         } > "$_tmp" || { rm -f "$_tmp"; die "寫入暫存檔失敗"; }
     fi
     cat "$_tmp" > "$SSHD_JAIL_FILE" && rm -f "$_tmp" || { rm -f "$_tmp"; die "寫入 $SSHD_JAIL_FILE 失敗"; }
@@ -1223,22 +1224,51 @@ cmd_sync_port() {
     fi
 
     _cur=$(jail_conf_port sshd)
-    if [ "$(port_norm "$_cur")" = "$(port_norm "$_new")" ]; then
-        ok "sshd jail 的監控埠已經是 $_new，不需要變更"
+    _port_chg=0
+    [ "$(port_norm "$_cur")" = "$(port_norm "$_new")" ] || _port_chg=1
+
+    # 封鎖方式也要跟防火牆對得上。ssh-port.sh 換埠時可能停用 / 恢復 firewalld：
+    #   firewalld 停了 → firewallcmd-* 寫不進任何東西，封鎖全部失效
+    #   firewalld 在跑 → iptables-* 的鏈會在它 reload 時被清掉
+    # 只處理這兩種明確對不上的情況，其他（ufw、自訂 action）一律不碰。
+    _ba_cur=$(jail_conf_val sshd banaction)
+    [ -n "$_ba_cur" ] || _ba_cur=$(jail_conf_val DEFAULT banaction)
+    _ba_want=$(banaction_pick)
+    _ba_chg=0
+    _fw=$(fw_backend)
+    case "$_ba_cur" in
+        ''|*'%('*) : ;;                                   # 沒寫或是引用變數，看不出實際值
+        firewallcmd-*) [ "$_fw" != firewalld ] && [ -n "$_ba_want" ] && _ba_chg=1 ;;
+        iptables-*|nftables-*) [ "$_fw" = firewalld ] && [ -n "$_ba_want" ] && _ba_chg=1 ;;
+    esac
+
+    if [ "$_port_chg" = 0 ] && [ "$_ba_chg" = 0 ]; then
+        ok "sshd jail 的監控埠已經是 $_new，封鎖方式也跟防火牆（$_fw）對得上，不需要變更"
         return 0
     fi
 
-    _cur_show=${_cur:-ssh}
-    [ "$_cur_show" != "$(port_norm "$_cur")" ] && _cur_show="$_cur_show（= $(port_norm "$_cur")）"
-    step "sshd jail 監控埠：$_cur_show → $_new"
+    if [ "$_port_chg" = 1 ]; then
+        _cur_show=${_cur:-ssh}
+        [ "$_cur_show" != "$(port_norm "$_cur")" ] && _cur_show="$_cur_show（= $(port_norm "$_cur")）"
+        step "sshd jail 監控埠：$_cur_show → $_new"
+    fi
+    if [ "$_ba_chg" = 1 ]; then
+        step "sshd jail 封鎖方式：$_ba_cur → $_ba_want"
+        if [ "$_fw" = firewalld ]; then
+            info "防火牆是 firewalld：iptables / nftables 方式的封鎖會在 firewalld reload 時被清掉"
+        else
+            info "firewalld 沒在跑（目前是 $_fw）：$_ba_cur 寫不進任何地方，封鎖會全部失效"
+        fi
+    fi
     if [ -f "$SSHD_JAIL_FILE" ]; then
-        info "修改 $SSHD_JAIL_FILE 的 port"
+        info "修改 $SSHD_JAIL_FILE 的 [sshd] 區段"
     else
-        info "建立 $SSHD_JAIL_FILE（只覆蓋 port，其他設定沿用原本的 sshd jail）"
+        info "建立 $SSHD_JAIL_FILE（只覆蓋上面這些，其他設定沿用原本的 sshd jail）"
     fi
     [ "$DRY" = 1 ] && { info "（乾跑，不實際執行）"; return 0; }
 
-    sshd_port_write "$_new"
+    [ "$_port_chg" = 1 ] && sshd_key_write port "$_new"
+    [ "$_ba_chg" = 1 ] && sshd_key_write banaction "$_ba_want"
     ok "已寫入 $SSHD_JAIL_FILE"
 
     if [ "$_running" = 0 ]; then
@@ -1246,10 +1276,11 @@ cmd_sync_port() {
         return 0
     fi
 
-    # 用重啟而不是 reload：有些 banaction 把埠號寫在每一條封鎖規則裡（firewalld 的
-    # rich rule），reload 不保證會把已經存在的規則改到新埠；重啟時 fail2ban 會從資料庫
-    # 把封鎖重新套用一次，用的就是新埠。順帶也補回 firewalld reload 沖掉的 f2b 鏈。
-    info "重啟 $F2B_SVC 讓新埠生效（封鎖清單會從資料庫還原）"
+    # 用重啟而不是 reload：
+    #   · 有些 banaction 把埠號寫在每一條封鎖規則裡（firewalld 的 rich rule），reload 不保證
+    #     會把已經存在的規則改到新埠；重啟時 fail2ban 會從資料庫把封鎖重新套用一次，用的就是新埠。
+    #   · 改 banaction 只做 reload 會讓 jail 一個 action 都沒有（見 cmd_reload 的說明）。
+    info "重啟 $F2B_SVC 讓設定生效（封鎖清單會從資料庫還原）"
     svc_restart >/dev/null 2>&1
     _i=0
     while [ "$_i" -lt 10 ] && ! f2b_ping; do sleep 1; _i=$((_i + 1)); done
@@ -1261,7 +1292,11 @@ cmd_sync_port() {
         err "重啟後 sshd jail 沒有起來（跑 $SELF doctor 看原因）"
         return 1
     fi
-    ok "sshd jail 現在監控埠 $_new"
+    if ! jail_has_actions sshd; then
+        err "重啟後 sshd jail 沒有任何 action，封鎖不會進防火牆（跑 $SELF doctor 看原因）"
+        return 1
+    fi
+    ok "sshd jail 現在監控埠 $_new$([ "$_ba_chg" = 1 ] && printf '，封鎖方式 %s' "$_ba_want")"
 }
 
 cmd_enable_sshd() {
@@ -2478,7 +2513,8 @@ fail2ban.sh — fail2ban 封鎖管理  v$F2B_SH_VER
   $SELF tune <jail> reset   還原成原本設定檔的門檻
   $SELF bantime [jail] [秒] 只改封鎖時長（等同 tune <jail> bantime=…，-1 = 永久）
   $SELF enable-sshd         建立 sshd jail，埠號取實際生效值
-  $SELF sync-port [埠…]     sshd jail 的監控埠同步成 SSH 實際的埠（換埠後用）
+  $SELF sync-port [埠…]     sshd jail 的監控埠同步成 SSH 實際的埠（換埠後用），
+                            封鎖方式跟防火牆對不上時一併修正（firewalld 停用 / 恢復後）
   $SELF reload              重載設定
   $SELF install             安裝並啟用 fail2ban
   $SELF doctor              環境檢查

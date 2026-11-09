@@ -41,6 +41,7 @@ fail2ban 的 jail 沒跟著改 port 的話，封鎖規則會套在舊埠上，�
         │
         ├─ 備份 sshd_config 與 sshd_config.d/
         ├─ 設定「舊埠 + 新埠」同時監聽   ← 現有連線完全不受影響
+        ├─ 防火牆是 firewalld 的話，問你要保留還是停用（見下面「firewalld」一節）
         ├─ SELinux 標記 / 防火牆放行
         ├─ sshd -t 語法檢查 → 重啟 → 確認新埠真的在 LISTEN
         ├─ 啟動看門狗（預設 600 秒）
@@ -65,6 +66,35 @@ fail2ban 的 jail 沒跟著改 port 的話，封鎖規則會套在舊埠上，�
 - 沒裝 fail2ban、沒有 sshd jail、找不到 `fail2ban.sh` → 印一行說明就跳過。
 - 同步失敗**不影響換埠本身**，會提示稍後手動跑 `sync-port`。看門狗在背景還原時也一樣。
 - 同步時會**重啟 fail2ban**（封鎖清單從資料庫還原），不另外詢問。
+
+### firewalld：保留還是停用
+
+firewalld 自認是防火牆唯一的管理者，**reload 或重啟時會把整套規則丟掉、再照它自己的設定重建**。
+繞過它、直接用 `iptables` 指令加的規則都會一起消失：
+
+- fail2ban 用 `iptables-*` 方式寫的封鎖（封鎖清單裡還有，防火牆已經不擋）
+- 自己手動用 `iptables` 加的規則
+- Docker 寫的連接埠轉發規則
+
+所以偵測到 firewalld 在跑時，`set` 會先問：
+
+| 選擇 | 會發生什麼 |
+|---|---|
+| **1. 保留**（預設，直接 Enter） | 放行新埠改用「立即生效一次 + 寫入永久設定一次」，**完全不 reload**，這次換埠不會清掉上面那些規則。但之後只要有人 reload / 重啟 firewalld，它們一樣會被清掉 |
+| **2. 停用** | 先列出 firewalld 目前放行的服務、埠與 rich rule 數量，警告「停用後這台等於沒有本機防火牆，請確認雲端安全群組有在擋」，再確認一次才 `systemctl stop` + `disable` |
+
+停用是**換埠的一部分**，跟著換埠的成敗走：
+
+- `rollback`（含看門狗自動還原）、或 `set` 中途失敗 → **firewalld 一起恢復**（`enable` + `start`，規則照它原本的設定重建，舊埠的放行本來就在裡面）。
+- `confirm` → 定案，firewalld 維持停用，並提示之後要再啟用的指令。
+- 有 fail2ban 的話，`sync-port` 會發現封鎖方式跟防火牆對不上（`firewallcmd-*` 在 firewalld 停用後寫不進任何地方），
+  自動改成 iptables 方式並重啟 fail2ban；firewalld 恢復時再改回來。
+
+`-y` 與看門狗自動還原沒有人能回答，一律保留 firewalld（同樣不 reload）。不是 systemd 管理的 firewalld
+不提供停用選項。
+
+> **未在實機驗證**：上面的流程只用假的 `firewall-cmd` / `systemctl` 跑過邏輯測試，
+> 還沒在真的 firewalld 機器上跑過完整的停用 → confirm / rollback。
 
 **為什麼一定要另開視窗測試**：目前這條連線是在舊埠上建立的，改設定不會踢掉它。所以
 「這條連線還活著」完全不能證明新埠可用。只有真的用新埠開一條新連線登入成功，才算數。
