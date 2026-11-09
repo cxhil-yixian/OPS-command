@@ -1540,6 +1540,508 @@ function Show-PingPanel {
         )
 }
 
+# ---- IP / DNS 設定（對應 Linux NET/net-set.sh）----
+# 重點同 Linux 版：遠端改 IP 不要把自己鎖在門外。
+#   - 只做 IPv4、不動閘道。DHCP 網卡不改位址（理由見下方「批量新增 IP」的說明）。
+#   - 每次位址變更（新增／移除／替換）都先寫狀態、建好看門狗，才動網卡；看門狗建不起來就不做。
+#     時限內沒有「確認」，看門狗（SYSTEM 排程）就把網卡改回變更前。一次只能有一個變更。
+#   - 替換分兩階段：先加新位址（新舊並存）；確認時必須已經有從「別台機器」連到新位址的連線，
+#     證明新位址真的通，才移除舊位址。從舊位址確認一律拒絕。
+#   - 有 Established 連線正在用的本機位址不能移除（要換請用替換）；移除後閘道不在任何剩下的網段、
+#     或是網卡上最後一個位址，也不能移除。
+#   - 新加的位址設 SkipAsSource（只收不發）：Windows 選來源位址時可能挑到新加的同網段位址，
+#     讓這台主動連出去的連線（含 DNS 查詢、更新）換了來源 IP。只收不發等同 Linux 的 secondary 位址。
+#     替換確認時，新位址才接手舊位址原本的設定。
+#   - DNS 改錯不會斷遠端連線，所以不開看門狗，改用實際解析驗證：先向每台新 DNS 查一次，查不到就不改；
+#     改完再用系統解析查一次，改之前查得到、改之後查不到就自動改回去。不能刪到一台都不剩。
+# 還原指令、狀態、紀錄的放法同 RDP 換 Port（W2）：-EncodedCommand 放進排程、狀態存 HKLM、
+# 紀錄寫事件記錄（應用程式，來源 OPS-command，事件 100），SYSTEM 不碰使用者寫得到的路徑。
+$Script:NetStateKey = 'HKLM:\SOFTWARE\OPS-command\NetChange'
+$Script:NetTask     = 'OPS-NetChange-Watchdog'
+
+# 不用 [ipaddress]::TryParse 判斷：它接受「1」「1.2」這種寫法，前面補 0 的段還會被當成八進位。
+function Test-NetIpv4Text {
+    param([string]$Text)
+    $Text -match '^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$'
+}
+
+function ConvertTo-NetNumber {
+    param([string]$Ip)
+    $b = ([ipaddress]$Ip).GetAddressBytes()
+    [Array]::Reverse($b)
+    [uint64][BitConverter]::ToUInt32($b, 0)
+}
+
+function Test-NetSameSubnet {
+    param([string]$A, [string]$B, [int]$Prefix)
+    $mask = ([uint64]4294967295 -shl (32 - $Prefix)) -band [uint64]4294967295
+    ((ConvertTo-NetNumber $A) -band $mask) -eq ((ConvertTo-NetNumber $B) -band $mask)
+}
+
+# 要加到網卡上的位址有沒有問題；沒問題回傳 $null
+function Get-NetIpProblem {
+    param([string]$Ip, [int]$Prefix)
+    if (-not (Test-NetIpv4Text $Ip)) { return "「$Ip」不是 IPv4 位址（只支援 IPv4，格式像 192.168.1.10，不要補 0）。" }
+    $first = [int]$Ip.Split('.')[0]
+    if ($first -eq 0 -or $first -eq 127 -or $first -ge 224 -or $Ip -like '169.254.*') { return "$Ip 是保留位址（0.x、127.x、169.254.x、群播或保留段），不能設在網卡上。" }
+    if ($Prefix -lt 31) {
+        $hostBits = [uint64][Math]::Pow(2, 32 - $Prefix) - 1
+        $h = (ConvertTo-NetNumber $Ip) -band $hostBits
+        if ($h -eq 0) { return "$Ip/$Prefix 是網段位址，不能當主機位址。" }
+        if ($h -eq $hostBits) { return "$Ip/$Prefix 是廣播位址，不能當主機位址。" }
+    }
+    if (Get-NetIPAddress -IPAddress $Ip -ErrorAction SilentlyContinue) { return "$Ip 已經在這台機器的網卡上了。" }
+    $gw = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | ForEach-Object NextHop)
+    if ($gw -contains $Ip) { return "$Ip 是預設閘道的位址。" }
+    $null
+}
+
+function Get-NetAdapterInfo {
+    param([string]$Alias)
+    if (-not $Alias) { throw '沒有選網卡。' }
+    $a  = Get-NetAdapter -Name $Alias -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $a -or -not $a.InterfaceGuid) { throw "找不到網卡 [$Alias]。" }
+    $if =Get-NetIPInterface -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction Stop
+    $ips = @(Get-NetIPAddress -InterfaceIndex $a.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Sort-Object SkipAsSource, IPAddress)
+    $gw = @(Get-NetRoute -InterfaceIndex $a.ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
+        ForEach-Object NextHop | Where-Object { $_ -ne '0.0.0.0' } | Sort-Object -Unique)
+    [pscustomobject]@{ Alias = $a.Name; Index = [int]$a.ifIndex; Guid = [string]$a.InterfaceGuid; Dhcp = ($if.Dhcp -eq 'Enabled'); Ips = $ips; Gateways = $gw }
+}
+
+# 登錄檔 NameServer 有值 = 手動設定的 DNS；空的 = 自動取得（DHCP）
+function Get-NetDnsInfo {
+    param($Info)
+    $servers = @((Get-DnsClientServerAddress -InterfaceIndex $Info.Index -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses | Where-Object { $_ })
+    $ns = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\$($Info.Guid)" -Name NameServer -ErrorAction SilentlyContinue).NameServer
+    [pscustomobject]@{ Servers = $servers; Static = [bool]("$ns".Trim()) }
+}
+
+function Get-NetIfIndexByGuid {
+    param([string]$Guid)
+    $a = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { [string]$_.InterfaceGuid -eq $Guid } | Select-Object -First 1
+    if (-not $a) { throw "找不到網卡 $Guid（被移除或停用了？）。" }
+    [int]$a.ifIndex
+}
+
+function Test-NetHasIp {
+    param([int]$Index, [string]$Ip)
+    [bool](Get-NetIPAddress -InterfaceIndex $Index -IPAddress $Ip -AddressFamily IPv4 -ErrorAction SilentlyContinue)
+}
+
+# 正在使用這個本機位址的 TCP 連線。-RemoteOnly：只算從別台機器來的（拿來證明新位址從外面連得到）
+function Get-NetSessionsOn {
+    param([string]$Ip, [switch]$RemoteOnly)
+    $c = @(Get-NetTCPConnection -State Established -LocalAddress $Ip -ErrorAction SilentlyContinue)
+    if ($RemoteOnly) {
+        $local = @(Get-NetIPAddress -ErrorAction SilentlyContinue | ForEach-Object IPAddress)
+        $c = @($c | Where-Object { $_.RemoteAddress -notmatch '^(127\.|::1$|0\.0\.0\.0)' -and $local -notcontains $_.RemoteAddress })
+    }
+    $c
+}
+
+function Format-NetSessions {
+    param([array]$Sessions)
+    (@($Sessions | Select-Object -First 3 | ForEach-Object { "$($_.RemoteAddress) → 本機 Port $($_.LocalPort)" }) -join '、') +
+        $(if (@($Sessions).Count -gt 3) { " 等 $(@($Sessions).Count) 條" } else { '' })
+}
+
+# 移除某個位址前的檢查（唯讀）。回傳拒絕的理由，空陣列 = 可以移除
+function Get-NetRemoveBlockers {
+    param($Info, [string]$Ip)
+    $addr = @($Info.Ips | Where-Object { $_.IPAddress -eq $Ip })
+    if (-not $addr.Count) { return @("$Ip 不在網卡 [$($Info.Alias)] 上。") }
+    $r = @()
+    if ($addr[0].PrefixOrigin -ne 'Manual') { $r += "$Ip 不是手動設定的位址（來源：$($addr[0].PrefixOrigin)）。" }
+    if (@($Info.Ips).Count -le 1) { $r += "這是網卡 [$($Info.Alias)] 上唯一的 IPv4 位址。要換位址請用「替換 IP」。" }
+    $s = @(Get-NetSessionsOn $Ip)
+    if ($s.Count) { $r += "有 $($s.Count) 條連線正在使用 $Ip（$(Format-NetSessions $s)），移除會讓它們斷線。要換位址請用「替換 IP」。" }
+    foreach ($g in $Info.Gateways) {
+        $left = @($Info.Ips | Where-Object { $_.IPAddress -ne $Ip -and (Test-NetSameSubnet $_.IPAddress $g $_.PrefixLength) })
+        if (-not $left.Count) { $r += "移除後閘道 $g 不在網卡剩下任何位址的網段內，對外會斷線。" }
+    }
+    $r
+}
+
+function Get-NetPending {
+    $p = Get-ItemProperty -Path $Script:NetStateKey -ErrorAction SilentlyContinue
+    if ($p -and $p.Kind) { $p } else { $null }
+}
+
+function Test-NetWatchdog {
+    [bool](Get-ScheduledTask -TaskName $Script:NetTask -ErrorAction SilentlyContinue)
+}
+
+# 把網卡改回變更前的指令。看門狗（SYSTEM，-EncodedCommand）與「立即還原」跑的是同一份。
+# 網卡用 GUID 找：介面編號重開機後可能變，名稱可能被改。
+function Get-NetRevertScript {
+    param($State, [switch]$Watchdog)
+    $ip = $State.Ip; $new = $State.NewIp; $prefix = [int]$State.Prefix; $skip = if ($State.Skip -eq 'True') { '$true' } else { '$false' }
+    $lines = @(
+        "`$ErrorActionPreference = 'Continue'"
+        "`$i = (Get-NetAdapter | Where-Object { [string]`$_.InterfaceGuid -eq '$($State.Guid)' } | Select-Object -First 1).ifIndex"
+    )
+    # 網卡不見了就沒有東西可以還原；照樣清掉狀態與排程並留紀錄，不要留一個永遠失敗的看門狗
+    $miss = "eventcreate /L APPLICATION /SO OPS-command /ID 100 /T WARNING /D `"OPS-command network watchdog: adapter $($State.Guid) not found, nothing reverted.`" | Out-Null"
+    $lines += "if (-not `$i) { $(if ($Watchdog) { "$miss; " } else { '' })Remove-Item -Path '$($Script:NetStateKey)' -Recurse -Force -ErrorAction SilentlyContinue; Unregister-ScheduledTask -TaskName '$($Script:NetTask)' -Confirm:`$false -ErrorAction SilentlyContinue; throw 'network adapter $($State.Guid) not found' }"
+    switch ($State.Kind) {
+        'Add' {
+            $lines += "Remove-NetIPAddress -InterfaceIndex `$i -IPAddress '$ip' -Confirm:`$false"
+        }
+        'Remove' {
+            $lines += "if (-not (Get-NetIPAddress -InterfaceIndex `$i -IPAddress '$ip' -ErrorAction SilentlyContinue)) { New-NetIPAddress -InterfaceIndex `$i -IPAddress '$ip' -PrefixLength $prefix -SkipAsSource $skip | Out-Null }"
+        }
+        'Replace' {
+            $lines += "if (-not (Get-NetIPAddress -InterfaceIndex `$i -IPAddress '$ip' -ErrorAction SilentlyContinue)) { New-NetIPAddress -InterfaceIndex `$i -IPAddress '$ip' -PrefixLength $prefix -SkipAsSource $skip | Out-Null } else { Set-NetIPAddress -InterfaceIndex `$i -IPAddress '$ip' -SkipAsSource $skip }"
+            $lines += "if (Get-NetIPAddress -InterfaceIndex `$i -IPAddress '$new' -ErrorAction SilentlyContinue) { Remove-NetIPAddress -InterfaceIndex `$i -IPAddress '$new' -Confirm:`$false }"
+        }
+        default { throw "看不懂的變更紀錄：$($State.Kind)" }
+    }
+    $lines += "Remove-Item -Path '$($Script:NetStateKey)' -Recurse -Force -ErrorAction SilentlyContinue"
+    # 純 ASCII：事件訊息經 eventcreate 寫入，避開編碼問題
+    if ($Watchdog) { $lines += "eventcreate /L APPLICATION /SO OPS-command /ID 100 /T WARNING /D `"OPS-command network watchdog: not confirmed within $($State.Minutes) minutes, reverted $($State.Kind) $ip $new.`" | Out-Null" }
+    $lines += "Unregister-ScheduledTask -TaskName '$($Script:NetTask)' -Confirm:`$false -ErrorAction SilentlyContinue"
+    $lines -join "`r`n"
+}
+
+# 狀態先寫好、看門狗先建好，才動網卡。任何一步失敗就不做這次變更。
+function Enable-NetWatchdog {
+    param([hashtable]$State, [int]$Minutes)
+    $State.Minutes = $Minutes
+    $State.Since = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    try {
+        New-Item -Path $Script:NetStateKey -Force -ErrorAction Stop | Out-Null
+        foreach ($k in $State.Keys) { Set-ItemProperty -Path $Script:NetStateKey -Name $k -Value ([string]$State[$k]) -ErrorAction Stop }
+    } catch {
+        Remove-Item -Path $Script:NetStateKey -Recurse -Force -ErrorAction SilentlyContinue
+        throw "狀態寫不進登錄檔（$($_.Exception.Message)），這次不做變更。"
+    }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes((Get-NetRevertScript $State -Watchdog)))
+    try {
+        $ps        = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $action    = New-ScheduledTaskAction -Execute $ps -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
+        $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($Minutes)
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        # 時間到時機器剛好關著，開機後補跑；筆電用電池也照樣跑
+        $settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName $Script:NetTask -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+    } catch {
+        Remove-Item -Path $Script:NetStateKey -Recurse -Force -ErrorAction SilentlyContinue
+        throw "看門狗建不起來（$($_.Exception.Message)），這次不做變更——沒有自動還原就改 IP 太危險。"
+    }
+}
+
+function Wait-NetAddressReady {
+    param([int]$Index, [string]$Ip)
+    $a = $null
+    for ($k = 0; $k -lt 24; $k++) {
+        $a = Get-NetIPAddress -InterfaceIndex $Index -IPAddress $Ip -AddressFamily IPv4 -ErrorAction SilentlyContinue
+        if ($a.AddressState -eq 'Preferred') { return }
+        if ($a.AddressState -eq 'Duplicate') { throw "位址衝突：網路上已經有其他機器在用 $Ip。" }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "等了 6 秒，$Ip 的狀態還是「$($a.AddressState)」。"
+}
+
+function Assert-NetIpChangeAllowed {
+    param($Info)
+    if (Get-NetPending) { throw '還有一個 IP 變更沒有確認。請先「確認 IP 變更」或「立即還原」，一次只做一個。' }
+    if (Test-NetWatchdog) { throw "排程裡還有看門狗 $Script:NetTask，但沒有變更紀錄。請到工作排程器確認後刪除它再試。" }
+    if ($Info.Dhcp) { throw "網卡 [$($Info.Alias)] 是 DHCP。加上或拿掉固定位址會讓整張網卡變成固定 IP、DHCP 拿到的位址可能不見，遠端操作時等於斷線，所以不改。DNS 可以改。" }
+}
+
+function Undo-NetChange {
+    $p = Get-NetPending
+    if (-not $p) { throw "找不到進行中的變更紀錄（$Script:NetStateKey），沒有可還原的變更。" }
+    $out = @(& ([scriptblock]::Create((Get-NetRevertScript $p))) 2>&1 | ForEach-Object { "  $_" })
+    $i = Get-NetIfIndexByGuid $p.Guid
+    $ok = switch ($p.Kind) {
+        'Add'     { -not (Test-NetHasIp $i $p.Ip) }
+        'Remove'  { Test-NetHasIp $i $p.Ip }
+        'Replace' { (Test-NetHasIp $i $p.Ip) -and -not (Test-NetHasIp $i $p.NewIp) }
+    }
+    $out
+    if (-not $ok) { throw "還原後讀回來不對，請手動檢查網卡 [$($p.Adapter)] 的位址。看門狗與變更紀錄已清掉。" }
+    switch ($p.Kind) {
+        'Add'     { "[完成] 已移除剛才新增的 $($p.Ip)。" }
+        'Remove'  { "[完成] 已把 $($p.Ip)/$($p.Prefix) 加回 [$($p.Adapter)]。" }
+        'Replace' { "[完成] 已移除新位址 $($p.NewIp)，保留原本的 $($p.Ip)。" }
+    }
+}
+
+function Invoke-NetIpAdd {
+    param([string]$Alias, [string]$Ip, [int]$Prefix, [int]$Minutes)
+    $info = Get-NetAdapterInfo $Alias
+    Assert-NetIpChangeAllowed $info
+    $bad = Get-NetIpProblem $Ip $Prefix
+    if ($bad) { throw $bad }
+    Enable-NetWatchdog @{ Kind = 'Add'; Adapter = $info.Alias; Guid = $info.Guid; Ip = $Ip; Prefix = $Prefix; Skip = 'True'; NewIp = '' } $Minutes
+    try {
+        New-NetIPAddress -InterfaceIndex $info.Index -IPAddress $Ip -PrefixLength $Prefix -SkipAsSource $true -ErrorAction Stop | Out-Null
+        Wait-NetAddressReady $info.Index $Ip
+    } catch {
+        $msg = $_.Exception.Message
+        $undo = '已撤回，網卡維持原狀'
+        try { Undo-NetChange | Out-Null } catch { $undo = "撤回也失敗：$($_.Exception.Message)，請看「目前狀態」並手動檢查網卡" }
+        throw "新增 $Ip 失敗：$msg（$undo）"
+    }
+    "[完成] [$($info.Alias)] 已新增 $Ip/$Prefix（只收不發）；看門狗 $Minutes 分鐘後會自動移除。"
+    "要保留就按「確認 IP 變更」。"
+}
+
+function Invoke-NetIpRemove {
+    param([string]$Alias, [string]$Ip, [int]$Minutes)
+    $info = Get-NetAdapterInfo $Alias
+    Assert-NetIpChangeAllowed $info
+    if (-not (Test-NetIpv4Text $Ip)) { throw "「$Ip」不是 IPv4 位址。" }
+    $blk = @(Get-NetRemoveBlockers $info $Ip)
+    if ($blk.Count) { throw ("不能移除 $Ip：`r`n  - " + ($blk -join "`r`n  - ")) }
+    $addr = @($info.Ips | Where-Object { $_.IPAddress -eq $Ip })[0]
+    Enable-NetWatchdog @{ Kind = 'Remove'; Adapter = $info.Alias; Guid = $info.Guid; Ip = $Ip; Prefix = [int]$addr.PrefixLength; Skip = [string]$addr.SkipAsSource; NewIp = '' } $Minutes
+    try {
+        Remove-NetIPAddress -InterfaceIndex $info.Index -IPAddress $Ip -Confirm:$false -ErrorAction Stop
+        if (Test-NetHasIp $info.Index $Ip) { throw '移除後讀回來還在。' }
+    } catch {
+        $msg = $_.Exception.Message
+        $undo = '已撤回，網卡維持原狀'
+        try { Undo-NetChange | Out-Null } catch { $undo = "撤回也失敗：$($_.Exception.Message)，請看「目前狀態」並手動檢查網卡" }
+        throw "移除 $Ip 失敗：$msg（$undo）"
+    }
+    "[完成] [$($info.Alias)] 已移除 $Ip/$($addr.PrefixLength)；看門狗 $Minutes 分鐘後會自動加回來。"
+    "確定不需要了就按「確認 IP 變更」。"
+}
+
+function Invoke-NetIpReplace {
+    param([string]$Alias, [string]$Ip, [string]$NewIp, [int]$Minutes)
+    $info = Get-NetAdapterInfo $Alias
+    Assert-NetIpChangeAllowed $info
+    if (-not (Test-NetIpv4Text $Ip)) { throw "舊位址「$Ip」不是 IPv4 位址。" }
+    $old = @($info.Ips | Where-Object { $_.IPAddress -eq $Ip })
+    if (-not $old.Count) { throw "$Ip 不在網卡 [$($info.Alias)] 上。" }
+    $old = $old[0]
+    if ($old.PrefixOrigin -ne 'Manual') { throw "$Ip 不是手動設定的位址（來源：$($old.PrefixOrigin)）。" }
+    $prefix = [int]$old.PrefixLength
+    $bad = Get-NetIpProblem $NewIp $prefix
+    if ($bad) { throw $bad }
+    if (-not (Test-NetSameSubnet $Ip $NewIp $prefix)) { throw "$NewIp 和 $Ip/$prefix 不在同一個網段。替換只做同網段（前綴、閘道都不變）；跨網段請用「新增 IP」另外加。" }
+    Enable-NetWatchdog @{ Kind = 'Replace'; Adapter = $info.Alias; Guid = $info.Guid; Ip = $Ip; Prefix = $prefix; Skip = [string]$old.SkipAsSource; NewIp = $NewIp } $Minutes
+    try {
+        New-NetIPAddress -InterfaceIndex $info.Index -IPAddress $NewIp -PrefixLength $prefix -SkipAsSource $true -ErrorAction Stop | Out-Null
+        Wait-NetAddressReady $info.Index $NewIp
+    } catch {
+        $msg = $_.Exception.Message
+        $undo = '已撤回，網卡維持原狀'
+        try { Undo-NetChange | Out-Null } catch { $undo = "撤回也失敗：$($_.Exception.Message)，請看「目前狀態」並手動檢查網卡" }
+        throw "加上新位址 $NewIp 失敗：$msg（$undo）"
+    }
+    "[完成] 第一階段：[$($info.Alias)] 已加上 $NewIp/$prefix，和 $Ip 並存。看門狗 $Minutes 分鐘後會移除 $NewIp。"
+    "接下來："
+    "  1. 用『另一台電腦』連新位址 $NewIp（RDP 或 SSH）登入"
+    "  2. 在那條連線裡按「確認 IP 變更」，這時才移除舊位址 $Ip"
+    "  * 連不上就什麼都別做，時限到自動還原"
+    "[提醒] 雲端主機的位址通常由平台分配，要先在平台上把 $NewIp 指給這台；防火牆／安全群組也要放行。"
+}
+
+# 確認前要問的話。替換：列出還走舊位址、確認後會斷的連線
+function Get-NetConfirmPrompt {
+    $p = Get-NetPending
+    if (-not $p) { return '' }
+    switch ($p.Kind) {
+        'Add'    { "保留新增的 $($p.Ip)，取消看門狗？" }
+        'Remove' { "確定不要 $($p.Ip) 了？看門狗會取消，之後不會自動加回來。" }
+        'Replace' {
+            $s = @(Get-NetSessionsOn $p.Ip)
+            "確認後會移除舊位址 $($p.Ip)，由 $($p.NewIp) 接手。" +
+                $(if ($s.Count) { "`r`n`r`n目前還有 $($s.Count) 條連線走舊位址（$(Format-NetSessions $s)），會斷線。" } else { '' }) +
+                "`r`n`r`n確定？"
+        }
+    }
+}
+
+function Invoke-NetConfirm {
+    $p = Get-NetPending
+    if (-not $p) { throw '目前沒有進行中的 IP 變更。' }
+    if ($p.Kind -eq 'Replace') {
+        $proof = @(Get-NetSessionsOn $p.NewIp -RemoteOnly)
+        if (-not $proof.Count) {
+            throw "還沒有任何從別台機器連到新位址 $($p.NewIp) 的連線，不能確認——從舊位址確認不算數。請先用新位址重新連線（RDP 或 SSH），在那條連線裡再按一次。連不上就什麼都別做，看門狗會還原。"
+        }
+        $i = Get-NetIfIndexByGuid $p.Guid
+        # 先取消看門狗再動舊位址：否則剛好到期時，看門狗會把新位址拿掉
+        Unregister-ScheduledTask -TaskName $Script:NetTask -Confirm:$false -ErrorAction SilentlyContinue
+        Set-NetIPAddress -InterfaceIndex $i -IPAddress $p.NewIp -SkipAsSource ($p.Skip -eq 'True') -ErrorAction Stop
+        Remove-NetIPAddress -InterfaceIndex $i -IPAddress $p.Ip -Confirm:$false -ErrorAction Stop
+        if (Test-NetHasIp $i $p.Ip) { throw "舊位址 $($p.Ip) 移除後讀回來還在。看門狗已取消，請手動檢查。" }
+        Remove-Item -Path $Script:NetStateKey -Recurse -Force -ErrorAction SilentlyContinue
+        "[完成] 已移除舊位址 $($p.Ip)，由 $($p.NewIp) 接手（確認時有 $($proof.Count) 條連線從新位址進來：$(Format-NetSessions $proof)）。"
+        return
+    }
+    Unregister-ScheduledTask -TaskName $Script:NetTask -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item -Path $Script:NetStateKey -Recurse -Force -ErrorAction SilentlyContinue
+    if ($p.Kind -eq 'Add') { "[完成] 看門狗已取消，$($p.Ip) 保留在 [$($p.Adapter)]。" }
+    else { "[完成] 看門狗已取消，$($p.Ip) 不會再加回來。" }
+}
+
+# DNS：在介面執行緒先檢查輸入，真正的查詢、套用、驗證放背景（查不到時每台要等幾秒）
+function Get-NetDnsPlan {
+    param([string]$Alias, [string]$Dns, [string]$TestName, [switch]$Reset)
+    $info = Get-NetAdapterInfo $Alias
+    $cur = Get-NetDnsInfo $info
+    if ($TestName -notmatch '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$') { throw "驗證用網域「$TestName」格式不對。" }
+    if ($Reset) {
+        if (-not $info.Dhcp) { throw "網卡 [$($info.Alias)] 是固定 IP，沒有 DHCP 會給 DNS；改回自動等於一台 DNS 都不剩。" }
+        if (-not $cur.Static) { throw "網卡 [$($info.Alias)] 的 DNS 本來就是自動取得。" }
+        $servers = @()
+    } else {
+        $servers = @($Dns -split '[,;，、\s]+' | Where-Object { $_ })
+        if (-not $servers.Count) { throw '至少要留一台 DNS。（DHCP 網卡要改回自動取得，請按「DNS 改回自動」。）' }
+        foreach ($s in $servers) { if (-not (Test-NetIpv4Text $s)) { throw "「$s」不是 IPv4 位址（只支援 IPv4 的 DNS）。" } }
+        if (@($servers | Sort-Object -Unique).Count -ne $servers.Count) { throw 'DNS 清單裡有重複。' }
+        if ($cur.Static -and ($servers -join ',') -eq ($cur.Servers -join ',')) { throw '和目前的設定一樣，不用改。' }
+    }
+    [pscustomobject]@{ Info = $info; Cur = $cur; Servers = $servers; TestName = $TestName }
+}
+
+$Script:WorkerNetDns = @'
+param([int]$Index, [string]$Servers, [string]$TestName, [string]$WasStatic, [string]$Before)
+$ErrorActionPreference = 'Continue'
+$new = @($Servers.Split(',') | Where-Object { $_ })
+$old = @($Before.Split(',') | Where-Object { $_ })
+function Test-SystemDns {
+    Clear-DnsClientCache
+    $r = @(Resolve-DnsName -Name $TestName -Type A -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress })
+    $r.Count -gt 0
+}
+function Restore-Dns {
+    if ($WasStatic -eq '1') { Set-DnsClientServerAddress -InterfaceIndex $Index -ServerAddresses $old -ErrorAction Stop }
+    else { Set-DnsClientServerAddress -InterfaceIndex $Index -ResetServerAddresses -ErrorAction Stop }
+    "  已改回：$(@((Get-DnsClientServerAddress -InterfaceIndex $Index -AddressFamily IPv4).ServerAddresses) -join ', ')" + $(if ($WasStatic -eq '1') { '' } else { '（自動取得）' })
+}
+foreach ($s in $new) {
+    $r = @(Resolve-DnsName -Name $TestName -Server $s -Type A -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress })
+    if (-not $r.Count) {
+        Write-Error "DNS $s 查不到 $TestName，這次不改。（內網 DNS 查不到外部網域時，把「驗證用網域」改成內部網域。）"
+        return
+    }
+    "  $s 查得到 $TestName（$($r[0].IPAddress)）"
+}
+$before = Test-SystemDns
+try {
+    if ($new.Count) { Set-DnsClientServerAddress -InterfaceIndex $Index -ServerAddresses $new -ErrorAction Stop }
+    else { Set-DnsClientServerAddress -InterfaceIndex $Index -ResetServerAddresses -ErrorAction Stop }
+} catch {
+    Write-Error "套用失敗：$($_.Exception.Message)"
+    try { Restore-Dns } catch { }
+    return
+}
+Start-Sleep -Milliseconds 500
+$now = @((Get-DnsClientServerAddress -InterfaceIndex $Index -AddressFamily IPv4).ServerAddresses)
+"  套用後讀回：$($now -join ', ')"
+if ($new.Count -and ($now -join ',') -ne ($new -join ',')) {
+    Restore-Dns
+    Write-Error "讀回來的清單和設定的不一樣，已改回原本的設定。"
+    return
+}
+if (Test-SystemDns) {
+    "[完成] DNS 已更新，系統解析 $TestName 正常。"
+} elseif ($before) {
+    "  改之後系統解析不到 $TestName（改之前可以），自動改回原本的設定…"
+    Restore-Dns
+    if (Test-SystemDns) { "  改回後解析恢復正常。" } else { "  改回後仍解析不到，請手動檢查。" }
+    Write-Error "新的 DNS 設定讓系統解析失敗，已還原。"
+} else {
+    "[注意] 改之前系統就解析不到 $TestName，改之後也一樣；設定保留，請自行確認網路。"
+}
+'@
+
+function Get-NetSetStatus {
+    $p = Get-NetPending
+    if ($p) {
+        $desc = switch ($p.Kind) {
+            'Add'     { "新增 $($p.Ip)/$($p.Prefix)" }
+            'Remove'  { "移除 $($p.Ip)" }
+            'Replace' { "替換 $($p.Ip) → $($p.NewIp)（新舊並存中）" }
+        }
+        $task = Get-ScheduledTask -TaskName $Script:NetTask -ErrorAction SilentlyContinue
+        if ($task) {
+            $at = $null
+            try { $at = [datetime]$task.Triggers[0].StartBoundary } catch { }
+            "▶ 進行中：[$($p.Adapter)] $desc，尚未確認。" + $(if ($at) { "看門狗會在 $($at.ToString('HH:mm:ss')) 自動還原。" } else { '' })
+        } else {
+            "▶ 進行中：[$($p.Adapter)] $desc，但看門狗已經不在了！請手動「確認 IP 變更」或「立即還原」。"
+        }
+    } else { '沒有進行中的 IP 變更。' }
+    $used = @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -match '^\d+\.\d+\.\d+\.\d+$' -and $_.LocalAddress -notlike '127.*' -and $_.RemoteAddress -notlike '127.*' } |
+        Group-Object LocalAddress | ForEach-Object { "$($_.Name)（$($_.Count) 條）" })
+    '連線中使用的本機位址：' + $(if ($used.Count) { $used -join '、' } else { '無' }) + '　← 這些不能移除'
+    foreach ($name in @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | Sort-Object Name | ForEach-Object Name)) {
+        try {
+            $info = Get-NetAdapterInfo $name
+            $dns = Get-NetDnsInfo $info
+            "[$($info.Alias)]　" + $(if ($info.Dhcp) { 'DHCP' } else { '固定 IP' }) + '　閘道：' + $(if ($info.Gateways.Count) { $info.Gateways -join ', ' } else { '無' })
+            '　IPv4：' + $(if ($info.Ips.Count) { (@($info.Ips | ForEach-Object {
+                "$($_.IPAddress)/$($_.PrefixLength)" + $(if ($_.SkipAsSource) { '（只收不發）' } else { '' }) + $(if ($_.AddressState -ne 'Preferred') { "（$($_.AddressState)）" } else { '' })
+            }) -join '、') } else { '無' })
+            '　DNS：' + $(if ($dns.Servers.Count) { $dns.Servers -join ', ' } else { '無' }) + $(if ($dns.Static) { '（手動）' } else { '（自動取得）' })
+        } catch { "[$name] 讀取失敗：$($_.Exception.Message)" }
+    }
+}
+
+function Show-NetSetPanel {
+    $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | Sort-Object Name | ForEach-Object Name)
+    $defRoute = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+    $defAlias = if ($defRoute) { (Get-NetAdapter -InterfaceIndex $defRoute.ifIndex -ErrorAction SilentlyContinue).Name } else { $null }
+    $defDns = if ($defRoute) { (@((Get-DnsClientServerAddress -InterfaceIndex $defRoute.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses) -join ', ') } else { '' }
+    Show-FeaturePanel -Title 'IP / DNS 設定' -Subtitle '新舊位址並存 + 看門狗自動還原；DNS 改完實際解析驗證' -Width 900 -Height 740 `
+        -Note '位址的新增／移除／替換都會開看門狗，時限內沒按「確認 IP 變更」就自動還原。替換分兩階段：先加新位址，用新位址重新連線後再確認，才移除舊位址。有連線在用的位址不能移除。只做 IPv4、不改閘道；DHCP 網卡只能改 DNS。新加的位址只收不發，對外連線仍用原本的位址。' `
+        -Status { Get-NetSetStatus } `
+        -Inputs @(
+            @{ Name = 'Adapter'; Label = '網卡'; Type = 'Combo'; Items = $adapters; Default = $defAlias }
+            @{ Name = 'Ip'; Label = 'IP（新增／移除；替換時填舊的）'; Type = 'Text'; Width = 200 }
+            @{ Name = 'Prefix'; Label = '前綴長度（新增用）'; Type = 'Number'; Min = 1; Max = 32; Default = 24 }
+            @{ Name = 'NewIp'; Label = '替換成的新 IP'; Type = 'Text'; Width = 200 }
+            @{ Name = 'Minutes'; Label = '看門狗時限（分鐘）'; Type = 'Number'; Min = 1; Max = 60; Default = 5 }
+            @{ Name = 'Dns'; Label = 'DNS（逗號分隔，依優先順序）'; Type = 'Text'; Width = 320; Default = $defDns }
+            @{ Name = 'TestName'; Label = '驗證 DNS 用的網域'; Type = 'Text'; Width = 200; Default = 'cloudflare.com' }
+        ) `
+        -Actions @(
+            @{ Text = '新增 IP'; Style = 'primary'; Admin = $true; Width = 120
+               Confirm = { param($v) if (Test-NetIpv4Text $v.Ip) { "將在 [$($v.Adapter)] 新增 $($v.Ip)/$($v.Prefix)（只收不發，不改閘道），看門狗 $($v.Minutes) 分鐘。確定？" } else { '' } }
+               Run = { param($v) Invoke-NetIpAdd -Alias $v.Adapter -Ip $v.Ip -Prefix $v.Prefix -Minutes $v.Minutes } }
+            @{ Text = '移除 IP'; Style = 'danger'; Admin = $true; Width = 120
+               Confirm = { param($v) if (Test-NetIpv4Text $v.Ip) { "將從 [$($v.Adapter)] 移除 $($v.Ip)，看門狗 $($v.Minutes) 分鐘內沒確認會自動加回來。確定？" } else { '' } }
+               Run = { param($v) Invoke-NetIpRemove -Alias $v.Adapter -Ip $v.Ip -Minutes $v.Minutes } }
+            @{ Text = '替換 IP（新舊並存）'; Style = 'danger'; Admin = $true
+               Confirm = { param($v) if ((Test-NetIpv4Text $v.Ip) -and (Test-NetIpv4Text $v.NewIp)) { "第一階段：在 [$($v.Adapter)] 加上 $($v.NewIp)，和 $($v.Ip) 並存，看門狗 $($v.Minutes) 分鐘。`r`n舊位址要等你從新位址連進來、按「確認 IP 變更」才會移除。確定？" } else { '' } }
+               Run = { param($v) Invoke-NetIpReplace -Alias $v.Adapter -Ip $v.Ip -NewIp $v.NewIp -Minutes $v.Minutes } }
+            @{ Text = '確認 IP 變更'; Style = 'success'; Admin = $true; Width = 140
+               Confirm = { Get-NetConfirmPrompt }
+               Run = { Invoke-NetConfirm } }
+            @{ Text = '立即還原'; Style = 'danger'; Admin = $true; Width = 120
+               Confirm = '把網卡改回這次 IP 變更之前的樣子，並取消看門狗。確定？'
+               Run = { Undo-NetChange } }
+            @{ Text = '設定 DNS'; Style = 'primary'; Admin = $true; Width = 120
+               Run = {
+                   param($v)
+                   $plan = Get-NetDnsPlan -Alias $v.Adapter -Dns $v.Dns -TestName $v.TestName
+                   "[$($plan.Info.Alias)] DNS：$(if ($plan.Cur.Servers.Count) { $plan.Cur.Servers -join ', ' } else { '無' }) → $($plan.Servers -join ', ')"
+                   "先向每台新 DNS 查 $($plan.TestName)，查得到才改；改完用系統解析驗證，失敗會自動改回去。"
+               }
+               Worker = $Script:WorkerNetDns
+               WorkerArgs = { param($v) $plan = Get-NetDnsPlan -Alias $v.Adapter -Dns $v.Dns -TestName $v.TestName
+                   @($plan.Info.Index, ($plan.Servers -join ','), $plan.TestName, $(if ($plan.Cur.Static) { '1' } else { '0' }), ($plan.Cur.Servers -join ',')) } }
+            @{ Text = 'DNS 改回自動'; Style = 'light'; Admin = $true; Width = 130
+               Run = {
+                   param($v)
+                   $plan = Get-NetDnsPlan -Alias $v.Adapter -TestName $v.TestName -Reset
+                   "[$($plan.Info.Alias)] DNS：$($plan.Cur.Servers -join ', ') → 自動取得（DHCP）；改完用系統解析驗證，失敗會自動改回去。"
+               }
+               Worker = $Script:WorkerNetDns
+               WorkerArgs = { param($v) $plan = Get-NetDnsPlan -Alias $v.Adapter -TestName $v.TestName -Reset
+                   @($plan.Info.Index, '', $plan.TestName, '1', ($plan.Cur.Servers -join ',')) } }
+        )
+}
+
 function Show-BatchIpPanel {
     $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object Status -eq 'Up' | Sort-Object Name | ForEach-Object Name)
     Show-FeaturePanel -Title '批量新增 IP' -Subtitle '在同一張網卡加上一段連續的 IPv4 位址' `
@@ -2201,6 +2703,7 @@ function Show-WindowsPanel {
     )
     & $addSection '網路與防火牆' @(
         @{Title='Ping (ICMP) 設定';Action={Show-PingPanel};Style='info'}
+        @{Title='IP / DNS 設定（含看門狗）';Action={Show-NetSetPanel};Style='danger'}
         @{Title='防火牆 Port 管理';Action={Show-PortManagementPanel};Style='info'}
         @{Title='批量新增 IP';Action={Show-BatchIpPanel};Style='success'}
     )
