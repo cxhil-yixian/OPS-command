@@ -731,7 +731,7 @@ function Show-DiskManagementPanel {
 function Get-EventScenarios {
     @(
         @{ Key='1'; Name='非預期關機 / 重開機'; NeedAdmin=$false
-           Hint='查「這台為什麼會自己重開」。1074 會寫出是誰、用哪個程式要求的。'
+           Hint='這台有沒有自己重開、突然斷電，或被人關機。'
            Queries=@(
                @{ Log='System'; Provider='Microsoft-Windows-Kernel-Power';             Ids=@(41)   }
                @{ Log='System'; Provider='EventLog';                                   Ids=@(6008) }
@@ -739,25 +739,25 @@ function Get-EventScenarios {
                @{ Log='System'; Provider='Microsoft-Windows-WER-SystemErrorReporting'; Ids=@(1001) }
            ) }
         @{ Key='2'; Name='藍畫面與硬體錯誤'; NeedAdmin=$false
-           Hint='BugCheck 會帶停止碼與傾印檔位置;WHEA 是 CPU/記憶體/PCIe 回報的硬體錯誤。'
+           Hint='有沒有當機藍畫面，或 CPU、記憶體回報硬體錯誤。'
            Queries=@(
                @{ Log='System'; Provider='BugCheck';                        Ids=@(1001) }
                @{ Log='System'; Provider='Microsoft-Windows-WHEA-Logger';   Ids=@(17,18,19,20,47) }
            ) }
         @{ Key='3'; Name='磁碟與儲存'; NeedAdmin=$false
-           Hint='disk 7/51 是壞軌等級的徵兆,Ntfs 55 是檔案系統結構損毀,要盡快備份。'
+           Hint='硬碟有沒有壞軌、檔案系統有沒有損毀。有的話要盡快備份。'
            Queries=@(
                @{ Log='System'; Provider='disk';                     Ids=@(7,11,51,153) }
                @{ Log='System'; Provider='Microsoft-Windows-Ntfs';   Ids=@(55,98,130,137) }
                @{ Log='Application'; Provider='Wininit';             Ids=@(1001) }
            ) }
         @{ Key='4'; Name='服務異常'; NeedAdmin=$false
-           Hint='7040 是「啟動類型被改」—— 本工具停用 Windows 更新後被系統改回去,就是在這裡現形的。'
+           Hint='背景服務有沒有啟動失敗、意外停止，或被改了設定、裝了新服務。'
            Queries=@(
                @{ Log='System'; Provider='Service Control Manager'; Ids=@(7000,7001,7011,7022,7023,7024,7031,7034,7040,7045) }
            ) }
         @{ Key='5'; Name='應用程式當機 / 無回應'; NeedAdmin=$false
-           Hint='1000 是當掉,1002 是沒回應。詳細內容裡有出錯的模組名稱與位移。'
+           Hint='有沒有程式當掉或沒有回應。'
            Queries=@(
                @{ Log='Application'; Provider='Application Error';        Ids=@(1000) }
                @{ Log='Application'; Provider='Application Hang';         Ids=@(1002) }
@@ -765,49 +765,148 @@ function Get-EventScenarios {
                @{ Log='Application'; Provider='Windows Error Reporting';  Ids=@(1001) }
            ) }
         @{ Key='6'; Name='登入與帳號'; NeedAdmin=$true
-           Hint='4740 是帳號被鎖定。對外的機器如果它一直出現,代表有人在猜密碼、而且已經把你鎖在外面。'
+           Hint='有沒有人登入失敗、帳號被鎖；誰從哪個 IP 用遠端桌面連進來。'
            Queries=@(
-               @{ Log='Security'; Ids=@(4624,4625,4740,4648) }
+               @{ Log='Security'; Ids=@(4625,4740) }
+               @{ Log='Security'; Ids=@(4648) }
                @{ Log='Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational'; Ids=@(1149) }
                @{ Log='Microsoft-Windows-TerminalServices-LocalSessionManager/Operational';     Ids=@(21,23,24,25) }
            ) }
         @{ Key='7'; Name='Windows 更新'; NeedAdmin=$false
-           Hint='裝了什麼、失敗了什麼。更新被系統自己改回啟用的痕跡要看第 4 項的 7040。'
+           Hint='Windows 更新有沒有裝成功或失敗。'
            Queries=@(
                @{ Log='System'; Provider='Microsoft-Windows-WindowsUpdateClient'; Ids=@(19,20,43) }
            ) }
     )
 }
 
-# 執行一組查詢,回傳 Rows (依時間新到舊) 與 Problems。
-# Problems 跟「沒有紀錄」是兩回事,呼叫端必須分開呈現。
-function Invoke-EventQuery {
-    param([array]$Queries, [int]$Days = 7, [int]$Max = 50)
-    $start = (Get-Date).AddDays(-$Days)
-    $rows  = New-Object System.Collections.ArrayList
+# 背景查詢（另一個 runspace）：每一組 Jobs = @{ Key; Queries }，結果放進 $Sync[Key] = @{ Rows; Problems }。
+# 結果用共用的 hashtable 帶回來，因為 Start-UiBackground 的輸出會被轉成字串，事件物件要原樣保留。
+# Problems 跟「沒有紀錄」是兩回事，呼叫端必須分開呈現。
+$Script:WorkerEvents = @'
+param([object[]]$Jobs, [int]$Days, $Sync)
+$start = (Get-Date).AddDays(-$Days)
+foreach ($j in $Jobs) {
+    $rows = New-Object System.Collections.ArrayList
     $probs = New-Object System.Collections.ArrayList
-    foreach ($q in $Queries) {
+    foreach ($q in $j.Queries) {
         $f = @{ LogName = $q.Log; StartTime = $start }
         if ($q.Provider) { $f['ProviderName'] = $q.Provider }
-        if ($q.Ids)      { $f['Id']           = $q.Ids }
-        try {
-            $ev = Get-WinEvent -FilterHashtable $f -MaxEvents $Max -ErrorAction Stop
-            foreach ($e in $ev) { [void]$rows.Add($e) }
-        } catch {
-            # NoMatchingEventsFound = 正常的「這段期間沒有這種事件」,不是問題。
-            # NoMatchingProvidersFound = 這台從來沒發生過這類事件，來源還沒被註冊
-            # （實測：沒藍屏過的機器沒有 BugCheck、沒跑過 chkdsk 的沒有 Wininit），也是「沒有事件」。
-            # 其他的 (沒權限、記錄檔不存在) 一定要讓使用者看到,不能吞掉。
+        if ($q.Ids)      { $f['Id'] = $q.Ids }
+        try { foreach ($e in @(Get-WinEvent -FilterHashtable $f -MaxEvents 200 -ErrorAction Stop)) { [void]$rows.Add($e) } }
+        catch {
+            # NoMatchingEventsFound = 這段期間沒有這種事件；NoMatchingProvidersFound = 這台從來沒發生過、
+            # 來源還沒註冊（實測：沒藍屏過的機器沒有 BugCheck）。兩個都是「沒有事件」，不是問題。
+            # 其他的（沒權限、記錄檔不存在）一定要讓使用者看到。
             if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*' -or $_.FullyQualifiedErrorId -like 'NoMatchingProvidersFound*') { continue }
-            $src = $q.Log
-            if ($q.Provider) { $src = $src + " / " + $q.Provider }
-            [void]$probs.Add(("{0}: {1}" -f $src, $_.Exception.Message))
+            $src = $q.Log; if ($q.Provider) { $src += " / $($q.Provider)" }
+            [void]$probs.Add("$src：$($_.Exception.Message)")
         }
     }
-    @{
-        Rows     = @($rows | Sort-Object TimeCreated -Descending | Select-Object -First $Max)
-        Problems = @($probs)
+    # 每個查詢各自最多 200 筆，合併後不再截斷：大量的一般紀錄（例如 SSH 登入的 4648）不能把要注意的擠掉
+    $Sync[$j.Key] = @{ Rows = @($rows | Sort-Object TimeCreated -Descending); Problems = @($probs) }
+}
+'@
+
+# 白話說明：鍵是「來源（去掉 Microsoft-Windows-）|事件 ID」，值是 @(這代表什麼, 建議怎麼做, 要不要注意)；
+# 要不要注意填 'level' 的，依事件本身的層級（嚴重／錯誤／警告才算）。內容都對照過測試機上的實際訊息。
+# 「要注意」的才會讓首頁卡片變黃；登入成功、服務設定變更這類一般紀錄只列出來，不算異常。
+$Script:EventExplain = @{
+    'Kernel-Power|41'                  = @('沒有正常關機就重新啟動（突然斷電、當機或被強制關機）', '對照同一時間有沒有藍畫面；常發生就檢查電源、UPS 或機器過熱', $true)
+    'EventLog|6008'                    = @('上一次關機不是正常關機', '通常和「沒有正常關機」一起出現，對照時間找原因', $true)
+    'User32|1074'                      = @('有人或程式要求關機／重新開機', '看是哪個帳號、哪個程式；不是你做的就要查', $false)
+    'WER-SystemErrorReporting|1001'    = @('電腦曾經藍畫面，重開後回報了錯誤', '詳細內容有停止碼，拿停止碼查原因；常發生就更新驅動、檢查記憶體', $true)
+    'BugCheck|1001'                    = @('電腦曾經藍畫面（當機）', '詳細內容有停止碼；常發生就更新驅動、檢查記憶體', $true)
+    'WHEA-Logger|17'                   = @('硬體回報了可以自動修正的錯誤（PCIe）', '偶爾一次可以不管；一直出現就請機房或廠商檢查硬體', $true)
+    'WHEA-Logger|18'                   = @('硬體發生嚴重錯誤（CPU、記憶體或主機板）', '這通常會造成當機，請機房或廠商檢查硬體', $true)
+    'WHEA-Logger|19'                   = @('CPU 回報了可以自動修正的錯誤', '偶爾一次可以不管；一直出現就請機房或廠商檢查 CPU', $true)
+    'WHEA-Logger|20'                   = @('硬體回報了錯誤（CPU 或主機板）', '請機房或廠商檢查硬體', $true)
+    'WHEA-Logger|47'                   = @('記憶體回報了可以自動修正的錯誤', '偶爾一次可以不管；一直出現代表記憶體快壞了', $true)
+    'disk|7'                           = @('硬碟有壞軌（有區塊讀不到）', '盡快備份；用 CrystalDiskInfo 看硬碟健康度，準備換硬碟', $true)
+    'disk|11'                          = @('磁碟控制器回報錯誤', '檢查硬碟線材、控制器或虛擬主機平台的儲存', $true)
+    'disk|51'                          = @('寫入硬碟時發生錯誤', '盡快備份，檢查硬碟健康度', $true)
+    'disk|153'                         = @('讀寫硬碟要重試才成功', '偶爾可以不管；常出現代表硬碟或儲存變慢、快壞了', $true)
+    'Ntfs|55'                          = @('檔案系統結構損毀', '盡快備份，排時間執行 chkdsk /f 修復', $true)
+    # 98 實測是「磁碟區 D: 的健康情況良好，不需要採取任何動作」（資訊），有問題時才是警告以上，所以看層級
+    'Ntfs|98'                          = @('磁碟健康檢查的結果', '描述寫的不是「狀況良好」就要排時間執行 chkdsk', 'level')
+    'Ntfs|130'                         = @('檔案系統自己修好了一個問題', '留意是不是反覆出現', $false)
+    'Ntfs|137'                         = @('檔案系統的交易記錄出錯', '備份資料並檢查硬碟', $true)
+    'Wininit|1001'                     = @('開機時執行過磁碟檢查（chkdsk）', '詳細內容可以看修了什麼', $false)
+    'Service Control Manager|7000'     = @('服務啟動失敗', '看是哪個服務；是你需要的服務就要處理，不認得的通常可以不管', $true)
+    'Service Control Manager|7001'     = @('服務沒啟動，因為它依賴的服務沒起來', '先找出它依賴的那個服務為什麼沒起來', $true)
+    'Service Control Manager|7011'     = @('服務沒有在時間內回應', '偶爾一次可以不管；常發生代表機器太忙或那個服務有問題', $true)
+    'Service Control Manager|7022'     = @('服務啟動時卡住', '看是哪個服務；重要的服務要查原因', $true)
+    'Service Control Manager|7023'     = @('服務因為錯誤而停止', '看是哪個服務；重要的服務要查原因', $true)
+    'Service Control Manager|7024'     = @('服務因為錯誤而停止', '看是哪個服務；重要的服務要查原因', $true)
+    'Service Control Manager|7031'     = @('服務意外停止（可能會自動重新啟動）', '一直出現代表那個服務會反覆當掉', $true)
+    'Service Control Manager|7034'     = @('服務意外停止', '一直出現代表那個服務會反覆當掉', $true)
+    'Service Control Manager|7040'     = @('服務的啟動方式被改了', '如果是你停用 Windows 更新後又被改回來，就是系統自己改的', $false)
+    'Service Control Manager|7045'     = @('這台安裝了新的服務', '確認是你裝的軟體；不認得的服務可能是惡意程式', $false)
+    'Application Error|1000'           = @('程式當掉了', '常發生就更新或重裝那個程式', $true)
+    'Application Hang|1002'            = @('程式沒有回應，被關掉了', '常發生就更新或重裝那個程式', $true)
+    '.NET Runtime|1026'                = @('.NET 程式發生錯誤而結束', '常發生就更新或重裝那個程式', $true)
+    'Windows Error Reporting|1001'     = @('Windows 記錄了一次程式或系統錯誤', '通常和「程式當掉」一起出現，對照時間看', $false)
+    'Security-Auditing|4625'           = @('登入失敗（密碼錯或帳號不存在）', '同一個來源一直失敗代表有人在猜密碼，可以開「RDP 暴力破解自動封鎖」', $true)
+    'Security-Auditing|4740'           = @('帳號被鎖定了', '多半是有人一直猜密碼；到「帳號鎖定防護」看設定', $true)
+    'Security-Auditing|4648'           = @('用另一組帳號密碼登入（例如「以其他使用者身分執行」、連網路磁碟）', '確認是你自己做的', $false)
+    'TerminalServices-RemoteConnectionManager|1149' = @('有人用遠端桌面通過了帳號密碼驗證', '確認來源 IP 是你認得的', $false)
+    'TerminalServices-LocalSessionManager|21' = @('遠端桌面登入', '確認帳號與來源是你認得的', $false)
+    'TerminalServices-LocalSessionManager|23' = @('遠端桌面登出', '', $false)
+    'TerminalServices-LocalSessionManager|24' = @('遠端桌面中斷連線', '', $false)
+    'TerminalServices-LocalSessionManager|25' = @('遠端桌面重新連線', '確認帳號與來源是你認得的', $false)
+    'WindowsUpdateClient|19'           = @('更新安裝成功', '', $false)
+    'WindowsUpdateClient|20'           = @('更新安裝失敗', '詳細內容有錯誤碼；稍後再試，或到 Windows Update 手動安裝', $true)
+    'WindowsUpdateClient|43'           = @('開始安裝更新', '', $false)
+}
+
+# 同步版（「RDP 登入紀錄」用，只查少量）：跟背景版用同一份程式碼，結果直接回傳
+function Invoke-EventQuery {
+    param([array]$Queries, [int]$Days = 7, [int]$Max = 50)
+    $sync = @{}
+    & ([scriptblock]::Create($Script:WorkerEvents)) @(@{ Key = 'q'; Queries = $Queries }) $Days $sync
+    @{ Rows = @($sync.q.Rows | Select-Object -First $Max); Problems = @($sync.q.Problems) }
+}
+
+function Get-EventExplain {
+    param($Ev)
+    $p = ([string]$Ev.ProviderName) -replace '^Microsoft-Windows-', ''
+    $e = $Script:EventExplain["$p|$($Ev.Id)"]
+    if ($e) { return @{ What = $e[0]; Do = $e[1]; Warn = $(if ($e[2] -eq 'level') { $Ev.Level -in 1, 2, 3 } else { [bool]$e[2] }) } }
+    # 表裡沒有的（自訂查詢）：用事件描述第一行，層級是嚴重／錯誤／警告的算要注意
+    @{ What = (Get-EventBrief $Ev -Width 80); Do = ''; Warn = ($Ev.Level -in 1, 2, 3) }
+}
+
+# 從事件內容抽出「是誰、哪個服務、哪個程式」，接在白話說明後面
+function Get-EventSubject {
+    param($Ev)
+    try { $x = [xml]$Ev.ToXml() } catch { return '' }
+    $d = @{}
+    $first = $null
+    $vals = New-Object System.Collections.ArrayList
+    foreach ($n in @($x.Event.EventData.Data)) {
+        if (-not $n) { continue }
+        $t = if ($n -is [string]) { $n } else { [string]$n.'#text' }
+        if ($null -eq $first) { $first = $t }
+        [void]$vals.Add($t)
+        if ($n -isnot [string] -and $n.Name) { $d[$n.Name] = $t }
     }
+    if ($x.Event.UserData -and $x.Event.UserData.FirstChild) { foreach ($c in $x.Event.UserData.FirstChild.ChildNodes) { $d[$c.LocalName] = [string]$c.InnerText } }
+    $ip = { param($a) if ($a -and $a -ne '-' -and $a -ne '::1' -and $a -ne '127.0.0.1') { "，來源 $a" } else { '' } }
+    switch ([int]$Ev.Id) {
+        { $_ -in 7000, 7001, 7011, 7022, 7023, 7024, 7031, 7034, 7040 } { if ($d.param1) { return "服務「$($d.param1)」" } }
+        7045 { if ($d.ServiceName) { return "服務「$($d.ServiceName)」" } }
+        1074 { if ($d.param7) { return "$($d.param7)，用 $((([string]$d.param1) -split ' ')[0] | Split-Path -Leaf)$(if ($d.param3) { "，原因：$($d.param3)" })" } }
+        { $_ -in 55, 98, 130, 137 } { if ($d.DriveName) { return "磁碟 $($d.DriveName)" } }
+        { $_ -in 1000, 1002 } { if ($first) { return "程式 $first" } }
+        # Windows 錯誤報告 1001（應用程式記錄）：第 3 欄是類型（APPCRASH、AppHangB1…），第 6 欄是程式
+        1001 { if ($Ev.ProviderName -eq 'Windows Error Reporting' -and $vals.Count -ge 6 -and $vals[5]) { return "$($vals[2])：$($vals[5])" } }
+        4625 { return "帳號 $($d.TargetUserName)$(& $ip $d.IpAddress)" }
+        { $_ -in 4740, 4648 } { if ($d.TargetUserName) { return "帳號 $($d.TargetUserName)" } }
+        1149 { return "帳號 $($d.Param1)$(& $ip $d.Param3)" }
+        { $_ -in 21, 23, 24, 25 } { if ($d.User) { return "帳號 $($d.User)$(& $ip $d.Address)" } }
+        { $_ -in 19, 20, 43 } { if ($d.updateTitle) { return "$($d.updateTitle)$(if ($d.errorCode) { "（錯誤碼 $($d.errorCode)）" })" } }
+    }
+    ''
 }
 
 function Get-EventBrief {
@@ -914,8 +1013,10 @@ function Show-UiWindow {
 # 長時間的動作放到另一個 runspace 跑，介面才不會變成「沒有回應」。
 # 背景 runspace 看不到這支腳本的函式，所以 $Script 必須是自給自足的程式碼字串。
 # 執行中不讓使用者關視窗：Hyper-V、Windows 更新這類動作中途被拔掉，比等它跑完更糟。
+# 只是讀取的作業（事件檢查、查已安裝的軟體）加 -AllowClose：關視窗就直接停掉背景作業，不用等。
 function Start-UiBackground {
-    param([Windows.Forms.Form]$Form, [string]$Script, [object[]]$Arguments = @(), [scriptblock]$OnDone)
+    param([Windows.Forms.Form]$Form, [string]$Script, [object[]]$Arguments = @(), [scriptblock]$OnDone, [switch]$AllowClose)
+    $allowClose = [bool]$AllowClose
     $rs = [runspacefactory]::CreateRunspace()
     $rs.Open()
     $ps = [powershell]::Create()
@@ -937,6 +1038,13 @@ function Start-UiBackground {
     }.GetNewClosure())
     $Form.Add_FormClosing({
         param($s, $e)
+        if (-not $job.Done -and $allowClose) {
+            # 唯讀作業：停掉、不再回呼（視窗都要關了）
+            $job.Done = $true
+            try { $job.Timer.Stop(); $job.Timer.Dispose() } catch { }
+            try { [void]$job.PS.BeginStop($null, $null) } catch { }
+            return
+        }
         if (-not $job.Done) {
             $e.Cancel = $true
             [Windows.Forms.MessageBox]::Show($s, '作業還在進行，請等它完成再關閉視窗。', '請稍候', 'OK', 'Information') | Out-Null
@@ -2259,7 +2367,7 @@ function Show-AppsPanel {
         & $setBusy $true
         & $append '', "▶ $Doing", '執行中，請稍候（winget 每次可能要十幾秒；視窗可以拖動，不會卡住）…'
         $ctx.Then = $Then
-        Start-UiBackground -Form $ctx.Form -Script $worker -Arguments @($Mode, $Arg, $ctx.Winget) -OnDone $done
+        Start-UiBackground -Form $ctx.Form -Script $worker -Arguments @($Mode, $Arg, $ctx.Winget) -OnDone $done -AllowClose:($Mode -ne 'install')
     }.GetNewClosure()
 
     $onInstalled = {
@@ -3182,6 +3290,10 @@ function Show-EventDetailDialog {
     $text.Font=New-Object Drawing.Font('Microsoft JhengHei UI',10)
     $text.BackColor=[Drawing.Color]::White
     $sb=New-Object System.Text.StringBuilder
+    $ex=Get-EventExplain $EventRecord; $subj=Get-EventSubject $EventRecord
+    [void]$sb.AppendLine("這代表什麼：$($ex.What)$(if($subj){"（$subj）"})")
+    if($ex.Do){[void]$sb.AppendLine("建議怎麼做：$($ex.Do)")}
+    [void]$sb.AppendLine(''); [void]$sb.AppendLine('--- 技術資料（查資料或回報問題時用）---')
     [void]$sb.AppendLine("時間：$($EventRecord.TimeCreated)")
     [void]$sb.AppendLine("記錄檔：$($EventRecord.LogName)")
     [void]$sb.AppendLine("來源：$($EventRecord.ProviderName)")
@@ -3246,161 +3358,228 @@ function Show-CustomEventQueryDialog {
 }
 
 function Show-EventViewerPanel {
-    $form=New-Object Windows.Forms.Form
-    $form.Text='事件檢視器'
-    $form.Size=New-Object Drawing.Size(1100,700)
-    $form.MinimumSize=New-Object Drawing.Size(850,550)
-    $form.StartPosition='CenterParent'
-    $form.Font=New-Object Drawing.Font('Microsoft JhengHei UI',10); $form.BackColor=[Drawing.Color]::FromArgb(241,245,249)
-    $script:EventViewerForm=$form; $state=@{Days=7;CurrentRows=@();CurrentName='';CurrentQueries=@();Reload=$null}
-    $invokeEventQueryAction=${function:Invoke-EventQuery}
-    $eventBriefAction=${function:Get-EventBrief}
-    $eventDetailAction=${function:Show-EventDetailDialog}
-    $customQueryAction=${function:Show-CustomEventQueryDialog}
-    $restartAdminAction=${function:Restart-AsAdmin}
-    $left=New-Object Windows.Forms.FlowLayoutPanel
-    $left.Dock='Left'
-    $left.Width=255
-    $left.FlowDirection='TopDown'
-    $left.WrapContents=$false
-    $left.AutoScroll=$true
-    $left.Padding=New-Object Windows.Forms.Padding(8)
-    $top=New-Object Windows.Forms.FlowLayoutPanel
-    $top.Dock='Top'
-    $top.Height=48
-    $top.FlowDirection='LeftToRight'
-    $top.Padding=New-Object Windows.Forms.Padding(8,6,0,0)
-    $grid=New-Object Windows.Forms.DataGridView
-    $grid.Dock='Fill'
-    $grid.ReadOnly=$true
-    $grid.AllowUserToAddRows=$false
-    $grid.AllowUserToDeleteRows=$false
-    $grid.MultiSelect=$false
-    $grid.SelectionMode='FullRowSelect'
-    $grid.AutoSizeColumnsMode='Fill'
-    $grid.RowHeadersVisible=$false
-    $grid.BackgroundColor=[Drawing.Color]::White
-    $grid.EnableHeadersVisualStyles=$false
-    $grid.ColumnHeadersDefaultCellStyle.BackColor=[Drawing.Color]::FromArgb(30,58,138)
-    $grid.ColumnHeadersDefaultCellStyle.ForeColor=[Drawing.Color]::White
-    $grid.DefaultCellStyle.Font=New-Object Drawing.Font('Microsoft JhengHei UI',9)
-    $grid.AlternatingRowsDefaultCellStyle.BackColor=[Drawing.Color]::FromArgb(239,246,255)
-    [void]$grid.Columns.Add('When','時間')
-    [void]$grid.Columns.Add('Id','事件 ID')
-    [void]$grid.Columns.Add('Level','層級')
-    [void]$grid.Columns.Add('Provider','來源')
-    [void]$grid.Columns.Add('Brief','摘要')
-    $bottom=New-Object Windows.Forms.Panel; $bottom.Dock='Bottom'; $bottom.Height=54; $bottom.BackColor=[Drawing.Color]::FromArgb(226,232,240)
-    $status=New-Object Windows.Forms.Label
-    $status.Text='請點選左側事件情境。'
-    $status.Dock='Fill'
-    $status.TextAlign='MiddleLeft'
-    $status.Padding=New-Object Windows.Forms.Padding(10,0,0,0)
-    $detail=New-Object Windows.Forms.Button
-    $detail.Text='查看詳細'
-    $detail.Width=105
-    $detail.Dock='Right'
-    $detail.FlatStyle='Flat'
-    $detail.BackColor=[Drawing.Color]::FromArgb(30,64,175)
-    $detail.ForeColor=[Drawing.Color]::White
-    $export=New-Object Windows.Forms.Button
-    $export.Text='匯出 CSV'
-    $export.Width=105
-    $export.Dock='Right'
-    $export.FlatStyle='Flat'
-    $export.BackColor=[Drawing.Color]::FromArgb(22,101,52)
-    $export.ForeColor=[Drawing.Color]::White
-    $custom=New-Object Windows.Forms.Button
-    $custom.Text='自訂查詢'
-    $custom.Width=105
-    $custom.Dock='Right'
-    $custom.FlatStyle='Flat'
-    $custom.BackColor=[Drawing.Color]::FromArgb(219,234,254)
-    $custom.ForeColor=[Drawing.Color]::FromArgb(30,64,175)
-    $elevate=$null
-    if(-not $IsAdmin){$elevate=New-Object Windows.Forms.Button;$elevate.Text='以管理員重新開啟';$elevate.Width=150;$elevate.Dock='Right'}
-    $eventClose=New-Object Windows.Forms.Button
-    $eventClose.Text='關閉視窗'
-    $eventClose.Width=100
-    $eventClose.Dock='Right'
-    $eventClose.FlatStyle='Flat'
-    $eventClose.BackColor=[Drawing.Color]::FromArgb(254,226,226)
-    $eventClose.ForeColor=[Drawing.Color]::FromArgb(153,27,27)
-    $eventClose.Add_Click({$form.Close()}.GetNewClosure())
-    $bottom.Controls.Add($status)
-    $bottom.Controls.Add($detail)
-    $bottom.Controls.Add($export)
-    $bottom.Controls.Add($custom)
-    if($elevate){$bottom.Controls.Add($elevate)}
-    $bottom.Controls.Add($eventClose)
-    $form.Controls.Add($grid); $form.Controls.Add($left); $form.Controls.Add($top); $form.Controls.Add($bottom)
+    # 首頁＝健康檢查：打開就在背景掃 7 個情境，每個情境一張卡片（沒事／有幾筆要注意／需要管理員）。
+    # 點卡片才看清單；清單只有「時間、這代表什麼、建議怎麼做」，事件 ID、來源收進詳細內容與 CSV。
+    $win = New-UiWindow -Title '事件檢視器' -Subtitle '這台電腦最近有沒有出狀況？打開就自動檢查，點卡片看細節' -Width 1100 -Height 780
+    $form = $win.Form
+    $script:EventViewerForm = $form
+    # 閉包裡的 $Script: 不是這支腳本，要用的值先在這一層取出來
+    $worker = $Script:WorkerEvents
+    $scen = @(Get-EventScenarios)
+    $cOk = [Drawing.Color]::FromArgb(21, 128, 61); $cWarn = [Drawing.Color]::FromArgb(180, 83, 9)
+    $cGray = [Drawing.Color]::FromArgb(100, 116, 139); $cBad = [Drawing.Color]::FromArgb(185, 28, 28)
+    $cWarnBg = [Drawing.Color]::FromArgb(254, 249, 195)
+    $ctx = @{ Days = 7; Results = @{}; Busy = $false; Current = $null; Rows = @(); CustomName = ''; Cards = @{} }
 
-    $loadQuery={
-        $grid.Rows.Clear(); $state.CurrentRows=@(); $status.Text='查詢中…'; $form.Refresh(); [Windows.Forms.Application]::DoEvents()
-        try {
-            $result=& $invokeEventQueryAction -Queries $state.CurrentQueries -Days $state.Days -Max 200
-            $state.CurrentRows=@($result.Rows)
-            foreach($ev in $state.CurrentRows){$i=$grid.Rows.Add($ev.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss'),$ev.Id,$ev.LevelDisplayName,$ev.ProviderName,(& $eventBriefAction $ev -Width 100))
-                $grid.Rows[$i].Tag=$ev}
-            $status.Text="$($state.CurrentName)｜最近 $($state.Days) 天｜找到 $($state.CurrentRows.Count) 筆"
-            if($result.Problems.Count){$status.Text += '｜部分記錄檔讀取失敗（已顯示提示）'}
-            if($result.Problems.Count){[Windows.Forms.MessageBox]::Show("部分事件記錄檔無法讀取：`r`n`r`n"+($result.Problems -join "`r`n"),'事件讀取提示',[Windows.Forms.MessageBoxButtons]::OK,[Windows.Forms.MessageBoxIcon]::Warning)|Out-Null}
-        } catch {$status.Text="查詢失敗：$($_.Exception.Message)"}
+    # ---- 上方：時間範圍、重新檢查、總結
+    $bar = New-Object Windows.Forms.FlowLayoutPanel
+    $bar.Dock = 'Top'; $bar.Height = 50
+    $lblRange = New-Object Windows.Forms.Label; $lblRange.Text = '檢查範圍'; $lblRange.AutoSize = $true; $lblRange.Margin = New-Object Windows.Forms.Padding(0, 9, 6, 0)
+    $range = New-Object Windows.Forms.ComboBox; $range.DropDownStyle = 'DropDownList'; $range.Width = 140; $range.Margin = New-Object Windows.Forms.Padding(0, 5, 10, 0)
+    foreach ($t in '最近 24 小時', '最近 7 天', '最近 30 天') { [void]$range.Items.Add($t) }
+    $range.SelectedIndex = 1
+    $btnScan = New-UiButton '重新檢查' primary 110
+    $summary = New-Object Windows.Forms.Label; $summary.AutoSize = $true; $summary.Margin = New-Object Windows.Forms.Padding(10, 8, 0, 0); $summary.Font = New-UiFont 11 -Bold
+    $bar.Controls.Add($lblRange); $bar.Controls.Add($range); $bar.Controls.Add($btnScan); $bar.Controls.Add($summary)
+
+    # ---- 首頁：卡片
+    $homeView = New-Object Windows.Forms.FlowLayoutPanel
+    $homeView.Dock = 'Fill'; $homeView.AutoScroll = $true; $homeView.Padding = New-Object Windows.Forms.Padding(0, 6, 0, 0)
+    foreach ($s in $scen) {
+        $card = New-Object Windows.Forms.Panel
+        $card.Size = New-Object Drawing.Size(510, 112); $card.BackColor = [Drawing.Color]::White; $card.BorderStyle = 'FixedSingle'
+        $card.Margin = New-Object Windows.Forms.Padding(0, 0, 14, 14); $card.Cursor = 'Hand'
+        $title = New-Object Windows.Forms.Label; $title.Text = $s.Name; $title.AutoSize = $true; $title.Location = New-Object Drawing.Point(14, 10); $title.Font = New-UiFont 12 -Bold
+        $state = New-Object Windows.Forms.Label; $state.Text = '檢查中…'; $state.AutoSize = $true; $state.Location = New-Object Drawing.Point(14, 40); $state.Font = New-UiFont 10.5 -Bold; $state.ForeColor = $cGray
+        $hint = New-Object Windows.Forms.Label; $hint.Text = $s.Hint; $hint.AutoSize = $true; $hint.MaximumSize = New-Object Drawing.Size(480, 0); $hint.Location = New-Object Drawing.Point(14, 70); $hint.ForeColor = $cGray
+        $card.Controls.Add($title); $card.Controls.Add($state); $card.Controls.Add($hint)
+        $ctx.Cards[$s.Key] = @{ Panel = $card; State = $state }
+        $homeView.Controls.Add($card)
+    }
+
+    # ---- 清單頁
+    $listView = New-Object Windows.Forms.Panel
+    $listView.Dock = 'Fill'; $listView.Visible = $false
+    $listHead = New-Object Windows.Forms.Panel; $listHead.Dock = 'Top'; $listHead.Height = 78
+    $btnBack = New-UiButton '← 回到總覽' light 130
+    $btnBack.Location = New-Object Drawing.Point(0, 4)
+    $listTitle = New-Object Windows.Forms.Label; $listTitle.AutoSize = $true; $listTitle.Location = New-Object Drawing.Point(146, 6); $listTitle.Font = New-UiFont 13 -Bold
+    $listHint = New-Object Windows.Forms.Label; $listHint.AutoSize = $true; $listHint.MaximumSize = New-Object Drawing.Size(1020, 0); $listHint.Location = New-Object Drawing.Point(2, 48)
+    $listHead.Controls.Add($btnBack); $listHead.Controls.Add($listTitle); $listHead.Controls.Add($listHint)
+    $grid = New-Object Windows.Forms.DataGridView
+    $grid.Dock = 'Fill'; $grid.ReadOnly = $true; $grid.AllowUserToAddRows = $false; $grid.AllowUserToDeleteRows = $false; $grid.AllowUserToResizeRows = $false
+    $grid.MultiSelect = $false; $grid.SelectionMode = 'FullRowSelect'; $grid.AutoSizeColumnsMode = 'Fill'; $grid.RowHeadersVisible = $false
+    $grid.BackgroundColor = [Drawing.Color]::White; $grid.BorderStyle = 'None'
+    $grid.DefaultCellStyle.WrapMode = 'True'; $grid.AutoSizeRowsMode = 'AllCells'
+    foreach ($c in @(@('When', '時間', 16), @('What', '這代表什麼', 50), @('Do', '建議怎麼做', 40))) {
+        $i = $grid.Columns.Add($c[0], $c[1]); $grid.Columns[$i].FillWeight = $c[2]
+    }
+    $listView.Controls.Add($grid); $listView.Controls.Add($listHead)
+
+    # Fill 先加、Top 後加（後加的先排版）
+    $win.Body.Controls.Add($homeView); $win.Body.Controls.Add($listView); $win.Body.Controls.Add($bar)
+
+    # ---- 底部按鈕（底部列是由右往左排，「關閉視窗」在最右邊）
+    $btnDetail = New-UiButton '查看詳細' primary 110
+    $btnCsv = New-UiButton '匯出 CSV' success 110
+    $btnCustom = New-UiButton '自訂查詢（進階）' light 160
+    foreach ($b in $btnDetail, $btnCsv, $btnCustom) { $win.Footer.Controls.Add($b) }
+    $btnAdmin = $null
+    if (-not $IsAdmin) { $btnAdmin = New-UiButton '以管理員重新開啟' light 160; $win.Footer.Controls.Add($btnAdmin) }
+
+    # ---- 下面的閉包都直接建在這一層，只用這一層的變數
+    $renderCards = {
+        $need = 0; $pending = 0
+        foreach ($s in $scen) {
+            $card = $ctx.Cards[$s.Key]
+            $r = $ctx.Results[$s.Key]
+            $card.Panel.BackColor = [Drawing.Color]::White
+            if (-not $r) { $card.State.Text = '檢查中…'; $card.State.ForeColor = $cGray; $pending++; continue }
+            $rows = @($r.Rows)
+            $warn = @($rows | Where-Object { (Get-EventExplain $_).Warn })
+            if ($r.Problems.Count -and -not $rows.Count) {
+                if ($s.NeedAdmin -and -not $IsAdmin) { $card.State.Text = '● 需要管理員權限才看得到（點一下可以提權）'; $card.State.ForeColor = $cGray }
+                else { $card.State.Text = '✖ 讀不到這類紀錄（點一下看原因）'; $card.State.ForeColor = $cBad }
+            } elseif ($warn.Count) {
+                $need++
+                $card.State.Text = "⚠ $($warn.Count) 筆需要注意　最近一次 $($warn[0].TimeCreated.ToString('MM-dd HH:mm'))"
+                $card.State.ForeColor = $cWarn; $card.Panel.BackColor = $cWarnBg
+            } elseif ($rows.Count) { $card.State.Text = "✔ 沒有異常（有 $($rows.Count) 筆一般紀錄）"; $card.State.ForeColor = $cOk }
+            else { $card.State.Text = '✔ 沒有異常'; $card.State.ForeColor = $cOk }
+        }
+        $span = @('24 小時', '7 天', '30 天')[[Array]::IndexOf(@(1, 7, 30), $ctx.Days)]
+        if ($pending) { $summary.Text = "正在檢查最近 $span …"; $summary.ForeColor = $cGray }
+        elseif ($need) { $summary.Text = "最近 $span：有 $need 類需要注意，點黃色卡片看細節"; $summary.ForeColor = $cWarn }
+        else { $summary.Text = "最近 $span：沒有發現異常"; $summary.ForeColor = $cOk }
     }.GetNewClosure()
-    $state.Reload=$loadQuery
 
-    foreach($spec in @(@{Text='最近 24 小時';Days=1},@{Text='最近 7 天';Days=7},@{Text='最近 30 天';Days=30})){
-        $button=New-Object Windows.Forms.Button
-        $button.Text=$spec.Text
-        $button.Width=115
-        $button.Height=32
-        $button.FlatStyle='Flat'
-        $button.BackColor=[Drawing.Color]::FromArgb(219,234,254)
-        $button.ForeColor=[Drawing.Color]::FromArgb(30,64,175)
-        $d=$spec.Days
-        $button.Add_Click({$state.Days=$d;& $state.Reload}.GetNewClosure());$top.Controls.Add($button)
+    $fillList = {
+        param([string]$Key, [string]$Name, [string]$Hint, [int]$Days)
+        $r = $ctx.Results[$Key]
+        $ctx.Current = $Key
+        $grid.Rows.Clear()
+        $ctx.Rows = if ($r) { @($r.Rows) } else { @() }
+        $listTitle.Text = $Name
+        $span = if ($Days -eq 1) { '24 小時' } else { "$Days 天" }
+        # 要注意的全部列出；一般紀錄只列最近的，免得幾百筆把畫面塞滿（CSV 還是匯出全部）
+        $warnRows = @($ctx.Rows | Where-Object { (Get-EventExplain $_).Warn })
+        $normal = @($ctx.Rows | Where-Object { -not (Get-EventExplain $_).Warn })
+        $keep = [Math]::Max(50, 300 - $warnRows.Count)
+        # 需要注意的排最前面（各自新到舊），新手一打開就看到
+        $show = @(@($warnRows) + @($normal | Select-Object -First $keep))
+        $text = "$Hint　（最近 $span：$($warnRows.Count) 筆需要注意（黃底、排在最前面）、$($normal.Count) 筆一般紀錄；點兩下看詳細）"
+        if ($normal.Count -gt $keep) { $text += "`r`n一般紀錄太多，畫面只列最近 $keep 筆；「匯出 CSV」會匯出全部 $($ctx.Rows.Count) 筆。" }
+        if (-not $ctx.Rows.Count) { $text = "$Hint　（最近 $span 沒有任何紀錄）" }
+        if ($r -and $r.Problems.Count) { $text += "`r`n有些紀錄讀不到：" + ($r.Problems -join '；') }
+        $listHint.Text = $text
+        $listHint.ForeColor = if ($r -and $r.Problems.Count) { $cBad } else { $cGray }
+        foreach ($ev in $show) {
+            $ex = Get-EventExplain $ev
+            $subj = Get-EventSubject $ev
+            $what = if ($subj) { "$($ex.What)：$subj" } else { $ex.What }
+            $i = $grid.Rows.Add($ev.TimeCreated.ToString('yyyy-MM-dd HH:mm'), $what, $ex.Do)
+            $grid.Rows[$i].Tag = $ev
+            if ($ex.Warn) { $grid.Rows[$i].DefaultCellStyle.BackColor = $cWarnBg }
+        }
+        $homeView.Visible = $false; $listView.Visible = $true
+    }.GetNewClosure()
+
+    $setBusy = {
+        param([bool]$On)
+        $ctx.Busy = $On
+        foreach ($b in $btnScan, $btnCustom, $range) { $b.Enabled = -not $On }
+    }.GetNewClosure()
+
+    $onScanned = {
+        param($out, $err)
+        & $setBusy $false
+        foreach ($k in @($ctx.Sync.Keys)) { $ctx.Results[$k] = $ctx.Sync[$k] }
+        foreach ($s in $scen) { if (-not $ctx.Results[$s.Key]) { $ctx.Results[$s.Key] = @{ Rows = @(); Problems = @("檢查沒有完成：$(@($err) -join '；')") } } }
+        & $renderCards
+        $cur = $scen | Where-Object { $_.Key -eq $ctx.Current } | Select-Object -First 1
+        if ($cur -and $listView.Visible) { & $fillList $cur.Key $cur.Name $cur.Hint $ctx.Days }
+    }.GetNewClosure()
+
+    $scan = {
+        if ($ctx.Busy) { return }
+        & $setBusy $true
+        $ctx.Results = @{}
+        & $renderCards
+        $ctx.Sync = [hashtable]::Synchronized(@{})
+        $jobs = @($scen | ForEach-Object { @{ Key = $_.Key; Queries = $_.Queries } })
+        Start-UiBackground -Form $form -Script $worker -Arguments @($jobs, $ctx.Days, $ctx.Sync) -OnDone $onScanned -AllowClose
+    }.GetNewClosure()
+
+    $onCustom = {
+        param($out, $err)
+        & $setBusy $false
+        $ctx.Results['custom'] = if ($ctx.Sync['custom']) { $ctx.Sync['custom'] } else { @{ Rows = @(); Problems = @("查詢沒有完成：$(@($err) -join '；')") } }
+        & $fillList 'custom' $ctx.CustomName '自訂查詢的結果。' $ctx.CustomDays
+    }.GetNewClosure()
+
+    $openCard = {
+        param($s)
+        $r = $ctx.Results[$s.Key]
+        if (-not $r) { return }
+        if ($s.NeedAdmin -and -not $IsAdmin -and $r.Problems.Count -and -not @($r.Rows).Count) {
+            $answer = [Windows.Forms.MessageBox]::Show($form, '登入與帳號的紀錄（Security 記錄檔）要系統管理員才看得到。要以管理員身分重新開啟面板嗎？', '需要管理員權限', 'YesNo', 'Question')
+            if ($answer -eq 'Yes') { [void](Restart-AsAdmin) }
+            return
+        }
+        & $fillList $s.Key $s.Name $s.Hint $ctx.Days
+    }.GetNewClosure()
+
+    foreach ($s in $scen) {
+        $card = $ctx.Cards[$s.Key]
+        $one = $s
+        $click = { & $openCard $one }.GetNewClosure()
+        $card.Panel.Add_Click($click)
+        foreach ($c in $card.Panel.Controls) { $c.Add_Click($click) }
     }
-    foreach($scenario in (Get-EventScenarios)){
-        $button=New-Object Windows.Forms.Button
-        $button.Text=$scenario.Name
-        $button.Width=220
-        $button.Height=40
-        $button.FlatStyle='Flat'
-        $button.BackColor=[Drawing.Color]::FromArgb(30,64,175)
-        $button.ForeColor=[Drawing.Color]::White
-        $s=$scenario
-        $button.Add_Click({
-            if($s.NeedAdmin -and -not $IsAdmin){
-                $answer=[Windows.Forms.MessageBox]::Show('此情境包含 Security 登入事件，一般權限可能讀不到。要以管理員權限重新開啟面板嗎?','需要管理員權限',[Windows.Forms.MessageBoxButtons]::YesNo,[Windows.Forms.MessageBoxIcon]::Question)
-                if($answer -eq [Windows.Forms.DialogResult]::Yes){[void](& $restartAdminAction);return}
-            }
-            $state.CurrentName=$s.Name;$state.CurrentQueries=$s.Queries;& $state.Reload
-        }.GetNewClosure());$left.Controls.Add($button)
-    }
-    $grid.Add_CellDoubleClick({if($grid.SelectedRows.Count -gt 0){& $eventDetailAction $grid.SelectedRows[0].Tag}}.GetNewClosure())
-    $detail.Add_Click({if($grid.SelectedRows.Count -gt 0){& $eventDetailAction $grid.SelectedRows[0].Tag}else{[Windows.Forms.MessageBox]::Show('請先選取一筆事件。','提示','OK','Information')|Out-Null}}.GetNewClosure())
-    $custom.Add_Click({
-        $query=& $customQueryAction
-        if($query){$state.CurrentName=$query.Name;$state.CurrentQueries=$query.Queries;$state.Days=$query.Days;& $state.Reload}
+
+    $btnBack.Add_Click({ $listView.Visible = $false; $homeView.Visible = $true; $ctx.Current = $null }.GetNewClosure())
+    $btnScan.Add_Click({ & $scan }.GetNewClosure())
+    $range.Add_SelectedIndexChanged({ $ctx.Days = @(1, 7, 30)[$range.SelectedIndex]; & $scan }.GetNewClosure())
+    $showDetail = {
+        if (-not $listView.Visible -or -not $grid.SelectedRows.Count) { [void][Windows.Forms.MessageBox]::Show($form, '請先點一張卡片，再選一筆紀錄。', '查看詳細', 'OK', 'Information'); return }
+        Show-EventDetailDialog $grid.SelectedRows[0].Tag
+    }.GetNewClosure()
+    $grid.Add_CellDoubleClick({ param($s, $e) if ($e.RowIndex -ge 0) { & $showDetail } }.GetNewClosure())
+    $btnDetail.Add_Click({ & $showDetail }.GetNewClosure())
+    $btnCustom.Add_Click({
+        if ($ctx.Busy) { return }
+        $q = Show-CustomEventQueryDialog
+        if (-not $q) { return }
+        $ctx.CustomName = $q.Name
+        & $setBusy $true
+        $ctx.Sync = [hashtable]::Synchronized(@{})
+        $ctx.CustomDays = $q.Days
+        Start-UiBackground -Form $form -Script $worker -Arguments @(@(@{ Key = 'custom'; Queries = $q.Queries }), $q.Days, $ctx.Sync) -OnDone $onCustom -AllowClose
     }.GetNewClosure())
-    $export.Add_Click({
-        if(-not $state.CurrentRows.Count){[Windows.Forms.MessageBox]::Show('目前沒有可匯出的事件。','提示','OK','Information')|Out-Null;return}
-        $save=New-Object Windows.Forms.SaveFileDialog
-        $save.Filter='CSV 檔案 (*.csv)|*.csv'
-        $save.FileName=("事件紀錄-{0}-{1}.csv" -f ($state.CurrentName -replace '[\\/:*?"<>|]','_'),(Get-Date -Format 'yyyyMMdd-HHmmss'))
-        if($save.ShowDialog($form) -eq [Windows.Forms.DialogResult]::OK){try{$state.CurrentRows|Select-Object @{n='時間'
-                    e={$_.TimeCreated}},@{n='記錄檔'
-                    e={$_.LogName}},@{n='來源'
-                    e={$_.ProviderName}},@{n='事件ID'
-                    e={$_.Id}},@{n='層級'
-                    e={$_.LevelDisplayName}},@{n='描述'
-                    e={($_.Message -replace "`r?`n",' ')}}|Export-Csv -Path $save.FileName -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
-                [Windows.Forms.MessageBox]::Show("已匯出 $($state.CurrentRows.Count) 筆事件：`r`n$($save.FileName)",'完成','OK','Information')|Out-Null}catch{[Windows.Forms.MessageBox]::Show($_.Exception.Message,'匯出失敗','OK','Error')|Out-Null}}
-        $save.Dispose()
+    $btnCsv.Add_Click({
+        if (-not $listView.Visible -or -not $ctx.Rows.Count) { [void][Windows.Forms.MessageBox]::Show($form, '請先點一張有紀錄的卡片，再匯出。', '匯出 CSV', 'OK', 'Information'); return }
+        $save = New-Object Windows.Forms.SaveFileDialog
+        $save.Filter = 'CSV 檔案 (*.csv)|*.csv'
+        $save.FileName = ('事件紀錄-{0}-{1}.csv' -f ($listTitle.Text -replace '[\\/:*?"<>| ]', '_'), (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        try {
+            if ($save.ShowDialog($form) -ne 'OK') { return }
+            $ctx.Rows | ForEach-Object {
+                $ex = Get-EventExplain $_; $subj = Get-EventSubject $_
+                [pscustomobject][ordered]@{
+                    '時間' = $_.TimeCreated; '這代表什麼' = $(if ($subj) { "$($ex.What)：$subj" } else { $ex.What }); '建議怎麼做' = $ex.Do
+                    '需要注意' = $(if ($ex.Warn) { '是' } else { '' }); '記錄檔' = $_.LogName; '來源' = $_.ProviderName; '事件ID' = $_.Id
+                    '層級' = $_.LevelDisplayName; '原始描述' = ($_.Message -replace "`r?`n", ' ')
+                }
+            } | Export-Csv -Path $save.FileName -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+            [void][Windows.Forms.MessageBox]::Show($form, "已匯出 $($ctx.Rows.Count) 筆：`r`n$($save.FileName)", '完成', 'OK', 'Information')
+        } catch { [void][Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, '匯出失敗', 'OK', 'Error') }
+        finally { $save.Dispose() }
     }.GetNewClosure())
-    if($elevate){$elevate.Add_Click({[void](& $restartAdminAction)}.GetNewClosure())}
-    $owner=if($script:ActiveFeatureForm){$script:ActiveFeatureForm}else{$script:PanelForm}; [void]$form.ShowDialog($owner)
-    $state.Reload=$null; $script:EventViewerForm=$null; $form.Dispose()
+    if ($btnAdmin) { $btnAdmin.Add_Click({ [void](Restart-AsAdmin) }.GetNewClosure()) }
+
+    $form.Add_Shown({ & $scan }.GetNewClosure())
+    Show-UiWindow $win
+    $script:EventViewerForm = $null
 }
 
 function Show-WindowsPanel {
