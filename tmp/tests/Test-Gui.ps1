@@ -370,7 +370,9 @@ function Add-PanelSteps($Index, $Button, $Def) {
         $st = Get-StatusLabel $p.Form
         if ($st -and $st.Text -eq '讀取中…') { return $false }
         $lb = Get-LogBox $p.Form
-        if ($lb -and $lb.Text -match '執行中，請稍候' -and $lb.Text -notmatch '\[錯誤\]') { return $false }
+        # 只看最後一行：結果區是一直往下加的，「執行中，請稍候」那行做完也不會消失
+        $last = if ($lb) { @($lb.Lines | Where-Object { $_.Trim() }) | Select-Object -Last 1 } else { '' }
+        if ($last -match '執行中，請稍候') { return $false }
         $true
     } 40
     $steps += New-Step '截圖與記錄' {
@@ -435,7 +437,116 @@ function Get-ModifySteps($p) {
     if ($a -match 'Show-StorePanel') { return Get-StoreSteps }
     if ($a -match 'Show-TimePanel') { return Get-TimeSteps }
     if ($a -match 'Open-TaskManagerPanel') { return Get-ScheduleSteps }
+    if ($a -match 'Show-AppsPanel') { return Get-AppsSteps }
     @()
+}
+
+# 常用軟體安裝：在畫面上勾 PuTTY、按安裝、確認，裝完檢查真的在，再用 winget 移除（還原）。
+# 測試前就已經裝了 PuTTY 的機器不測（不能幫人移除原本就有的軟體）。
+$AppsTestId = 'PuTTY.PuTTY'
+function Get-AppsSteps {
+    $global:GT.Apps = @{ Id = $AppsTestId; Installed = $false; Restored = $false }
+    [void]$global:GT.Restore.Add({ Restore-Apps })
+    @(
+        (New-Step '軟體：等已安裝清單讀完' {
+            $t = (Get-LogBox $global:GT.Panel.Form).Text
+            if ($t -notmatch '已安裝軟體 \d+ 個|\[錯誤\]') { return $false }
+            $true
+        } 120),
+        (New-Step '軟體：勾選並按安裝' {
+            $f = $global:GT.Panel.Form
+            $g = Get-AllControls $f | Where-Object { $_ -is [Windows.Forms.DataGridView] } | Select-Object -First 1
+            $row = @($g.Rows | Where-Object { [string]$_.Cells['Id'].Value -eq $global:GT.Apps.Id })[0]
+            if (-not $row) { Add-TestFail "推薦清單裡找不到 $($global:GT.Apps.Id)"; $global:GT.Apps.Skip = $true; return $true }
+            if ([string]$row.Cells['State'].Value -like '已安裝*') { Log "    （$($global:GT.Apps.Id) 測試前就已安裝，略過安裝測試）"; $global:GT.Apps.Skip = $true; return $true }
+            $row.Cells['Pick'].Value = $true
+            $global:GT.YesTitles = @($global:GT.YesTitles) + '確認安裝'
+            $b = Get-Button $f '安裝勾選的軟體'
+            Log "    [改動] 勾選 $($global:GT.Apps.Id)，按「安裝勾選的軟體」"
+            $global:GT.Apps.Installed = $true
+            Invoke-Later $b { $b.PerformClick() }.GetNewClosure()
+            $true
+        }),
+        (New-Step '軟體：等安裝結束並檢查' {
+            if ($global:GT.Apps.Skip) { return $true }
+            $f = $global:GT.Panel.Form
+            $t = (Get-LogBox $f).Text
+            $id = [regex]::Escape($global:GT.Apps.Id)
+            if ($t -notmatch "\[(完成|錯誤)\] $id") { return $false }
+            Save-Shot $f "$($global:GT.Panel.Shot)-modify"
+            if ($t -match "\[完成\] $id[^\r\n]*") { Log "    [通過] $($Matches[0])" } else { Add-TestFail "安裝失敗：$(([regex]::Match($t, "\[錯誤\] $id[^\r\n]*")).Value)" }
+            $exe = Test-Path 'C:\Program Files\PuTTY\putty.exe'
+            if ($exe) { Log '    [通過] putty.exe 在磁碟上' } else { Add-TestFail 'putty.exe 不在磁碟上' }
+            $g = Get-AllControls $f | Where-Object { $_ -is [Windows.Forms.DataGridView] } | Select-Object -First 1
+            $row = @($g.Rows | Where-Object { [string]$_.Cells['Id'].Value -eq $global:GT.Apps.Id })[0]
+            if ([string]$row.Cells['State'].Value -like '已安裝*' -and $row.Cells['Pick'].ReadOnly) { Log "    [通過] 表格狀態：$($row.Cells['State'].Value)，勾選框已鎖住" } else { Add-TestFail "表格狀態沒更新：$($row.Cells['State'].Value)" }
+            $global:GT.Apps.Logged = "常用軟體安裝 > 安裝 $($global:GT.Apps.Id)"
+            $true
+        } 300),
+        # 第二段：移除後改從「搜尋其他軟體」裝（搜尋 → 查發行者 → 確認 → 安裝，是背景作業接背景作業）
+        (New-Step '軟體：移除後重新檢查' {
+            if ($global:GT.Apps.Skip) { return $true }
+            $wg = (Get-Command winget.exe -ErrorAction SilentlyContinue).Source
+            & $wg uninstall --exact --id $global:GT.Apps.Id --source winget --silent --disable-interactivity *> $null
+            Log "    [改動] 先移除 $($global:GT.Apps.Id)（結束碼 $LASTEXITCODE），再按「重新檢查已安裝」"
+            $f = $global:GT.Panel.Form
+            $global:GT.Apps.Count0 = [regex]::Matches((Get-LogBox $f).Text, '已安裝軟體 \d+ 個').Count
+            $b = Get-Button $f '重新檢查已安裝'
+            Invoke-Later $b { $b.PerformClick() }.GetNewClosure()
+            $true
+        } 90),
+        (New-Step '軟體：搜尋 putty' {
+            if ($global:GT.Apps.Skip) { return $true }
+            $f = $global:GT.Panel.Form
+            if ([regex]::Matches((Get-LogBox $f).Text, '已安裝軟體 \d+ 個').Count -le $global:GT.Apps.Count0) { return $false }
+            $tabs = Get-AllControls $f | Where-Object { $_ -is [Windows.Forms.TabControl] } | Select-Object -First 1
+            $tabs.SelectedIndex = 1
+            $q = Get-AllControls $tabs.TabPages[1] | Where-Object { $_ -is [Windows.Forms.TextBox] } | Select-Object -First 1
+            $q.Text = 'putty'
+            $b = Get-Button $f '搜尋'
+            Invoke-Later $b { $b.PerformClick() }.GetNewClosure()
+            $true
+        } 120),
+        (New-Step '軟體：選 PuTTY 按安裝' {
+            if ($global:GT.Apps.Skip) { return $true }
+            $f = $global:GT.Panel.Form
+            $t = (Get-LogBox $f).Text
+            if ($t -notmatch '找到 \d+ 個|找不到符合') { return $false }
+            $tabs = Get-AllControls $f | Where-Object { $_ -is [Windows.Forms.TabControl] } | Select-Object -First 1
+            $g = Get-AllControls $tabs.TabPages[1] | Where-Object { $_ -is [Windows.Forms.DataGridView] } | Select-Object -First 1
+            Log "    搜尋結果 $($g.Rows.Count) 列：$((@($g.Rows) | Select-Object -First 3 | ForEach-Object { "$($_.Cells['Name'].Value)=$($_.Cells['Id'].Value)" }) -join '、')"
+            $row = @($g.Rows | Where-Object { [string]$_.Cells['Id'].Value -eq $global:GT.Apps.Id })[0]
+            if (-not $row) { Add-TestFail "搜尋結果裡沒有 $($global:GT.Apps.Id)"; $global:GT.Apps.Skip = $true; return $true }
+            $g.CurrentCell = $row.Cells['Name']
+            Save-Shot $f "$($global:GT.Panel.Shot)-search"
+            $global:GT.Apps.MsgCount = $global:GT.Msgs.Count
+            $b = Get-Button $f '安裝選取的軟體'
+            Log "    [改動] 選 $($global:GT.Apps.Id)，按「安裝選取的軟體」"
+            Invoke-Later $b { $b.PerformClick() }.GetNewClosure()
+            $true
+        } 120),
+        (New-Step '軟體：等搜尋安裝結束' {
+            if ($global:GT.Apps.Skip) { return $true }
+            $f = $global:GT.Panel.Form
+            $id = [regex]::Escape($global:GT.Apps.Id)
+            if ([regex]::Matches((Get-LogBox $f).Text, "\[(完成|錯誤)\] $id").Count -lt 2) { return $false }
+            $confirm = @($global:GT.Msgs | Select-Object -Skip $global:GT.Apps.MsgCount | Where-Object { $_.Title -eq '確認安裝' })
+            if ($confirm.Count -and $confirm[0].Body -match '發行者') { Log "    [通過] 安裝前的確認視窗有發行者：$(([regex]::Match($confirm[0].Body, '發行者[:：][^\r\n]*')).Value)" }
+            else { Add-TestFail '安裝前沒有跳出含發行者的確認視窗' }
+            $m = [regex]::Matches((Get-LogBox $f).Text, "\[(完成|錯誤)\] $id[^\r\n]*")
+            if ($m[$m.Count - 1].Value -like '`[完成`]*') { Log "    [通過] $($m[$m.Count - 1].Value)" } else { Add-TestFail "搜尋安裝失敗：$($m[$m.Count - 1].Value)" }
+            Save-Shot $f "$($global:GT.Panel.Shot)-search-done"
+            $true
+        } 300)
+    )
+}
+function Restore-Apps {
+    $ap = $global:GT.Apps
+    if (-not $ap -or $ap.Restored -or -not $ap.Installed) { return }
+    $ap.Restored = $true
+    $wg = (Get-Command winget.exe -ErrorAction SilentlyContinue).Source
+    if ($wg) { & $wg uninstall --exact --id $ap.Id --source winget --silent --disable-interactivity *> $null }
+    Log "    [還原] winget uninstall $($ap.Id)：結束碼 $LASTEXITCODE；putty.exe 還在：$(Test-Path 'C:\Program Files\PuTTY\putty.exe')"
 }
 
 $StoreKey = 'HKLM:\SOFTWARE\Policies\Microsoft\WindowsStore'
@@ -617,6 +728,7 @@ function Test-ActionLog {
     if ($global:GT.Store.Logged) { $expect += $global:GT.Store.Logged }
     if ($global:GT.Time.Logged) { $expect += $global:GT.Time.Logged }
     if ($global:GT.Sch.Logged) { $expect += $global:GT.Sch.Logged }
+    if ($global:GT.Apps.Logged) { $expect += $global:GT.Apps.Logged }
     if (-not $expect) { return }
     Log ''
     Log '[操作記錄]'

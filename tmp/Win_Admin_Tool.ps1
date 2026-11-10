@@ -1955,6 +1955,423 @@ function Show-TimePanel {
         )
 }
 
+# ---- 常用軟體安裝（winget，E6；對應 Linux APPS）----
+# 只用 winget：官方 winget 來源（--source winget）、--exact --id 指定套件，不自己維護下載網址與 SHA256；
+# 安裝檔的 SHA256 由 winget 依官方套件清單核對，不加 --ignore-security-hash。
+# 測試機實測（zh-TW、winget 1.29）：
+#   - winget 不管主控台字碼頁，一律輸出 UTF-8。PowerShell 5.1 直接呼叫會把中文解成亂碼，
+#     所以用 Process 直接讀、指定 UTF-8（也不去改 [Console]::OutputEncoding，見 W1）。
+#   - 表格欄位依「顯示寬度」對齊（中文字算 2 格），欄與欄之間可能只隔 1 個空白、名稱本身也有空白，
+#     所以照標題列的欄位起點切，不用空白切。
+#   - 已安裝清單用 winget export（JSON，ID 與版本都精確），不解析 winget list 的表格。
+#   - 每次呼叫都可能先更新來源，慢的時候一次十幾秒，所以全部放背景。
+#   - 安裝後回頭用 export 確認真的在已安裝清單裡，不只看 winget 的結束碼。
+$Script:AppsRecommended = @(
+    @{ Id = 'Insecure.Nmap';                     Name = 'Nmap';                Use = '掃描 Port、確認服務有沒有開' }
+    @{ Id = 'leeter.WinMTR';                     Name = 'WinMTR';              Use = 'ping + traceroute，看網路是哪一段掉包' }
+    @{ Id = 'Microsoft.Sysinternals.Suite';      Name = 'Sysinternals Suite';  Use = '微軟官方工具組：Process Explorer、Autoruns、TCPView…' }
+    @{ Id = 'WiresharkFoundation.Wireshark';     Name = 'Wireshark';           Use = '抓封包。抓包驅動 Npcap 要另外手動安裝' }
+    @{ Id = 'PuTTY.PuTTY';                       Name = 'PuTTY';               Use = 'SSH / Telnet 連線' }
+    @{ Id = 'WinSCP.WinSCP';                     Name = 'WinSCP';              Use = 'SFTP / SCP 傳檔' }
+    @{ Id = '7zip.7zip';                         Name = '7-Zip';               Use = '壓縮／解壓縮' }
+    @{ Id = 'Notepad++.Notepad++';               Name = 'Notepad++';           Use = '文字編輯器' }
+    @{ Id = 'Git.Git';                           Name = 'Git';                 Use = '版本控制（含 Git Bash）' }
+    @{ Id = 'Microsoft.PowerShell';              Name = 'PowerShell 7';        Use = '新版 PowerShell，和內建的 5.1 並存' }
+    @{ Id = 'Microsoft.WindowsTerminal';         Name = 'Windows Terminal';    Use = '多分頁終端機' }
+    @{ Id = 'voidtools.Everything';              Name = 'Everything';          Use = '瞬間找到檔案' }
+    @{ Id = 'JAMSoftware.TreeSize.Free';         Name = 'TreeSize Free';       Use = '看哪個資料夾最佔空間' }
+    @{ Id = 'CrystalDewWorld.CrystalDiskInfo';   Name = 'CrystalDiskInfo';     Use = '看硬碟健康度（SMART）' }
+    @{ Id = 'Google.Chrome';                     Name = 'Google Chrome';       Use = '瀏覽器' }
+    @{ Id = 'Mozilla.Firefox';                   Name = 'Mozilla Firefox';     Use = '瀏覽器（winget 裝的是英文版，可在設定裡加中文）' }
+    @{ Id = 'Microsoft.VCRedist.2015+.x64';      Name = 'VC++ 2015-2022 執行環境 (x64)'; Use = '很多程式需要的執行環境' }
+    @{ Id = 'Microsoft.DotNet.DesktopRuntime.8'; Name = '.NET 8 桌面執行環境'; Use = '.NET 8 的視窗程式需要' }
+    @{ Id = 'Prometheus.WindowsExporter';        Name = 'windows_exporter';    Use = 'Prometheus 監控。裝完會有服務監聽 9182 Port' }
+)
+
+# 背景執行（另一個 runspace，看不到這支腳本的函式）。
+# 輸出：一般文字照印；PKG<tab>ID<tab>版本 = 已安裝；ROW<tab>名稱<tab>ID<tab>版本<tab>相符 = 搜尋結果；
+#       SHOW<tab>文字 = 套件資訊；RES<tab>ID<tab>結束碼 = 安裝結果；NONE = 搜尋沒結果；WARNSRC = 來源更新失敗
+$Script:WorkerApps = @'
+param([string]$Mode, [string]$Arg, [string]$Winget)
+$ErrorActionPreference = 'Stop'
+$script:SrcWarn = $false
+function Invoke-Wg([string]$ArgLine) {
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $Winget; $psi.Arguments = $ArgLine
+    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8; $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $p = [Diagnostics.Process]::Start($psi)
+    $errTask = $p.StandardError.ReadToEndAsync()
+    $out = $p.StandardOutput.ReadToEnd()
+    $p.WaitForExit()
+    # 轉圈圈與進度列用 \r 覆寫同一行：只留最後一段；█▒ 的進度條整行丟掉。
+    # 行尾本身是 \r\n，要先去掉行尾的 \r 再切，不然「最後一段」永遠是空字串（實測整份輸出都被丟掉）
+    $lines = @(($out + "`n" + $errTask.Result) -split "`n" | ForEach-Object { ($_.TrimEnd("`r") -split "`r")[-1].TrimEnd() } |
+        Where-Object { $_ -and $_ -notmatch '[█▒]' -and $_ -notmatch '^\s*[-\\|/]\s*$' })
+    $warn = @($lines | Where-Object { $_ -match '^(嘗試更新來源失敗|Failed in attempting to update the source)' })
+    if ($warn.Count) { $script:SrcWarn = $true }
+    @{ Code = $p.ExitCode; Lines = @($lines | Where-Object { $warn -notcontains $_ }) }
+}
+function Format-Code([int]$Code) { '0x{0:X8}' -f $Code }
+function Get-CharWidth([char]$c) {
+    $n = [int]$c
+    if (($n -ge 0x1100 -and $n -le 0x115F) -or ($n -ge 0x2E80 -and $n -le 0xA4CF) -or ($n -ge 0xAC00 -and $n -le 0xD7A3) -or
+        ($n -ge 0xF900 -and $n -le 0xFAFF) -or ($n -ge 0xFE30 -and $n -le 0xFE4F) -or ($n -ge 0xFF00 -and $n -le 0xFF60) -or
+        ($n -ge 0xFFE0 -and $n -le 0xFFE6)) { 2 } else { 1 }
+}
+# 表格：找 ----- 那一行，上一行是標題；照標題每一欄的起點（顯示寬度）切每一列
+function Get-Table([string[]]$Lines) {
+    $d = -1
+    for ($k = 1; $k -lt $Lines.Count; $k++) { if ($Lines[$k] -match '^-{10,}$') { $d = $k; break } }
+    if ($d -lt 1) { return }
+    $starts = @(); $col = 0; $prevSpace = $true
+    foreach ($ch in $Lines[$d - 1].ToCharArray()) {
+        if ($ch -ne ' ' -and $prevSpace) { $starts += $col }
+        $prevSpace = ($ch -eq ' '); $col += Get-CharWidth $ch
+    }
+    for ($k = $d + 1; $k -lt $Lines.Count; $k++) {
+        $cells = New-Object string[] ($starts.Count)
+        $col = 0; $ci = 0; $sb = New-Object Text.StringBuilder
+        foreach ($ch in $Lines[$k].ToCharArray()) {
+            while ($ci + 1 -lt $starts.Count -and $col -ge $starts[$ci + 1]) { $cells[$ci] = $sb.ToString().Trim(); [void]$sb.Clear(); $ci++ }
+            [void]$sb.Append($ch); $col += Get-CharWidth $ch
+        }
+        $cells[$ci] = $sb.ToString().Trim()
+        , $cells
+    }
+}
+function Get-Installed {
+    $f = Join-Path ([IO.Path]::GetTempPath()) ("ops-winget-" + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        $r = Invoke-Wg "export --output `"$f`" --source winget --include-versions --accept-source-agreements --disable-interactivity"
+        if (-not (Test-Path $f)) { throw "winget export 沒有產生已安裝清單（結束碼 $(Format-Code $r.Code)）：$(($r.Lines | Select-Object -Last 3) -join ' / ')" }
+        $j = [IO.File]::ReadAllText($f, [Text.Encoding]::UTF8) | ConvertFrom-Json
+        foreach ($p in @($j.Sources | ForEach-Object { $_.Packages })) { "PKG`t$($p.PackageIdentifier)`t$($p.Version)" }
+    } finally { Remove-Item $f -Force -ErrorAction SilentlyContinue }
+}
+$idRule = '^[A-Za-z0-9][\w\.\-\+]*$'
+switch ($Mode) {
+    'installed' { Get-Installed }
+    'search' {
+        $q = $Arg.Replace('"', '').Trim()
+        $r = Invoke-Wg "search --query `"$q`" --source winget --accept-source-agreements --disable-interactivity"
+        if ($r.Code -eq -1978335212) { 'NONE' }
+        elseif ($r.Code -ne 0) { throw "搜尋失敗（結束碼 $(Format-Code $r.Code)）：$(($r.Lines | Select-Object -Last 3) -join ' / ')" }
+        else {
+            foreach ($c in @(Get-Table $r.Lines)) {
+                if ($c.Count -ge 3 -and $c[1] -match '^\S+\.\S+$') { "ROW`t$($c[0])`t$($c[1])`t$($c[2])`t$(if ($c.Count -ge 4) { $c[3] })" }
+            }
+        }
+    }
+    'show' {
+        if ($Arg -notmatch $idRule) { throw "套件 ID 格式不對：$Arg" }
+        $r = Invoke-Wg "show --exact --id `"$Arg`" --source winget --accept-source-agreements --disable-interactivity"
+        if ($r.Code -ne 0) { throw "查不到 $Arg（結束碼 $(Format-Code $r.Code)）：$(($r.Lines | Select-Object -Last 3) -join ' / ')" }
+        $r.Lines | ForEach-Object { "SHOW`t$_" }
+    }
+    'install' {
+        $ids = @($Arg.Split(',') | Where-Object { $_ })
+        foreach ($id in $ids) { if ($id -notmatch $idRule) { throw "套件 ID 格式不對：$id" } }
+        foreach ($id in $ids) {
+            "▶ 安裝 $id …"
+            $r = Invoke-Wg "install --exact --id `"$id`" --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity"
+            $r.Lines | Select-Object -Last 8 | ForEach-Object { "    $_" }
+            "RES`t$id`t$($r.Code)"
+        }
+        # 回頭確認：重新列出已安裝的套件，不只看結束碼
+        Get-Installed
+    }
+    default { throw "看不懂的動作：$Mode" }
+}
+if ($script:SrcWarn) { 'WARNSRC' }
+'@
+
+function Get-AppsWinget {
+    $c = Get-Command winget.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($c) { $c.Source } else { $null }
+}
+
+# 找不到 winget 時給人看的說明。Windows Server 上沒有驗證過的安裝方式，不寫步驟（E3 先不測）。
+function Get-AppsWingetHelp {
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if ($os -and $os.ProductType -ne 1) {
+        return "找不到 winget。這台是 $($os.Caption)：Windows Server 上沒有驗證過的 winget 安裝方式，這個功能目前不支援，請改用手動下載安裝。"
+    }
+    "找不到 winget。winget 是 Windows「應用程式安裝程式」（App Installer）的一部分，Windows 10 1809 以後與 Windows 11 都能用：`r`n" +
+    "　1. 按「開啟 Microsoft Store」，安裝或更新「應用程式安裝程式」`r`n" +
+    "　2. 裝好後按「重新偵測」`r`n" +
+    "目前執行帳號：$([Security.Principal.WindowsIdentity]::GetCurrent().Name)。winget 是跟著「每個帳號」安裝的：如果你是輸入另一個管理員帳號的密碼來提權，" +
+    "那個帳號可能沒有 winget。請用那個帳號登入 Windows 一次並更新「應用程式安裝程式」，或改用本身就是管理員的帳號執行這個工具。"
+}
+
+function Show-AppsPanel {
+    $win  = New-UiWindow -Title '常用軟體安裝' -Subtitle '用 winget（微軟官方的套件管理工具）安裝；下載網址與 SHA256 由 winget 依官方套件清單核對' -Width 1080 -Height 820
+    $form = $win.Form
+    # 閉包裡的 $Script: 指的不是這支腳本，要用的值先在這一層取出來
+    $worker = $Script:WorkerApps
+    $textColor = $Script:Ui.Text
+    $ctx = @{ Form = $form; Winget = (Get-AppsWinget); Installed = @{}; Busy = $false; Buttons = @(); Then = $null; Pending = $null }
+
+    # ---- 上方：winget 狀態（找不到時顯示說明與按鈕）
+    $top = New-Object Windows.Forms.FlowLayoutPanel
+    $top.Dock = 'Top'; $top.AutoSize = $true; $top.AutoSizeMode = 'GrowAndShrink'; $top.FlowDirection = 'TopDown'; $top.WrapContents = $false
+    $info = New-Object Windows.Forms.Label
+    $info.AutoSize = $true; $info.MaximumSize = New-Object Drawing.Size(1010, 0); $info.Margin = New-Object Windows.Forms.Padding(0, 0, 0, 8)
+    $top.Controls.Add($info)
+    $noWg = New-Object Windows.Forms.FlowLayoutPanel
+    $noWg.AutoSize = $true; $noWg.AutoSizeMode = 'GrowAndShrink'
+    $btnStore = New-UiButton '開啟 Microsoft Store' primary 200
+    $btnDetect = New-UiButton '重新偵測' light 120
+    $noWg.Controls.Add($btnStore); $noWg.Controls.Add($btnDetect)
+    $top.Controls.Add($noWg)
+
+    # ---- 中間：推薦清單 / 搜尋 兩個分頁
+    $tabs = New-Object Windows.Forms.TabControl
+    $tabs.Dock = 'Fill'
+    $newGrid = {
+        $g = New-Object Windows.Forms.DataGridView
+        $g.Dock = 'Fill'; $g.AllowUserToAddRows = $false; $g.AllowUserToDeleteRows = $false; $g.AllowUserToResizeRows = $false
+        $g.RowHeadersVisible = $false; $g.SelectionMode = 'FullRowSelect'; $g.MultiSelect = $false
+        $g.BackgroundColor = [Drawing.Color]::White; $g.BorderStyle = 'None'; $g.AutoSizeColumnsMode = 'Fill'
+        $g.ColumnHeadersHeightSizeMode = 'AutoSize'; $g.RowTemplate.Height = 28
+        $g
+    }
+    $addCol = {
+        param($g, [string]$Name, [string]$Header, [int]$Weight, [switch]$Check)
+        $c = if ($Check) { New-Object Windows.Forms.DataGridViewCheckBoxColumn } else { New-Object Windows.Forms.DataGridViewTextBoxColumn }
+        $c.Name = $Name; $c.HeaderText = $Header; $c.FillWeight = $Weight; $c.ReadOnly = -not $Check
+        [void]$g.Columns.Add($c)
+    }
+
+    $tab1 = New-Object Windows.Forms.TabPage; $tab1.Text = '推薦清單'; $tab1.Padding = New-Object Windows.Forms.Padding(8)
+    $grid1 = & $newGrid
+    & $addCol $grid1 'Pick' '安裝' 8 -Check
+    & $addCol $grid1 'Name' '軟體' 26
+    & $addCol $grid1 'Use' '用途' 46
+    & $addCol $grid1 'State' '狀態' 22
+    & $addCol $grid1 'Id' 'winget ID' 34
+    foreach ($a in $Script:AppsRecommended) { [void]$grid1.Rows.Add($false, $a.Name, $a.Use, '', $a.Id) }
+    # 勾選框點一下就生效（預設要離開儲存格才算）
+    $grid1.Add_CurrentCellDirtyStateChanged({ if ($grid1.IsCurrentCellDirty) { [void]$grid1.CommitEdit('CurrentCellChange') } }.GetNewClosure())
+    $bar1 = New-Object Windows.Forms.FlowLayoutPanel
+    $bar1.Dock = 'Bottom'; $bar1.Height = 50; $bar1.Padding = New-Object Windows.Forms.Padding(0, 8, 0, 0)
+    $btnInstall = New-UiButton '安裝勾選的軟體' success 180
+    $btnRefresh = New-UiButton '重新檢查已安裝' light 160
+    $bar1.Controls.Add($btnInstall); $bar1.Controls.Add($btnRefresh)
+    $tab1.Controls.Add($grid1); $tab1.Controls.Add($bar1)
+
+    $tab2 = New-Object Windows.Forms.TabPage; $tab2.Text = '搜尋其他軟體'; $tab2.Padding = New-Object Windows.Forms.Padding(8)
+    $sbar = New-Object Windows.Forms.FlowLayoutPanel
+    $sbar.Dock = 'Top'; $sbar.Height = 48
+    $query = New-Object Windows.Forms.TextBox; $query.Width = 320; $query.Margin = New-Object Windows.Forms.Padding(0, 6, 10, 0)
+    $btnSearch = New-UiButton '搜尋' primary 100
+    $sNote = New-Object Windows.Forms.Label
+    $sNote.AutoSize = $true; $sNote.Margin = New-Object Windows.Forms.Padding(6, 9, 0, 0)
+    $sNote.Text = '只搜尋官方 winget 來源。搜尋結果不含發行者，安裝前會先查出來給你確認。'
+    $sbar.Controls.Add($query); $sbar.Controls.Add($btnSearch); $sbar.Controls.Add($sNote)
+    $grid2 = & $newGrid
+    & $addCol $grid2 'Name' '名稱' 30
+    & $addCol $grid2 'Id' 'winget ID' 36
+    & $addCol $grid2 'Ver' '版本' 14
+    & $addCol $grid2 'Match' '相符' 18
+    & $addCol $grid2 'State' '這台' 16
+    $bar2 = New-Object Windows.Forms.FlowLayoutPanel
+    $bar2.Dock = 'Bottom'; $bar2.Height = 50; $bar2.Padding = New-Object Windows.Forms.Padding(0, 8, 0, 0)
+    $btnInstall2 = New-UiButton '安裝選取的軟體' success 180
+    $bar2.Controls.Add($btnInstall2)
+    $tab2.Controls.Add($grid2); $tab2.Controls.Add($sbar); $tab2.Controls.Add($bar2)
+    $tabs.TabPages.Add($tab1); $tabs.TabPages.Add($tab2)
+
+    # ---- 下方：結果區
+    $log = New-Object Windows.Forms.TextBox
+    $log.Multiline = $true; $log.ReadOnly = $true; $log.ScrollBars = 'Vertical'; $log.WordWrap = $true
+    $log.Dock = 'Bottom'; $log.Height = 190; $log.BorderStyle = 'FixedSingle'
+    $log.BackColor = $Script:Ui.LogBg; $log.ForeColor = $Script:Ui.LogFg; $log.Font = New-UiFont 10
+
+    # Fill 要先加（z-order 在最上面、最後才排版），Top / Bottom 後加
+    $win.Body.Controls.Add($tabs); $win.Body.Controls.Add($top); $win.Body.Controls.Add($log)
+
+    $ctx.Grid1 = $grid1; $ctx.Grid2 = $grid2; $ctx.Log = $log; $ctx.Info = $info; $ctx.NoWg = $noWg; $ctx.Tabs = $tabs; $ctx.Query = $query
+    $ctx.Buttons = @($btnInstall, $btnRefresh, $btnSearch, $btnInstall2)
+
+    # 下面的閉包都直接建在這一層，只用 $ctx 與這一層的變數（GetNewClosure 只帶走當下這一層）
+    $append = {
+        param([object[]]$Lines)
+        foreach ($l in $Lines) { if (-not $ctx.Log.IsDisposed) { $ctx.Log.AppendText("$l`r`n") } }
+    }.GetNewClosure()
+    $setBusy = {
+        param([bool]$On)
+        $ctx.Busy = $On
+        foreach ($b in $ctx.Buttons) { if (-not $b.IsDisposed) { $b.Enabled = -not $On } }
+    }.GetNewClosure()
+    $parsePkgs = {
+        param($Lines)
+        $h = @{}
+        foreach ($l in @($Lines)) { if ([string]$l -like "PKG`t*") { $p = ([string]$l).Split("`t"); $h[$p[1]] = $p[2] } }
+        $h
+    }.GetNewClosure()
+    $updateGrid = {
+        foreach ($row in $ctx.Grid1.Rows) {
+            $id = [string]$row.Cells['Id'].Value
+            if ($ctx.Installed.ContainsKey($id)) {
+                $row.Cells['State'].Value = "已安裝 $($ctx.Installed[$id])"
+                $row.Cells['Pick'].Value = $false; $row.Cells['Pick'].ReadOnly = $true
+                $row.DefaultCellStyle.ForeColor = [Drawing.Color]::FromArgb(100, 116, 139)
+            } else {
+                $row.Cells['State'].Value = '未安裝'
+                $row.Cells['Pick'].ReadOnly = $false
+                $row.DefaultCellStyle.ForeColor = [Drawing.Color]::Empty
+            }
+        }
+        foreach ($row in $ctx.Grid2.Rows) {
+            $id = [string]$row.Cells['Id'].Value
+            $row.Cells['State'].Value = if ($ctx.Installed.ContainsKey($id)) { "已安裝 $($ctx.Installed[$id])" } else { '' }
+        }
+    }.GetNewClosure()
+    $setWinget = {
+        if ($ctx.Winget) {
+            $ver = try { (& $ctx.Winget --version 2>$null | Select-Object -First 1) } catch { '' }
+            $ctx.Info.Text = "winget $ver　$($ctx.Winget)`r`n勾選要裝的軟體後按「安裝勾選的軟體」；已經裝了的會顯示版本、不能勾。安裝是靜默安裝，會自動同意各軟體的授權條款。"
+            $ctx.Info.ForeColor = $textColor
+            $ctx.NoWg.Visible = $false; $ctx.Tabs.Enabled = $true
+        } else {
+            $ctx.Info.Text = Get-AppsWingetHelp
+            $ctx.Info.ForeColor = [Drawing.Color]::FromArgb(153, 27, 27)
+            $ctx.NoWg.Visible = $true; $ctx.Tabs.Enabled = $false
+            foreach ($row in $ctx.Grid1.Rows) { $row.Cells['State'].Value = '—' }
+        }
+    }.GetNewClosure()
+
+    # 背景作業結束：先把共同的部分處理掉，再交給這次動作自己的處理（$ctx.Then）
+    $done = {
+        param($out, $err)
+        & $setBusy $false
+        $lines = @($out | ForEach-Object { [string]$_ })
+        if ($lines -contains 'WARNSRC') { & $append '[注意] winget 這次更新套件來源失敗，用的是本機快取的清單（可能不是最新版本）。' }
+        try { & $ctx.Then @($lines | Where-Object { $_ -ne 'WARNSRC' }) @($err) }
+        catch { & $append "[錯誤] $($_.Exception.Message)" }
+        foreach ($e in @($err)) { & $append "[錯誤] $e" }
+    }.GetNewClosure()
+    $run = {
+        param([string]$Mode, [string]$Arg, [scriptblock]$Then, [string]$Doing)
+        if ($ctx.Busy) { return }
+        & $setBusy $true
+        & $append '', "▶ $Doing", '執行中，請稍候（winget 每次可能要十幾秒；視窗可以拖動，不會卡住）…'
+        $ctx.Then = $Then
+        Start-UiBackground -Form $ctx.Form -Script $worker -Arguments @($Mode, $Arg, $ctx.Winget) -OnDone $done
+    }.GetNewClosure()
+
+    $onInstalled = {
+        param($Lines, $Errs)
+        if (@($Errs).Count) { foreach ($row in $ctx.Grid1.Rows) { $row.Cells['State'].Value = '讀不到' }; return }
+        $ctx.Installed = & $parsePkgs $Lines
+        & $updateGrid
+        $mine = @($ctx.Grid1.Rows | Where-Object { $ctx.Installed.ContainsKey([string]$_.Cells['Id'].Value) }).Count
+        & $append "這台用 winget 認得的已安裝軟體 $($ctx.Installed.Count) 個；推薦清單裡已經裝了 $mine 個。"
+    }.GetNewClosure()
+    $onSearch = {
+        param($Lines, $Errs)
+        $ctx.Grid2.Rows.Clear()
+        if (@($Errs).Count) { return }
+        if ($Lines -contains 'NONE') { & $append '找不到符合的套件（只搜尋官方 winget 來源）。'; return }
+        foreach ($l in $Lines) {
+            if ($l -notlike "ROW`t*") { continue }
+            $p = $l.Split("`t")
+            [void]$ctx.Grid2.Rows.Add($p[1], $p[2], $p[3], $p[4], '')
+        }
+        & $updateGrid
+        & $append "找到 $($ctx.Grid2.Rows.Count) 個。選一個後按「安裝選取的軟體」，會先查出發行者讓你確認。"
+    }.GetNewClosure()
+    $onInstall = {
+        param($Lines, $Errs)
+        $after = & $parsePkgs $Lines
+        if ($after.Count) { $ctx.Installed = $after }
+        foreach ($l in $Lines) {
+            if ($l -like "PKG`t*") { continue }
+            if ($l -notlike "RES`t*") { & $append $l; continue }
+            $p = $l.Split("`t"); $id = $p[1]; $code = [int]$p[2]
+            $what = switch ($code) {
+                0           { 'winget 回報安裝成功' }
+                -1978335135 { 'winget 回報已經安裝過' }
+                -1978335189 { 'winget 回報已經安裝、而且沒有更新的版本' }
+                -1978334967 { 'winget 回報要重新開機才能完成' }
+                -1978335212 { 'winget 找不到這個套件' }
+                default     { 'winget 結束碼 0x{0:X8}' -f $code }
+            }
+            if ($after.Count -and $ctx.Installed.ContainsKey($id)) {
+                & $append "[完成] $id：$what；已確認在已安裝清單裡（版本 $($ctx.Installed[$id])）。"
+                Write-OpsLog '常用軟體安裝' "安裝 $id" '成功' "$what；版本 $($ctx.Installed[$id])"
+            } else {
+                $why = if ($code -eq 0) { '，但已安裝清單裡找不到它（有些軟體要重新登入或重新開機才會出現；也可能安裝程式其實沒有完成）' } else { '' }
+                & $append "[錯誤] $id：$what$why。"
+                Write-OpsLog '常用軟體安裝' "安裝 $id" '失敗' "$what$why"
+            }
+        }
+        & $updateGrid
+    }.GetNewClosure()
+    $onShow = {
+        param($Lines, $Errs)
+        if (@($Errs).Count -or -not $ctx.Pending) { return }
+        $id = $ctx.Pending; $ctx.Pending = $null
+        $detail = @($Lines | Where-Object { $_ -like "SHOW`t*" } | ForEach-Object { $_.Substring(5) } |
+            Where-Object { $_ -notmatch '^\s' -and $_ -notmatch '[:：]$' } | Select-Object -First 12) -join "`r`n"
+        $msg = "即將用 winget 安裝（官方 winget 來源、ID 完全比對）：`r`n`r`n$detail`r`n`r`n" +
+            "請確認發行者是你要的那一家。安裝是靜默安裝，會自動同意這個軟體的授權條款。確定安裝？"
+        if ([Windows.Forms.MessageBox]::Show($ctx.Form, $msg, '確認安裝', 'YesNo', 'Question') -ne 'Yes') { & $append '（已取消安裝）'; return }
+        & $ctx.Run 'install' $id $ctx.OnInstall "安裝 $id"
+    }.GetNewClosure()
+    $ctx.Run = $run; $ctx.OnInstall = $onInstall
+
+    $btnRefresh.Add_Click({ & $run 'installed' '' $onInstalled '重新檢查已安裝的軟體' }.GetNewClosure())
+    $btnInstall.Add_Click({
+        if ($ctx.Busy) { return }
+        $picked = @($ctx.Grid1.Rows | Where-Object { $_.Cells['Pick'].Value -eq $true })
+        if (-not $picked.Count) { [void][Windows.Forms.MessageBox]::Show($ctx.Form, '請先在「安裝」欄勾選要裝的軟體。', '常用軟體安裝', 'OK', 'Information'); return }
+        if (-not (Request-PanelAdmin)) { return }
+        $ids = @($picked | ForEach-Object { [string]$_.Cells['Id'].Value })
+        $msg = "即將用 winget 依序安裝 $($ids.Count) 個軟體（官方 winget 來源、ID 完全比對、靜默安裝，會自動同意各軟體的授權條款）：`r`n`r`n" +
+            (($picked | ForEach-Object { "　$($_.Cells['Name'].Value)　$($_.Cells['Id'].Value)" }) -join "`r`n")
+        if ($ids -contains 'WiresharkFoundation.Wireshark') { $msg += "`r`n`r`n※ Wireshark：抓包驅動 Npcap 的授權不允許自動安裝，裝完要另外到 npcap.com 下載手動安裝，才抓得到封包。" }
+        if ($ids -contains 'Prometheus.WindowsExporter') { $msg += "`r`n`r`n※ windows_exporter：會建立 Windows 服務並監聽 9182 Port；要讓 Prometheus 從外面抓，防火牆要另外放行。" }
+        $msg += "`r`n`r`n每個軟體可能要幾十秒到幾分鐘。確定開始？"
+        if ([Windows.Forms.MessageBox]::Show($ctx.Form, $msg, '確認安裝', 'YesNo', 'Question') -ne 'Yes') { & $append '（已取消安裝）'; return }
+        & $run 'install' ($ids -join ',') $onInstall "安裝 $($ids.Count) 個軟體"
+    }.GetNewClosure())
+    $btnSearch.Add_Click({
+        $q = $ctx.Query.Text.Trim()
+        if ($q.Length -lt 2 -or $q.Length -gt 60) { [void][Windows.Forms.MessageBox]::Show($ctx.Form, '請輸入 2～60 個字的關鍵字。', '搜尋', 'OK', 'Information'); return }
+        & $run 'search' $q $onSearch "搜尋「$q」"
+    }.GetNewClosure())
+    $query.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq 'Enter') { $e.SuppressKeyPress = $true; $btnSearch.PerformClick() } }.GetNewClosure())
+    $btnInstall2.Add_Click({
+        if ($ctx.Busy) { return }
+        $row = $ctx.Grid2.CurrentRow
+        if (-not $row) { [void][Windows.Forms.MessageBox]::Show($ctx.Form, '請先搜尋，並在結果裡選一個。', '安裝', 'OK', 'Information'); return }
+        $id = [string]$row.Cells['Id'].Value
+        if ($id -match '…$') { [void][Windows.Forms.MessageBox]::Show($ctx.Form, "這個 ID 太長被 winget 截斷了（$id），請用更精確的關鍵字再搜一次。", '安裝', 'OK', 'Warning'); return }
+        if ($ctx.Installed.ContainsKey($id)) { [void][Windows.Forms.MessageBox]::Show($ctx.Form, "$id 已經安裝了（版本 $($ctx.Installed[$id])）。", '安裝', 'OK', 'Information'); return }
+        if (-not (Request-PanelAdmin)) { return }
+        $ctx.Pending = $id
+        & $run 'show' $id $onShow "查詢 $id 的發行者與版本"
+    }.GetNewClosure())
+    $btnStore.Add_Click({
+        try { Start-Process 'ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1' } catch { & $append "[錯誤] 打不開 Microsoft Store：$($_.Exception.Message)" }
+    }.GetNewClosure())
+    $btnDetect.Add_Click({
+        $ctx.Winget = Get-AppsWinget
+        & $setWinget
+        if ($ctx.Winget) { & $run 'installed' '' $onInstalled '檢查已安裝的軟體' } else { & $append '還是找不到 winget。' }
+    }.GetNewClosure())
+
+    & $setWinget
+    if ($ctx.Winget) {
+        foreach ($row in $grid1.Rows) { $row.Cells['State'].Value = '讀取中…' }
+        $form.Add_Shown({ & $run 'installed' '' $onInstalled '檢查已安裝的軟體' }.GetNewClosure())
+    }
+    Show-UiWindow $win
+}
+
 # ================= 網路與防火牆 =================
 
 function Show-PingPanel {
@@ -3215,6 +3632,7 @@ function Show-WindowsPanel {
         @{Title='Microsoft Store 自動更新';Action={Show-StorePanel};Style='info'}
         @{Title='Hyper-V／VMware 切換';Action={Show-HyperVPanel};Style='info'}
         @{Title='時間與時區';Action={Show-TimePanel};Style='info'}
+        @{Title='常用軟體安裝（winget）';Action={Show-AppsPanel};Style='success'}
     )
     & $addSection '網路與防火牆' @(
         @{Title='Ping (ICMP) 設定';Action={Show-PingPanel};Style='info'}
