@@ -148,11 +148,14 @@ if (-not $ready) {
 
 if ($ready) {
     Write-Host ""
-    # 用隱藏的 STA PowerShell 行程承載 WinForms 主面板；視窗本身仍會正常顯示。
-    # 用 -File 另起行程，而不是 dot-source 進目前的 session：
+    # 用 STA PowerShell 行程承載 WinForms 主面板，用 -File 另起行程而不是 dot-source 進目前的 session：
     #   * 主腳本要拿得到 $PSCommandPath（提權時要用），dot-source 拿不到
+    #   * 介面的閉包只看得到全域函式，-File 執行的腳本才在全域
     #   * -ExecutionPolicy Bypass 只作用在這一次執行，不動系統設定
-    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$dst`""
+    # 隱藏主控台要用 powershell 自己的 -WindowStyle Hidden，不能用 Start-Process -WindowStyle Hidden：
+    # 後者會讓 Windows 把這個行程「第一個顯示的視窗」也設成隱藏，而那正是主面板——
+    # 行程在跑、畫面卻什麼都沒有（實測：從 GitHub 跑一行指令，面板視窗存在但是隱藏的）。
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$dst`""
     )
 }
