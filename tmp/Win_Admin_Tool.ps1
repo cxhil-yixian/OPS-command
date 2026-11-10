@@ -1659,13 +1659,18 @@ function Register-RdpGuardTask {
         -Description 'OPS-command：RDP 暴力破解自動封鎖。設定在 HKLM\SOFTWARE\OPS-command\RdpGuard，紀錄在應用程式事件記錄（來源 OPS-command，300/301/302）。' -Force -ErrorAction Stop | Out-Null
 }
 
-# 稽核「登入」的失敗沒開，就不會有 4625，守護等於沒作用。auditpol /r 的欄位名稱是英文。
+# 稽核「登入」的失敗沒開，就不會有 4625，守護等於沒作用。
+# auditpol /r 的欄位名稱與值跟著主控台字碼頁走：字碼頁 950 是「包含設定／成功與失敗」，
+# UTF-8 才是英文「Inclusion Setting／Success and Failure」（測試機實測）。所以不靠欄位名稱，
+# 用 GUID 找那一行、取第 5 欄（電腦名稱,原則目標,子類別,GUID,包含設定,排除設定），中英文都認。
 function Get-RdpGuardAudit {
     $raw = & auditpol.exe /get "/subcategory:$($Script:RdpGuardAuditGuid)" /r 2>&1
     if ($LASTEXITCODE -ne 0) { return @{ Known = $false; Failure = $false; Text = '讀不到（需要管理員權限）' } }
-    $row = @($raw | Where-Object { $_ -match ',' } | ConvertFrom-Csv) | Select-Object -First 1
-    $set = [string]$row.'Inclusion Setting'
-    @{ Known = $true; Failure = ($set -match 'Failure'); Text = $set }
+    $line = @($raw | ForEach-Object { [string]$_ } | Where-Object { $_ -like "*$($Script:RdpGuardAuditGuid)*" }) | Select-Object -First 1
+    $cols = if ($line) { $line.Split(',') } else { @() }
+    if ($cols.Count -lt 5) { return @{ Known = $false; Failure = $false; Text = "看不懂 auditpol 的輸出：$(($raw | Select-Object -First 2) -join ' / ')" } }
+    $set = $cols[4].Trim()
+    @{ Known = $true; Failure = ($set -match 'Failure|失敗'); Text = $set }
 }
 
 # 目前連進來的來源：Established 且本機端是監聽中的 Port（排除本機連出去的，例如 Windows Update）
@@ -2138,7 +2143,7 @@ function Get-NetRevertScript {
     }
     $lines += "Remove-Item -Path '$($Script:NetStateKey)' -Recurse -Force -ErrorAction SilentlyContinue"
     # 純 ASCII：事件訊息經 eventcreate 寫入，避開編碼問題
-    if ($Watchdog) { $lines += "eventcreate /L APPLICATION /SO OPS-command /ID 100 /T WARNING /D `"OPS-command network watchdog: not confirmed within $($State.Minutes) minutes, reverted $($State.Kind) $ip $new.`" | Out-Null" }
+    if ($Watchdog) { $lines += "eventcreate /L APPLICATION /SO OPS-command /ID 100 /T WARNING /D `"OPS-command network watchdog: not confirmed within $($State.Minutes) minutes, reverted $($State.Kind) $ip$(if ($new) { " -> $new" }).`" | Out-Null" }
     $lines += "Unregister-ScheduledTask -TaskName '$($Script:NetTask)' -Confirm:`$false -ErrorAction SilentlyContinue"
     $lines -join "`r`n"
 }

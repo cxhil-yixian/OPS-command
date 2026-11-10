@@ -59,10 +59,12 @@ $ErrorActionPreference = 'Stop'
 # （-File 的腳本跑在全域）。在 PowerShell 視窗裡打 .\Test-Gui.ps1 或用 & 呼叫時，每一步都會
 # 「無法辨識詞彙」，與其跑完半小時全部失敗，不如現在就停。
 function Test-OpsGuiScope { $true }
-if (-not @(& ({ Get-Command Test-OpsGuiScope -CommandType Function -ErrorAction SilentlyContinue }.GetNewClosure())).Count) {
+if (-not (& ({ ${function:Test-OpsGuiScope} }.GetNewClosure()))) {
     Write-Host '[無法執行] 請用 powershell -STA -File Test-Gui.ps1 執行（或透過 Invoke-Interactive.ps1），不要用 .\ 或 & 呼叫。'
     exit 2
 }
+# 用 -File 執行時 -Only a,b 會收到一個字串 "a,b"，自己拆
+$Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if (-not $Path) { $Path = Split-Path -Parent $PSScriptRoot }
 if (-not $OutDir) { $OutDir = Join-Path $env:TEMP ("OPS-command-tests\gui-" + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
