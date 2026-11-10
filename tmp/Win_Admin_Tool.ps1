@@ -2594,6 +2594,11 @@ if (Get-NetFirewallRule -Name $rule -ErrorAction SilentlyContinue) {
     New-NetFirewallRule -Name $rule -DisplayName "OpenSSH ($Port)" -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -Profile Any | Out-Null
     "建立防火牆規則 $rule（TCP $Port 連入允許）"
 }
+# 安裝 OpenSSH 時系統自己建的規則（Port 22）。「停用」會把它一起停用，這裡要打開回來（W5 實測：以前停用再啟用後少一條）
+if (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -ne 'True' }) {
+    Enable-NetFirewallRule -Name 'OpenSSH-Server-In-TCP'
+    '系統內建的規則 OpenSSH-Server-In-TCP 重新啟用'
+}
 
 $shellKey = 'HKLM:\SOFTWARE\OpenSSH'
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
