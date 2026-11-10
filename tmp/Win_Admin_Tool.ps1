@@ -1270,14 +1270,27 @@ Restart-Service TermService -Force -ErrorAction Stop
 $Script:WorkerWindowsUpdate = @'
 param([string]$Mode)
 $ErrorActionPreference='Stop'
+# 停止前先記下原本的啟動設定（W5 實測：以前還原一律設「手動」，UsoSvc 原本是「自動（延遲開始）」就被改掉了）。
+# 記在 HKLM（只有管理員能寫）；已經有紀錄時不覆蓋，免得把「停用」記成原值。
+$state='HKLM:\SOFTWARE\OPS-command\WindowsUpdate'
+$svcKey='HKLM:\SYSTEM\CurrentControlSet\Services'
+$au='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
 if($Mode -eq 'Stop'){
     $warnings=@()
+    if(-not (Test-Path $state)){
+        New-Item -Path $state -Force | Out-Null
+        foreach($n in 'wuauserv','UsoSvc'){
+            $k=Get-ItemProperty "$svcKey\$n" -ErrorAction SilentlyContinue
+            if($k -and $k.Start -ne 4){ Set-ItemProperty $state -Name "$n.Start" -Value ([int]$k.Start); Set-ItemProperty $state -Name "$n.Delayed" -Value ([int]$k.DelayedAutostart) }
+        }
+        Set-ItemProperty $state -Name 'AU.Existed' -Value ([int](Test-Path $au))
+        Set-ItemProperty $state -Name 'WU.Existed' -Value ([int](Test-Path (Split-Path $au)))
+    }
     foreach($serviceName in @('wuauserv','UsoSvc')){
         try { Stop-Service $serviceName -Force -ErrorAction Stop } catch { if($_.Exception.Message -notmatch 'cannot be stopped|無法停止|尚未啟動|not started'){ $warnings += "停止 $serviceName 服務：$($_.Exception.Message)" } }
         try { Set-Service $serviceName -StartupType Disabled -ErrorAction Stop } catch { $warnings += "設定 $serviceName 為停用：$($_.Exception.Message)" }
     }
     try { Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc' -Name Start -Value 4 -ErrorAction Stop } catch { $warnings += "設定 WaaSMedicSvc：$($_.Exception.Message)" }
-    $au='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
     if(-not (Test-Path $au)){New-Item -Path $au -Force | Out-Null}
     Set-ItemProperty -Path $au -Name NoAutoUpdate -Value 1 -ErrorAction Stop
     Set-ItemProperty -Path $au -Name AUOptions -Value 1 -ErrorAction Stop
@@ -1288,18 +1301,37 @@ if($Mode -eq 'Stop'){
     # 事件檢視器的系統記錄檔會看到 SCM 7040「啟動類型已變更」一來一回兩筆。
     Start-Sleep -Seconds 6
     $wu=Get-Service wuauserv
-    if($wu.StartType -eq 'Disabled' -and $wu.Status -ne 'Running'){ 'Windows Update 已停止。' } else { $warnings += "Windows Update 被系統改回來了：$($wu.StartType) / $($wu.Status)。這是 Windows 的更新自我修復（WaaSMedic）；WaaSMedic 已設為停用，但要重新開機後才生效——重開機後再執行一次「停止 Windows 更新」才留得住。若仍不行，請檢查群組原則。" }
+    if($wu.StartType -eq 'Disabled' -and $wu.Status -ne 'Running'){ '[完成] Windows Update 已停止。' } else { $warnings += "Windows Update 被系統改回來了：$($wu.StartType) / $($wu.Status)。這是 Windows 的更新自我修復（WaaSMedic）；WaaSMedic 已設為停用，但要重新開機後才生效——重開機後再執行一次「停止 Windows 更新」才留得住。若仍不行，請檢查群組原則。" }
     if($warnings.Count){"`r`n需要留意："; $warnings | ForEach-Object { "- $_" }}
 }else{
-    Set-Service wuauserv -StartupType Manual -ErrorAction Stop
-    Start-Service wuauserv -ErrorAction Stop
-    Set-Service UsoSvc -StartupType Manual -ErrorAction Stop
-    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WaaSMedicSvc' -Name Start -Value 3 -ErrorAction Stop
-    $au='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+    # 照停止前記下的值還原；沒有紀錄（舊版停的、或手動停的）就用 Windows 10/11 的預設：
+    # wuauserv = 手動（3）、UsoSvc = 自動延遲開始（2 + DelayedAutostart 1）
+    # 啟動類型一定要經過服務管理員（Set-Service / sc.exe）改：直接寫登錄的話，服務管理員還記得「停用」，
+    # 接著啟動服務會失敗（W5 實測），還原中途停下、更新原則也沒拿掉，等於更新仍然被停用。
+    # 所以先拿掉原則、再改服務，最後才嘗試啟動；啟動失敗只提醒，不中斷。
+    $warn=@()
     Remove-ItemProperty -Path $au -Name NoAutoUpdate -ErrorAction SilentlyContinue
     Remove-ItemProperty -Path $au -Name AUOptions -ErrorAction SilentlyContinue
-    $wu=Get-Service wuauserv
-    "Windows Update 已恢復；wuauserv=$($wu.Status)，啟動類型=$($wu.StartType)。"
+    $st=Get-ItemProperty $state -ErrorAction SilentlyContinue
+    $want=@{ wuauserv=@(3,0); UsoSvc=@(2,1) }
+    foreach($n in 'wuauserv','UsoSvc'){
+        $v=$want[$n]
+        if($st -and $null -ne $st."$n.Start"){ $v=@([int]$st."$n.Start", [int]$st."$n.Delayed") }
+        $mode=switch($v[0]){ 2 { if($v[1] -eq 1){'delayed-auto'}else{'auto'} } 3 {'demand'} 4 {'disabled'} default {'demand'} }
+        $o=& sc.exe config $n start= $mode 2>&1
+        if($LASTEXITCODE -ne 0){ $warn+="設定 $n 啟動類型失敗：$($o -join ' ')" }
+    }
+    try { Set-ItemProperty -Path "$svcKey\WaaSMedicSvc" -Name Start -Value 3 -ErrorAction Stop } catch { $warn+="WaaSMedicSvc：$($_.Exception.Message)" }
+    # 原本沒有的原則機碼是停止時建的；空了就拿掉
+    if($st -and $st.'AU.Existed' -eq 0 -and (Test-Path $au) -and -not (Get-Item $au).Property -and -not (Get-ChildItem $au)){ Remove-Item $au }
+    $wuk=Split-Path $au
+    if($st -and $st.'WU.Existed' -eq 0 -and (Test-Path $wuk) -and -not (Get-Item $wuk).Property -and -not (Get-ChildItem $wuk)){ Remove-Item $wuk }
+    Remove-Item $state -Recurse -Force -ErrorAction SilentlyContinue
+    try { Start-Service wuauserv -ErrorAction Stop } catch { $warn+="wuauserv 暫時啟動不了（$($_.Exception.Message)）；它是需要時才啟動的服務，重新開機後會正常。" }
+    $wu=Get-Service wuauserv; $uso=Get-Service UsoSvc
+    $delayed=if((Get-ItemProperty "$svcKey\UsoSvc").DelayedAutostart -eq 1 -and $uso.StartType -eq 'Automatic'){'（延遲開始）'}else{''}
+    "[完成] Windows Update 已恢復；wuauserv=$($wu.Status)／$($wu.StartType)，UsoSvc=$($uso.StartType)$delayed，更新原則已移除。"
+    if($warn.Count){"`r`n需要留意："; $warn | ForEach-Object { "- $_" }}
 }
 '@
 
