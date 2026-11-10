@@ -22,9 +22,5 @@ if errorlevel 1 (
     exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%"
-if errorlevel 1 (
-    echo.
-    echo [WARN] The script exited with an error. See the message above.
-    pause
-)
+start "" powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%PS1%"
+exit /b 0
