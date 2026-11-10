@@ -1,5 +1,10 @@
 ﻿# Windows 10/11 系統管理工具 (PowerShell 版)
 
+# 工具版本（Windows 圖形介面自己的版本號，跟 Linux ops.sh 的版本無關）。
+# 改了程式就遞增：修 bug 加第三段、加功能加第二段、介面大改加第一段（見 README「版本號」）。
+# 主面板開啟後會到線上讀這一行比對版本，所以這一行要留在檔案開頭、格式不要改。
+$Script:ToolVersion = '2.0.0'
+
 # ===== 檢查目前是否為系統管理員 (不強制提權,先記錄狀態) =====
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
@@ -27,6 +32,39 @@ Add-Type -AssemblyName System.Drawing
 $Script:SelfPath   = $PSCommandPath
 $Script:SelfSource = $MyInvocation.MyCommand.ScriptBlock.ToString()
 $Script:LocalDir   = Join-Path $(if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }) 'OPS-command'
+
+# 檢查新版用的來源，跟 ops-win.ps1 同一個規則：有設 OPS_RAW_BASE 就用它（fork／內網鏡像）。
+$Script:RawBase = if ($env:OPS_RAW_BASE) { $env:OPS_RAW_BASE.TrimEnd('/') } else { 'https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main' }
+
+# 背景檢查新版（主面板開啟後在另一個 runspace 跑，看不到這支腳本的函式）。
+# 只抓線上主程式的開頭幾 KB，讀出 $Script:ToolVersion 那一行，逐段比數字（1.10 > 1.9）。
+# 比目前新才輸出 'NEWER <版本>'；一樣、比較舊、讀不到都不輸出。離線或失敗會丟例外，呼叫端一律安靜略過。
+$Script:WorkerVersionCheck = @'
+param([string]$Url, [string]$Current)
+$ErrorActionPreference = 'Stop'
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+$req = [Net.HttpWebRequest]::Create($Url)
+$req.Timeout = 8000; $req.ReadWriteTimeout = 8000
+$req.UserAgent = 'OPS-command-version-check'
+$req.AddRange(0, 8191)
+$resp = $req.GetResponse()
+try {
+    $sr = New-Object IO.StreamReader($resp.GetResponseStream(), [Text.Encoding]::UTF8)
+    $head = $sr.ReadToEnd()
+} finally { $resp.Close() }
+$m = [regex]::Match($head, "(?m)^\`$Script:ToolVersion\s*=\s*'(\d+(?:\.\d+)*)'")
+if (-not $m.Success) { return }
+$latest = $m.Groups[1].Value
+$a = @($Current.Split('.')); $b = @($latest.Split('.'))
+$n = [Math]::Max($a.Count, $b.Count)
+for ($i = 0; $i -lt $n; $i++) {
+    $x = [long]0; $y = [long]0
+    if ($i -lt $a.Count) { [void][long]::TryParse($a[$i], [ref]$x) }
+    if ($i -lt $b.Count) { [void][long]::TryParse($b[$i], [ref]$y) }
+    if ($y -gt $x) { "NEWER $latest"; return }
+    if ($y -lt $x) { return }
+}
+'@
 
 function Get-SelfPath {
     if ($Script:SelfPath -and (Test-Path $Script:SelfPath)) { return $Script:SelfPath }
@@ -1618,7 +1656,35 @@ function Show-ActionLogPanel {
 
 function Show-StatusPanel {
     $report = @{ Text = '重新檢查'; Style = 'primary'; Run = { Get-StatusReport } }
-    Show-FeaturePanel -Title '檢查系統現況' -Subtitle '確認各項設定目前的實際狀態（唯讀）' -Mono -Actions @($report) -OnOpen $report
+    # 匯出：重新檢查一次再存檔（不是存畫面上的舊結果），交給別人或留存比對用。
+    # UTF-8 含 BOM：記事本、Excel 與舊版工具都能正確認出中文。
+    $export = @{ Text = '匯出成文字檔'; Style = 'light'; Run = {
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $dlg = New-Object Windows.Forms.SaveFileDialog
+        $dlg.Title = '匯出系統現況'
+        $dlg.Filter = '文字檔 (*.txt)|*.txt|所有檔案 (*.*)|*.*'
+        $dlg.InitialDirectory = [Environment]::GetFolderPath('Desktop')
+        $dlg.FileName = "OPS-status_$($env:COMPUTERNAME)_$stamp.txt"
+        $dlg.OverwritePrompt = $true
+        try {
+            $owner = [Windows.Forms.Form]::ActiveForm
+            $ok = if ($owner) { $dlg.ShowDialog($owner) } else { $dlg.ShowDialog() }
+            if ($ok -ne [Windows.Forms.DialogResult]::OK) { '（已取消匯出）'; return }
+            $path = $dlg.FileName
+        } finally { $dlg.Dispose() }
+        $lines = @(
+            'OPS-command 系統現況'
+            "主機名稱：$env:COMPUTERNAME"
+            "檢查時間：$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss zzz')"
+            "工具版本：$Script:ToolVersion"
+            "執行帳號：$env:USERDOMAIN\$env:USERNAME（$(if ($IsAdmin) { '系統管理員' } else { '一般使用者，部分項目可能讀不到' })）"
+            ('=' * 60)
+            ''
+        ) + @(Get-StatusReport 2>&1 | ForEach-Object { [string]$_ })
+        [IO.File]::WriteAllLines($path, [string[]]$lines, (New-Object Text.UTF8Encoding($true)))
+        "已匯出：$path"
+    } }
+    Show-FeaturePanel -Title '檢查系統現況' -Subtitle '確認各項設定目前的實際狀態（唯讀）' -Mono -Actions @($report, $export) -OnOpen $report
 }
 
 # ===== Windows 原生視窗：自動排程管理 =====
@@ -2016,7 +2082,7 @@ function Show-WindowsPanel {
     Add-Type -AssemblyName System.Drawing
     [Windows.Forms.Application]::EnableVisualStyles()
     $form=New-Object Windows.Forms.Form; $script:PanelForm=$form
-    $form.Text='OPS-command｜Windows 系統管理面板'
+    $form.Text="OPS-command｜Windows 系統管理面板　v$Script:ToolVersion"
     $form.Size=New-Object Drawing.Size(1320,820)
     $form.MinimumSize=New-Object Drawing.Size(1050,650)
     $form.StartPosition='CenterScreen'
@@ -2034,7 +2100,7 @@ function Show-WindowsPanel {
     $head=New-Object Windows.Forms.Panel; $head.Dock='Top'; $head.Height=76; $head.BackColor=[Drawing.Color]::FromArgb(30,58,138)
     $role=if($IsAdmin){'目前權限：系統管理員'}else{'目前權限：一般使用者（修改功能會提示提權）'}
     $title=New-Object Windows.Forms.Label
-    $title.Text='OPS-command｜Windows 系統管理面板'
+    $title.Text="OPS-command｜Windows 系統管理面板　v$Script:ToolVersion"
     $title.Font=New-Object Drawing.Font('Microsoft JhengHei UI',16,[Drawing.FontStyle]::Bold)
     $title.ForeColor=[Drawing.Color]::White
     $title.Location=New-Object Drawing.Point(22,10)
@@ -2044,8 +2110,49 @@ function Show-WindowsPanel {
     $badge.Text=$role
     $badge.ForeColor=[Drawing.Color]::FromArgb(219,234,254)
     $badge.Location=New-Object Drawing.Point(24,46)
-    $badge.Size=New-Object Drawing.Size(640,24)
+    $badge.AutoSize=$true
     $head.Controls.Add($badge)
+    # 有新版時顯示在權限說明右邊；平常是空的。
+    $updateLabel=New-Object Windows.Forms.Label
+    $updateLabel.AutoSize=$true
+    $updateLabel.ForeColor=[Drawing.Color]::FromArgb(253,224,71)
+    $updateLabel.Font=New-Object Drawing.Font('Microsoft JhengHei UI',10,[Drawing.FontStyle]::Bold)
+    $updateLabel.Location=New-Object Drawing.Point(($badge.Right+24),46)
+    $head.Controls.Add($updateLabel)
+    # 開窗後才在背景檢查新版：不拖慢開啟；離線、逾時、任何錯誤都安靜略過，不跳訊息框。
+    # 計時器與 Shown 都在這一層建立，共用 $upd 這個 hashtable，不需要巢狀閉包。
+    $upd=@{ PS=$null; RS=$null; Async=$null; Timer=(New-Object Windows.Forms.Timer); Worker=$Script:WorkerVersionCheck
+            Url="$Script:RawBase/WINDOWS/Win_Admin_Tool.ps1"; Current=$Script:ToolVersion }
+    $upd.Timer.Interval=500
+    $upd.Timer.Add_Tick({
+        if (-not $upd.Async -or -not $upd.Async.IsCompleted) { return }
+        $upd.Timer.Stop()
+        $res=@()
+        try { $res=@($upd.PS.EndInvoke($upd.Async) | ForEach-Object { [string]$_ }) } catch { }
+        try { $upd.PS.Dispose(); $upd.RS.Dispose() } catch { }
+        $upd.PS=$null
+        $hit=@($res | Where-Object { $_ -like 'NEWER *' }) | Select-Object -First 1
+        if ($hit -and -not $form.IsDisposed) {
+            $ver=$hit.Substring(6)
+            $updateLabel.Location=New-Object Drawing.Point(($badge.Right+24),46)
+            $updateLabel.Text="有新版 $ver，重新執行一行指令即可更新"
+            $form.Text="$($form.Text)　（有新版 $ver）"
+        }
+    }.GetNewClosure())
+    $form.Add_Shown({
+        try {
+            $upd.RS=[runspacefactory]::CreateRunspace(); $upd.RS.Open()
+            $upd.PS=[powershell]::Create(); $upd.PS.Runspace=$upd.RS
+            [void]$upd.PS.AddScript($upd.Worker); [void]$upd.PS.AddArgument($upd.Url); [void]$upd.PS.AddArgument($upd.Current)
+            $upd.Async=$upd.PS.BeginInvoke()
+            $upd.Timer.Start()
+        } catch { }
+    }.GetNewClosure())
+    $form.Add_FormClosed({
+        try { $upd.Timer.Stop(); $upd.Timer.Dispose() } catch { }
+        # 還在等網路就不等了：背景 runspace 的執行緒不會擋住行程結束
+        try { if ($upd.PS) { $upd.PS.BeginStop($null, $null) | Out-Null } } catch { }
+    }.GetNewClosure())
     $close=New-Object Windows.Forms.Button
     $close.Text='關閉面板'
     $close.Anchor='Top,Right'
