@@ -1,6 +1,6 @@
 # 進度總表
 
-最後更新：2026-11-10 14:10
+最後更新：2026-11-10 14:15
 
 這份檔案隨時更新，是唯一的進度來源。
 標記：🔄 進行中　⏳ 等你　✅ 完成　⏸ 暫停　❄ 凍結　▶ 排隊
@@ -47,8 +47,8 @@
   - ✅ `tmp/` 搬回 `WINDOWS/`（`86e7baf`），加入 `SHA256SUMS`、`tests/`、`tools/`；暫存區內容與 SHA256SUMS 對得上。
   - ✅ `WINDOWS/README.md` 重寫成圖形面板版、CHANGELOG 加「Windows 圖形介面 2.0.0」、根目錄 README 更新 Windows 狀態（`3b13ab6`）。
   - ✅ WIKI 新手指南（md 與 html）改成圖形面板的點選路徑，新增「擋掉猜密碼的人」「裝常用軟體」「開 SSH 當備用門」三個案例；html 從 md 產生，保留原本樣式與「複製」按鈕。
-  - 🔄 最後在測試機跑一次靜態檢查與 `Update-Sha256Sums.ps1 -Check`：14:05 起 SSH 一連上就被切斷（TCP 通），研判是 Administrator 被網路上猜密碼的人鎖住（README 記錄過這個現象），等鎖定解除再跑。
-  - 剩下：刪除測試機上的 `C:\OPS-test\`（要不要先留著給之後驗證用，等你決定）、決定推送。
+  - ✅ 最後檢查（13:55）：WINDOWS/ 原樣上傳測試機，靜態檢查 0 失敗 0 警告、`Update-Sha256Sums.ps1 -Check` 一致。中間 SSH 斷線約 10 分鐘，查證是 13:41:33 Administrator 被網路上猜密碼的人鎖住（40 分鐘內 4625 共 18 筆：FakeUser×13、administrator×5），鎖定時間過了自動恢復——正是 README「已知限制」寫的現象。
+  - ⏳ 剩下要你決定：刪除測試機上的 `C:\OPS-test\`（要不要先留著給之後驗證用，等你決定）、決定推送。
 
 <details><summary>W5 實測紀錄（已完成）</summary>
 
