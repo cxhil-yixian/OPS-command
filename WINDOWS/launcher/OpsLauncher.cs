@@ -28,9 +28,9 @@ using System.Threading;
 [assembly: AssemblyDescription("OPS-command Windows 工具啟動器")]
 [assembly: AssemblyProduct("OPS-command")]
 [assembly: AssemblyCopyright("MIT License")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
-[assembly: AssemblyInformationalVersion("1.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyInformationalVersion("1.0.1")]
 
 static class Program
 {
@@ -175,8 +175,7 @@ static class Program
         if (!ready)
         {
             Console.WriteLine();
-            Console.Write(" 按 Enter 關閉 ... ");
-            try { Console.ReadLine(); } catch { }
+            WaitEnter();
             return 1;
         }
         if (noLaunch) return 0;
@@ -195,14 +194,21 @@ static class Program
         catch (Exception ex)
         {
             Say(" 開不起主面板：" + ex.Message, ConsoleColor.Red);
-            Console.Write(" 按 Enter 關閉 ... ");
-            try { Console.ReadLine(); } catch { }
+            WaitEnter();
             return 2;
         }
         Console.WriteLine();
         Console.WriteLine(" 主面板開啟中，這個視窗會自己關掉。");
         Thread.Sleep(2000);
         return 0;
+    }
+
+    // 出錯時停在畫面上讓人看訊息；從腳本或 SSH 執行（輸入被導向）時沒有人能按 Enter，不等
+    static void WaitEnter()
+    {
+        try { if (Console.IsInputRedirected) return; } catch { }
+        Console.Write(" 按 Enter 關閉 ... ");
+        try { Console.ReadLine(); } catch { }
     }
 
     // SHA256（先把 CRLF 換成 LF）：GitHub raw 給 LF，本機或鏡像可能是 CRLF，統一後兩邊都對得上
