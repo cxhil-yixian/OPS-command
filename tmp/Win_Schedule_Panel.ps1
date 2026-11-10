@@ -11,17 +11,6 @@ $script:CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().
 # 從主面板開啟時用主面板的操作記錄；單獨執行時沒有就略過
 function Write-TaskLog($action, $result, $detail) { if (Get-Command Write-OpsLog -ErrorAction SilentlyContinue) { Write-OpsLog '自動排程' $action $result $detail } }
 
-function Get-ManagedTasks {
-    @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
-        $_.TaskName -like 'OPS-Task-*' -and $_.Description -like "$script:Marker*"
-    } | ForEach-Object {
-        $task = $_
-        try { $meta = $task.Description.Substring($script:Marker.Length) | ConvertFrom-Json }
-        catch { return }
-        [pscustomobject]@{ Task=$task; Meta=$meta; State=[string]$task.State }
-    })
-}
-
 function New-TaskDefinition($meta, $action, $trigger) {
     $principal = New-ScheduledTaskPrincipal -UserId $script:CurrentUser -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
@@ -124,8 +113,8 @@ function Show-TaskDialog($kind, $scheduleAction, $registerAction) {
             if ($meta.Arguments -notmatch '^\d+$' -or [int]$meta.Arguments -lt 0 -or [int]$meta.Arguments -gt 3600) { throw '延遲秒數請輸入 0 到 3600。' }
             $meta['Action']=[string]$typeBox.SelectedItem
             $trigger=& $scheduleAction $meta.Schedule $date.Value $dayNames
-            $switch=if($meta.Action -eq '關機'){'/s'}else{'/r'}
-            $action=New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\shutdown.exe" -Argument "$switch /t $($meta.Arguments)"
+            $shutdownMode=if($meta.Action -eq '關機'){'/s'}else{'/r'}
+            $action=New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\shutdown.exe" -Argument "$shutdownMode /t $($meta.Arguments)"
         }
         & $registerAction $meta $action $trigger
         Write-TaskLog "新增（$kind）" '成功' ("$($meta.Name)；$($meta.Schedule) $($meta.At)；$($meta.Path)$($meta.Action)")
