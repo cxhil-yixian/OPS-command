@@ -348,5 +348,5 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 
 ---
 
-<sub>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.2.0</sub>
+<sub>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.2.1</sub>
 <sub>想看更多細節，請看 [WINDOWS/README.md](../WINDOWS/README.md)。Linux 的版本在 [linux.md](linux.md)。</sub>

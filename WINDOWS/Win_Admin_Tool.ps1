@@ -3,7 +3,7 @@
 # 工具版本（Windows 圖形介面自己的版本號，跟 Linux ops.sh 的版本無關）。
 # 改了程式就遞增：修 bug 加第三段、加功能加第二段、介面大改加第一段（見 README「版本號」）。
 # 主面板開啟後會到線上讀這一行比對版本，所以這一行要留在檔案開頭、格式不要改。
-$Script:ToolVersion = '2.2.0'
+$Script:ToolVersion = '2.2.1'
 
 # 「關閉時清除本工具的檔案」：主面板的勾選框。提權重開時用 -CleanupOnExit 把勾選狀態帶給新的管理員面板。
 $Script:CleanupOnExit = [bool]($args -contains '-CleanupOnExit')
@@ -4255,23 +4255,35 @@ function Show-WindowsPanel {
     $close.Add_Click({$form.Close()}.GetNewClosure())
     $head.Controls.Add($close)
     # 關閉時清除本工具的檔案（預設不勾；提權重開會沿用）。先設好勾選狀態再掛事件，開窗時才不會跳確認
+    # 勾選方框與文字分開：CheckBox 的背景設成透明時，在深色標題列上方框會畫壞、第一個字被吃掉。
+    # 方框用實底（跟標題列同色），文字用白色 Label，點文字也能切換。
     $cleanup=New-Object Windows.Forms.CheckBox
-    $cleanup.Text='關閉時清除本工具的檔案'
+    $cleanup.Name='CleanupOnExit'
+    $cleanup.AccessibleName='關閉時清除本工具的檔案'
+    $cleanup.Text=''
     $cleanup.AutoSize=$true
-    $cleanup.ForeColor=[Drawing.Color]::White
-    $cleanup.BackColor=[Drawing.Color]::Transparent
+    $cleanup.BackColor=$head.BackColor
     $cleanup.Checked=$Script:CleanupOnExit
     $head.Controls.Add($cleanup)
+    $cleanupText=New-Object Windows.Forms.Label
+    $cleanupText.Text='關閉時清除本工具的檔案'
+    $cleanupText.AutoSize=$true
+    $cleanupText.ForeColor=[Drawing.Color]::White
+    $cleanupText.BackColor=$head.BackColor
+    $cleanupText.Cursor=[Windows.Forms.Cursors]::Hand
+    $cleanupText.Add_Click({ $cleanup.Checked=-not $cleanup.Checked }.GetNewClosure())
+    $head.Controls.Add($cleanupText)
     $cleanup.Add_CheckedChanged({
         if ($cleanup.Checked) {
-            $ans=[Windows.Forms.MessageBox]::Show($form, "關閉面板時會刪除：`r`n  ・%LOCALAPPDATA%\OPS-command\ 整個資料夾（下載的程式、操作記錄、錯誤紀錄、匯出的檔案、測試輸出）`r`n  ・PowerShell 指令歷史裡跟 OPS 有關的那幾行`r`n`r`n匯出的檔案要留的話，請先搬到別的地方。`r`nWindows 事件記錄、看門狗與自動封鎖的設定不會動。`r`n`r`n確定？", '關閉時清除', 'YesNo', 'Question')
+            $ans=[Windows.Forms.MessageBox]::Show($form, "關閉面板時會刪除：`r`n%LOCALAPPDATA%\OPS-command\ 整個資料夾`r`n（下載的程式、操作記錄、錯誤紀錄、匯出的檔案、測試輸出）`r`nWindows 事件記錄、看門狗與自動封鎖的設定不會動。`r`n確定要刪除？", '關閉時清除', 'YesNo', 'Question')
             if ($ans -ne 'Yes') { $cleanup.Checked=$false; return }
         }
         Set-OpsCleanupOnExit $cleanup.Checked
     }.GetNewClosure())
     $positionHeaderButtons={
         $close.Location=New-Object Drawing.Point([Math]::Max(20,$head.ClientSize.Width-130),19)
-        $cleanup.Location=New-Object Drawing.Point([Math]::Max(20,$close.Left-$cleanup.Width-18),29)
+        $cleanupText.Location=New-Object Drawing.Point([Math]::Max(40,$close.Left-$cleanupText.Width-18),29)
+        $cleanup.Location=New-Object Drawing.Point(($cleanupText.Left-$cleanup.Width-2),(29+[int](($cleanupText.Height-$cleanup.Height)/2)))
     }.GetNewClosure()
     $head.Add_Resize($positionHeaderButtons); & $positionHeaderButtons
 
