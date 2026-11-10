@@ -3,7 +3,7 @@
 Windows 10 / 11 的系統管理工具箱，用圖形面板操作。跟 Linux 那邊同一個原則：
 **遠端操作時不要把自己鎖在門外。**
 
-工具版本：**2.1.1**（Windows 圖形介面自己的版本號，跟 Linux `ops.sh` 無關）
+工具版本：**2.2.0**（Windows 圖形介面自己的版本號，跟 Linux `ops.sh` 無關）
 
 | 檔案 | 用途 |
 |---|---|
@@ -13,6 +13,7 @@ Windows 10 / 11 的系統管理工具箱，用圖形面板操作。跟 Linux 那
 | `Win_Schedule_Panel.ps1` | 「自動排程」視窗：登入啟動程式、定時腳本、定時關機／重啟 |
 | `SHA256SUMS` | 一行指令下載後核對用的雜湊清單 |
 | `tools/Update-Sha256Sums.ps1` | 改了程式之後重新產生 `SHA256SUMS` |
+| `launcher/` | `OPS-command.exe`（線上啟動器）的原始碼與編譯腳本，見「點兩下的 exe」 |
 | `tests/` | 靜態檢查、畫面測試、在桌面上執行測試的工具（見「測試」） |
 
 ---
@@ -31,7 +32,9 @@ TLS 1.2，而 GitHub 只收 1.2 以上，不設就是一句 `無法建立 SSL/TL
 
 **本機**（離線、或想自己看過內容再跑）：下載整個 `WINDOWS` 資料夾，雙擊 `Win_Admin_Tool.bat`。
 
-兩種方式進去之後完全一樣。不必事先改執行原則（都帶 `-ExecutionPolicy Bypass`，只作用在那一次），
+**點兩下的 exe**：`OPS-command.exe`，做的事跟一行指令一樣，見下面「點兩下的 exe」。
+
+幾種方式進去之後完全一樣。不必事先改執行原則（都帶 `-ExecutionPolicy Bypass`，只作用在那一次），
 也不必先用系統管理員身分開：**會改系統的按鈕按下去時才問你要不要提權**，唯讀的功能一般帳號就能用。
 
 ### 一行指令做了什麼
@@ -50,6 +53,33 @@ TLS 1.2，而 GitHub 只收 1.2 以上，不設就是一句 `無法建立 SSL/TL
 
 `SHA256SUMS` 跟程式來自同一個地方，所以它防的是「下載不完整、被代理或入口網頁換掉、單一檔案被竄改」；
 repo 本身被入侵時兩者會一起被換掉，這裡擋不住。剛推上新版的幾分鐘內 GitHub 快取可能新舊混雜，稍候再試即可。
+
+### 點兩下的 exe（OPS-command.exe）
+
+給不想開 PowerShell 打指令的人。`OPS-command.exe` 是很小的**線上啟動器**，做的事和一行指令完全一樣：
+從 GitHub 下載最新的程式與 `SHA256SUMS`、核對、放到 `%LOCALAPPDATA%\OPS-command\`、開主面板。
+程式本身不在 exe 裡，所以工具改版不用重新下載 exe，每次點開都是 GitHub 上的最新版；
+也因此**一定要能連上 GitHub**，離線請用本機那種跑法。
+
+- 一般權限執行，跟一行指令一樣，要改系統時主面板才問提權。
+- 核對失敗、下載失敗的處理也一樣：對不上就拒絕執行、不覆蓋舊副本；連不上時預設不用舊副本，
+  要用就從命令列加 `--use-cached`。`--base-url <網址>` 或 `OPS_RAW_BASE` 可改用自己的 fork／鏡像。
+- 黑色視窗會顯示下載與核對結果，主面板開起來後自己關掉；出錯時停在畫面上等你按 Enter。
+
+**第一次執行時 Windows 可能跳出藍色的「Windows 已保護您的電腦」**（SmartScreen）。這是 Windows 對
+「還不認識的程式」的提醒，不代表有毒。確認檔案是從本專案的 GitHub Releases 下載的、SHA256 對得上之後：
+
+1. 按「**其他資訊**」。
+2. 確認「發行者」：已簽章的版本會顯示發行者名稱；顯示「未知的發行者」表示這份沒有簽章。
+3. 按「**仍要執行**」。
+
+核對 exe 的 SHA256（跟 Releases 上的 `OPS-command.exe.sha256` 比對）：
+
+```powershell
+Get-FileHash .\OPS-command.exe -Algorithm SHA256
+```
+
+編譯與簽章見「維護：改了程式之後」。
 
 > **不要把 `ops-win.ps1` 下載下來用 `-File` 執行。** 它刻意存成 UTF-8 無 BOM（`irm | iex` 需要），
 > Windows PowerShell 5.1 讀檔時會當成系統字碼頁（繁中是 950），中文會把引號吃掉而解析失敗。
@@ -95,6 +125,23 @@ repo 本身被入侵時兩者會一起被換掉，這裡擋不住。剛推上新
 
 長時間的動作（Hyper-V、校時、Windows 更新、winget、事件檢查…）在背景執行，畫面不會卡住。
 **會改系統的作業做完前不能關視窗**（中途拔掉比等它做完更糟）；只是查詢的可以直接關。
+
+### 用完自動清除
+
+主面板右上角有「**關閉時清除本工具的檔案**」（預設不勾）。勾的時候會先跳視窗說明會刪什麼，
+確定之後，**關閉主面板時**刪掉：
+
+- `%LOCALAPPDATA%\OPS-command\` 整個資料夾：下載的程式、操作記錄、錯誤紀錄、匯出的檔案（存在預設位置的）、測試輸出。
+  匯出的檔案要留，請先搬走。
+- PowerShell 指令歷史（PSReadLine 的 `*_history.txt`）裡跟 OPS 有關的行，以及緊接在它前面的那行 TLS 設定；
+  其他指令不動。還開著的 PowerShell 視窗裡按方向鍵上仍看得到，關掉那個視窗就沒了。
+
+不會刪：Windows 事件記錄（只能整個記錄檔清，會連別的程式一起刪）、以 SYSTEM 執行的狀態與排程
+（看門狗確認或還原後本來就會自己刪；暴力破解封鎖、RDP 來源限制、自動排程是你要它們繼續運作的）、
+`OPS-command.exe` 本身（它在你自己放的位置，例如「下載」資料夾，要刪請自己刪）。
+
+- 按「以系統管理員身分重新啟動」時，勾選會帶到新的管理員面板，舊面板關閉時不清除（新面板還要用這些檔）。
+- 還有其他 OPS 面板開著時不清除，並告訴你是哪一個；在最後關的那個勾選即可。
 
 ---
 
@@ -222,7 +269,7 @@ Firefox、VC++ 2015-2022、.NET 8 桌面執行環境、windows_exporter。其他
 
 | 位置 | 內容 |
 |---|---|
-| `%LOCALAPPDATA%\OPS-command\` | **工具寫出的檔案都在這裡**：一行指令下載的程式、`actions.log`（操作記錄）、`error.log`（出錯時的完整訊息與呼叫堆疊，回報問題用）、匯出檔的預設位置、測試工具的輸出（`tests\`）。「操作記錄」視窗有「開啟資料夾」按鈕 |
+| `%LOCALAPPDATA%\OPS-command\` | **工具寫出的檔案都在這裡**（「關閉時清除本工具的檔案」刪的就是這個資料夾）：一行指令與 exe 下載的程式、`actions.log`（操作記錄）、`error.log`（出錯時的完整訊息與呼叫堆疊，回報問題用）、匯出檔的預設位置、測試工具的輸出（`tests\`）。「操作記錄」視窗有「開啟資料夾」按鈕 |
 | `HKLM\SOFTWARE\OPS-command\RdpPort` | 換 RDP Port 進行中的狀態 |
 | `HKLM\SOFTWARE\OPS-command\NetChange` | IP 變更進行中的狀態 |
 | `HKLM\SOFTWARE\OPS-command\RdpGuard` | 暴力破解封鎖的設定、封鎖清單 |
@@ -254,6 +301,23 @@ Get-ScheduledTask -TaskName 'OPS-*Watchdog' -ErrorAction SilentlyContinue
    雜湊是「CRLF 換成 LF 之後」算的，跟 GitHub raw 給的內容一致，在 Windows 或 Linux 的 checkout 上算結果都一樣。
 3. 跑「測試」那一節的靜態檢查，最好也跑一次畫面測試。
 
+`OPS-command.exe` 只是啟動器，**工具改版不用重新編譯**；只有改了 `launcher/OpsLauncher.cs` 才要重出：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File WINDOWS\launcher\build.ps1
+```
+
+用 Windows 內建的 .NET Framework 4.x 編譯器，不必裝 Visual Studio；產物在 `WINDOWS\launcher\dist\`（不進 git，發布放 GitHub Releases），
+同時產生 `OPS-command.exe.sha256`。簽章參數三選一，不給就是未簽章版本：
+
+| 參數 | 用在 |
+|---|---|
+| `-CertThumbprint <指紋>` | 憑證已裝在這台電腦（USB 金鑰、雲端簽章服務的用戶端），從「目前使用者\個人」存放區取用 |
+| `-PfxPath <檔案>`（密碼放 `OPS_SIGN_PFX_PASSWORD`） | 能匯出成 .pfx 的憑證 |
+| `-TrustedSigningMetadata <json> -DlibPath <dll>` | Azure Trusted Signing |
+
+簽章需要 Windows SDK 的 `signtool.exe`（找不到時用 `-SignTool` 指定），簽完會自動 `signtool verify` 一次。
+
 ---
 
 ## 測試
@@ -283,6 +347,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File WINDOWS\tests\Invoke-Interac
 |---|---|
 | `Win_Admin_Tool.ps1`、`Win_Schedule_Panel.ps1`、`tests\*.ps1`、`tools\*.ps1` | UTF-8 **含** BOM、CRLF（5.1 用 `-File` 讀檔，沒 BOM 會當成系統字碼頁） |
 | `ops-win.ps1` | UTF-8 **無** BOM、CRLF（要被 `irm \| iex`；開頭有 BOM 的字串 `iex` 會失敗） |
+| `launcher\OpsLauncher.cs`、`launcher\build.ps1` | UTF-8 含 BOM、CRLF（C# 原始碼用 `/codepage:65001` 編譯） |
 | `Win_Admin_Tool.bat` | 純 ASCII、CRLF（cmd 用主控台字碼頁解析批次檔，非 ASCII 會隨地區設定而壞） |
 
 repo 根目錄的 `.gitattributes` 強制 `*.bat` / `*.ps1` 用 CRLF。
@@ -297,7 +362,7 @@ repo 根目錄的 `.gitattributes` 強制 `*.bat` / `*.ps1` 用 CRLF。
 2026-11 在一台 Windows 10 專業版 22H2（繁中、字碼頁 950、KVM 雲端虛擬機）上，**每個功能都在 RDP 桌面上實際按過按鈕**，
 核對系統實際狀態並還原；包含 RDP 換 Port 兩輪（看門狗自動還原、確認後保留）、停用再啟用 SSH、
 Windows 更新停止／還原、臨時帳號的鎖定與改密碼、在 1GB 虛擬磁碟上改代號／格式化／清除、
-實際安裝並移除軟體、一行指令（`irm | iex`）對本機假網站的 SHA256 核對。過程中修掉的問題記在 [CHANGELOG](../CHANGELOG.md)。
+實際安裝並移除軟體、一行指令（`irm | iex`）對本機假網站的 SHA256 核對；`OPS-command.exe` 從 GitHub 下載核對、被竄改／入口網頁／連不上／`--use-cached` 各種情況，以及在桌面上點開後主面板可見；「關閉時清除」的實際刪除與指令歷史只刪 OPS 那幾行。過程中修掉的問題記在 [CHANGELOG](../CHANGELOG.md)。
 
 還沒驗證或有限制的：
 

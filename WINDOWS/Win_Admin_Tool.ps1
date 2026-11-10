@@ -3,7 +3,11 @@
 # 工具版本（Windows 圖形介面自己的版本號，跟 Linux ops.sh 的版本無關）。
 # 改了程式就遞增：修 bug 加第三段、加功能加第二段、介面大改加第一段（見 README「版本號」）。
 # 主面板開啟後會到線上讀這一行比對版本，所以這一行要留在檔案開頭、格式不要改。
-$Script:ToolVersion = '2.1.1'
+$Script:ToolVersion = '2.2.0'
+
+# 「關閉時清除本工具的檔案」：主面板的勾選框。提權重開時用 -CleanupOnExit 把勾選狀態帶給新的管理員面板。
+$Script:CleanupOnExit = [bool]($args -contains '-CleanupOnExit')
+$script:ClosingForElevation = $false
 
 # ===== 檢查目前是否為系統管理員 (不強制提權,先記錄狀態) =====
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -92,7 +96,7 @@ function Restart-AsAdmin {
     # 一定要接住：沒接住的話例外會從按鈕事件漏出去，畫面上什麼都不會發生；
     # 而且呼叫端不能在失敗時關掉舊面板，否則使用者按「否」之後整個工具就不見了。
     try {
-        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$self`"" -Verb RunAs -ErrorAction Stop
+        Start-Process powershell.exe -ArgumentList ("-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$self`"" + $(if ($Script:CleanupOnExit) { ' -CleanupOnExit' } else { '' })) -Verb RunAs -ErrorAction Stop
     } catch {
         $msg = if ($_.Exception.GetBaseException().NativeErrorCode -eq 1223) { '已取消提權，面板維持一般權限。' } else { "無法以系統管理員身分重新啟動：$($_.Exception.Message)" }
         [Windows.Forms.MessageBox]::Show($msg, '未提權', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Information) | Out-Null
@@ -164,8 +168,56 @@ function Show-PanelError {
 function Close-PanelIfElevated {
     if ($script:PanelCloseAfterAction -and $script:PanelForm) {
         $script:PanelCloseAfterAction = $false
+        $script:ClosingForElevation = $true   # 管理員面板接手，舊面板關閉時不清除檔案（新面板還要用）
         $script:PanelForm.Close()
     }
+}
+
+function Set-OpsCleanupOnExit { param([bool]$On) $Script:CleanupOnExit = $On }
+
+# 關閉主面板時清除本工具留下的東西：%LOCALAPPDATA%\OPS-command\ 整個資料夾（程式、操作記錄、錯誤紀錄、
+# 匯出檔、測試輸出），以及 PowerShell 指令歷史裡跟 OPS 有關的那幾行。
+# 不碰：Windows 事件記錄（只能整個記錄檔清，會連別的程式一起刪）、SYSTEM 用的狀態與排程（看門狗確認或還原後本來就會刪；
+# 暴力破解封鎖、自動排程是你刻意要它們留著的）。
+function Invoke-OpsCleanup {
+    $done = @(); $warn = @()
+    # 還有別的面板在跑（例如另一個視窗），它還要用這些檔，這次不清。
+    # 只認面板的啟動方式「-File ...Win_Admin_Tool.ps1」；命令列裡只是「提到」這個檔名的（例如測試工具）不算
+    $others = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+            $_.Name -eq 'powershell.exe' -and $_.ProcessId -ne $PID -and $_.CommandLine -match '-File\s+"?[^"\s]*Win_Admin_Tool\.ps1' })
+    if ($others.Count) {
+        [Windows.Forms.MessageBox]::Show("還有另一個 OPS-command 面板開著（PID $(($others | ForEach-Object ProcessId) -join ', ')），這次不清除。`r`n關掉所有面板時，在最後一個勾選「關閉時清除本工具的檔案」。", 'OPS-command', 'OK', 'Information') | Out-Null
+        return
+    }
+    # 用「另一個管理員帳號」提權時，程式所在的資料夾在原本那個帳號底下，也一起清
+    $dirs = @($Script:LocalDir)
+    $self = $Script:SelfPath
+    if ($self -and (Split-Path -Leaf (Split-Path -Parent $self)) -eq 'OPS-command') { $dirs += (Split-Path -Parent $self) }
+    foreach ($d in @($dirs | Sort-Object -Unique)) {
+        if (-not (Test-Path $d)) { continue }
+        try { Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction Stop; $done += "刪除資料夾 $d" }
+        catch { $warn += "$d 沒能完全刪掉：$($_.Exception.Message)" }
+    }
+    # PowerShell 指令歷史（PSReadLine，每種主控台一個檔）：刪掉含 OPS 的行，以及緊接在它前面的 TLS 那一行
+    $hd = Join-Path $env:APPDATA 'Microsoft\Windows\PowerShell\PSReadLine'
+    foreach ($f in @(Get-ChildItem -LiteralPath $hd -Filter '*_history.txt' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $lines = [IO.File]::ReadAllLines($f.FullName)
+            $isOps = { param($l) $l -match 'OPS-command|OPS_RAW_BASE|OPS_USE_CACHED|Win_Admin_Tool|ops-win\.ps1' }
+            $keep = New-Object System.Collections.Generic.List[string]; $n = 0
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                $l = $lines[$i]
+                if (& $isOps $l) { $n++; continue }
+                if ($l -match '^\s*\[Net\.ServicePointManager\]::SecurityProtocol\s*=' -and $i + 1 -lt $lines.Count -and (& $isOps $lines[$i + 1])) { $n++; continue }
+                $keep.Add($l)
+            }
+            if ($n) { [IO.File]::WriteAllLines($f.FullName, $keep.ToArray(), (New-Object Text.UTF8Encoding($false))); $done += "PowerShell 指令歷史（$($f.Name)）刪掉 $n 行" }
+        } catch { $warn += "$($f.Name)：$($_.Exception.Message)" }
+    }
+    $msg = if ($done.Count) { "已清除：`r`n  " + ($done -join "`r`n  ") } else { '沒有需要清除的東西。' }
+    if ($warn.Count) { $msg += "`r`n`r`n沒清乾淨：`r`n  " + ($warn -join "`r`n  ") }
+    $msg += "`r`n`r`n還開著的 PowerShell 視窗裡，按方向鍵上仍看得到剛才的指令；關掉那個視窗就沒了。"
+    [Windows.Forms.MessageBox]::Show($msg, 'OPS-command｜清除完成', 'OK', 'Information') | Out-Null
 }
 
 function Request-PanelAdmin {
@@ -4202,7 +4254,25 @@ function Show-WindowsPanel {
     $close.FlatStyle='Flat'
     $close.Add_Click({$form.Close()}.GetNewClosure())
     $head.Controls.Add($close)
-    $positionHeaderButtons={ $close.Location=New-Object Drawing.Point([Math]::Max(20,$head.ClientSize.Width-130),19) }.GetNewClosure()
+    # 關閉時清除本工具的檔案（預設不勾；提權重開會沿用）。先設好勾選狀態再掛事件，開窗時才不會跳確認
+    $cleanup=New-Object Windows.Forms.CheckBox
+    $cleanup.Text='關閉時清除本工具的檔案'
+    $cleanup.AutoSize=$true
+    $cleanup.ForeColor=[Drawing.Color]::White
+    $cleanup.BackColor=[Drawing.Color]::Transparent
+    $cleanup.Checked=$Script:CleanupOnExit
+    $head.Controls.Add($cleanup)
+    $cleanup.Add_CheckedChanged({
+        if ($cleanup.Checked) {
+            $ans=[Windows.Forms.MessageBox]::Show($form, "關閉面板時會刪除：`r`n  ・%LOCALAPPDATA%\OPS-command\ 整個資料夾（下載的程式、操作記錄、錯誤紀錄、匯出的檔案、測試輸出）`r`n  ・PowerShell 指令歷史裡跟 OPS 有關的那幾行`r`n`r`n匯出的檔案要留的話，請先搬到別的地方。`r`nWindows 事件記錄、看門狗與自動封鎖的設定不會動。`r`n`r`n確定？", '關閉時清除', 'YesNo', 'Question')
+            if ($ans -ne 'Yes') { $cleanup.Checked=$false; return }
+        }
+        Set-OpsCleanupOnExit $cleanup.Checked
+    }.GetNewClosure())
+    $positionHeaderButtons={
+        $close.Location=New-Object Drawing.Point([Math]::Max(20,$head.ClientSize.Width-130),19)
+        $cleanup.Location=New-Object Drawing.Point([Math]::Max(20,$close.Left-$cleanup.Width-18),29)
+    }.GetNewClosure()
     $head.Add_Resize($positionHeaderButtons); & $positionHeaderButtons
 
     $homePanel=New-Object Windows.Forms.Panel
@@ -4373,6 +4443,7 @@ function Show-WindowsPanel {
     $form.Controls.Add($right); $form.Controls.Add($sidebar)
     [void]$form.ShowDialog()
     $script:PanelForm=$null
+    if ($Script:CleanupOnExit -and -not $script:ClosingForElevation) { Invoke-OpsCleanup }
 }
 
 # 最外層的保險：面板建立失敗（缺元件、權限、程式錯誤）時，至少要讓人看到原因。
@@ -4385,7 +4456,7 @@ try {
     if (@(& ({ Get-Command Get-SelfPath -CommandType Function -ErrorAction SilentlyContinue }.GetNewClosure())).Count) {
         Show-WindowsPanel
     } else {
-        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$(Get-SelfPath)`"" -ErrorAction Stop
+        Start-Process powershell.exe -ArgumentList ("-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$(Get-SelfPath)`"" + $(if ($Script:CleanupOnExit) { ' -CleanupOnExit' } else { '' })) -ErrorAction Stop
     }
 } catch {
     try { Add-Type -AssemblyName System.Windows.Forms } catch { }

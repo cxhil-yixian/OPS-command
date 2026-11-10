@@ -39,6 +39,17 @@ firewalld 的處理**只做了邏輯測試**：用會記錄呼叫的假 `firewal
 埠與封鎖方式同時改只重啟一次），連同原本 60 項共 70 項全過。ShellCheck 在改動的行上沒有新的告警。
 **沒有在真的 firewalld 機器上跑過**停用 → confirm / rollback 的完整流程。
 
+### Windows 圖形介面 2.2.0
+
+- **新增：主面板「關閉時清除本工具的檔案」**（預設不勾）。勾選並確認後，關閉主面板時刪掉 `%LOCALAPPDATA%\OPS-command\`
+  整個資料夾，以及 PowerShell 指令歷史裡跟 OPS 有關的行（含緊接在前的 TLS 設定那行，其他指令不動）。
+  提權重開時勾選會帶到管理員面板、舊面板不清除；還有其他面板開著時不清除並說明。
+  Windows 事件記錄、SYSTEM 的狀態與排程不動。
+- **新增：`OPS-command.exe` 線上啟動器**（`WINDOWS/launcher/`，啟動器 1.0.0）。點兩下就做一行指令做的事：下載、核對 SHA256、
+  開主面板；程式不包在 exe 裡，工具改版不用重出 exe。用 Windows 內建的 .NET Framework 編譯，`build.ps1` 可選擇簽章
+  （憑證指紋、PFX、Azure Trusted Signing）。測試機上驗過：正常下載、被竄改、入口網頁、連不上、`--use-cached`、
+  環境變數改來源，以及在桌面點開後主面板可見。
+
 ### Windows 圖形介面 2.1.1
 
 - **工具寫出的檔案都集中到 `%LOCALAPPDATA%\OPS-command\`**：錯誤紀錄從 `%TEMP%\OPS-command-error.log` 改成這裡的 `error.log`，

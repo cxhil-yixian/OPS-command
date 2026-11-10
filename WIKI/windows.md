@@ -269,6 +269,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 | 看磁碟用了多少 | 磁碟管理 → 唯讀磁碟視覺化 | 只看不改 |
 | 開機自動執行程式、定時關機 | 自動排程 → 開啟自動排程管理 | 只管理這個工具建立的排程 |
 | 看這個工具改過什麼 | 檢查與紀錄 → 操作記錄 | — |
+| 用完不想在這台電腦留下這個工具的東西 | 主面板右上角勾「關閉時清除本工具的檔案」 | 關閉面板時刪掉工具下載的程式、紀錄、匯出的檔案，以及指令歷史裡那行一行指令；匯出的檔案要留請先搬走 |
 
 > [!CAUTION]
 > <b>磁碟管理的格式化和清除會永久刪掉資料。</b>「格式化磁碟區」和「清除整顆磁碟」沒有辦法復原。
@@ -347,5 +348,5 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 
 ---
 
-<sub>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.1.1</sub>
+<sub>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.2.0</sub>
 <sub>想看更多細節，請看 [WINDOWS/README.md](../WINDOWS/README.md)。Linux 的版本在 [linux.md](linux.md)。</sub>

@@ -15,3 +15,6 @@ n9e-selfheal/
 # 那可能是個 4GB 的檔案，絕對不能不小心 commit 進來。
 logs/
 .fio-test.*
+
+# Windows 啟動器的編譯產物（發布放 GitHub Releases，不進 git）
+WINDOWS/launcher/dist/
