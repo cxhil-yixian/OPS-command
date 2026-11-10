@@ -1711,11 +1711,22 @@ function Get-RdpGuardStatus {
 # 確認視窗用：把輸入整理成設定，並列出會自動加入白名單的目前連線
 function Get-RdpGuardPending {
     param([hashtable]$v)
-    $list = Split-RdpGuardList $v.Whitelist
-    $bad = @($list | Where-Object { $_ -ne '-' -and -not (Test-RdpGuardIpIn ($_ -split '/')[0] @(($_ -split '/')[0])) })
+    # 一定要包 @()：只有一項時函式回傳的是字串，下面的 $list + $auto 會變成字串相加，
+    # 整份白名單黏成一個看不懂的字串，自己的 IP 其實不在白名單裡（測試機實測抓到）。
+    $list = @(Split-RdpGuardList $v.Whitelist)
+    $bad = @($list | Where-Object {
+        if ($_ -eq '-') { return $false }
+        $p = $_ -split '/'; $a = $null; $bits = -1
+        # .NET 會把 1.2.3、5 這種打錯的也當成 IP（1.2.0.3、0.0.0.5），IPv4 要求完整四段
+        if ($p.Count -gt 2 -or -not [Net.IPAddress]::TryParse($p[0], [ref]$a)) { return $true }
+        if ($p[0] -notmatch ':' -and $p[0] -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return $true }
+        if ($p.Count -eq 1) { return $false }
+        $max = if ($a.AddressFamily -eq 'InterNetworkV6') { 128 } else { 32 }
+        -not ([int]::TryParse($p[1], [ref]$bits) -and $bits -ge 0 -and $bits -le $max)
+    })
     if ($bad.Count) { throw "白名單裡有看不懂的項目：$($bad -join '、')（只接受 IP、CIDR 或 -）" }
     $auto = @(@('127.0.0.1', '::1', '-') + @(Get-RdpGuardConnectedIps) | Where-Object { $list -notcontains $_ })
-    @{ Whitelist = @($list + $auto); Auto = $auto; Scope = $(if ($v.Scope -like '全部*') { 'All' } else { 'Rdp' })
+    @{ Whitelist = @($list) + @($auto); Auto = $auto; Scope = $(if ($v.Scope -like '全部*') { 'All' } else { 'Rdp' })
        Threshold = [int]$v.Threshold; WindowMin = [int]$v.WindowMin; BanMin = [int]$v.BanMin }
 }
 
