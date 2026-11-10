@@ -213,8 +213,9 @@ function Get-RdpOldPort {
 }
 
 function Save-RdpState {
-    param([int]$OldPort, [int]$NewPort, [int]$Minutes)
+    param([int]$OldPort, [int]$NewPort, [int]$Minutes, [bool]$NewRulesCreated = $false)
     New-Item -Path $Script:RdpStateKey -Force -ErrorAction Stop | Out-Null
+    Set-ItemProperty -Path $Script:RdpStateKey -Name NewRulesCreated -Value ([int]$NewRulesCreated) -Type DWord -ErrorAction Stop
     Set-ItemProperty -Path $Script:RdpStateKey -Name OldPort -Value $OldPort -Type DWord -ErrorAction Stop
     Set-ItemProperty -Path $Script:RdpStateKey -Name NewPort -Value $NewPort -Type DWord -ErrorAction Stop
     Set-ItemProperty -Path $Script:RdpStateKey -Name Since -Value (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -ErrorAction Stop
@@ -226,10 +227,17 @@ function Clear-RdpState {
     Remove-Item -Path $Script:RdpLegacyStateFile -Force -ErrorAction SilentlyContinue
 }
 
+# 已經有同名規則就不建（W5 實測：以前每次還原都再加一份，59527 的規則變成各兩條）。
+# 回傳這次有沒有新建，還原時只收掉這次建的。
 function Add-RdpFirewallRule {
     param([int]$Port)
-    netsh advfirewall firewall add rule name="OPS-RDP-$Port-TCP" dir=in action=allow protocol=TCP localport=$Port | Out-Null
-    netsh advfirewall firewall add rule name="OPS-RDP-$Port-UDP" dir=in action=allow protocol=UDP localport=$Port | Out-Null
+    $created = $false
+    foreach ($pr in 'TCP', 'UDP') {
+        if (Get-NetFirewallRule -DisplayName "OPS-RDP-$Port-$pr" -ErrorAction SilentlyContinue) { continue }
+        netsh advfirewall firewall add rule name="OPS-RDP-$Port-$pr" dir=in action=allow protocol=$pr localport=$Port | Out-Null
+        $created = $true
+    }
+    $created
 }
 
 function Remove-RdpFirewallRule {
@@ -246,13 +254,17 @@ function Remove-RdpFirewallRule {
 # 同樣的理由，以 SYSTEM 執行的還原動作也不碰任何使用者寫得到的路徑：
 # 紀錄寫進 Windows 事件記錄（應用程式，來源 OPS-command，事件 100），不寫檔案。
 function Register-RdpWatchdog {
-    param([int]$OldPort, [int]$Minutes)
+    param([int]$OldPort, [int]$Minutes, [int]$NewPort = 0, [bool]$RemoveNewRules = $false)
+    $dropNew = if ($RemoveNewRules -and $NewPort) {
+        "netsh advfirewall firewall delete rule name=`"OPS-RDP-$NewPort-TCP`" | Out-Null`r`nnetsh advfirewall firewall delete rule name=`"OPS-RDP-$NewPort-UDP`" | Out-Null"
+    } else { '' }
     # 純 ASCII：事件訊息經 eventcreate 寫入，避開編碼問題
     $body = @"
 `$ErrorActionPreference = 'Continue'
 Set-ItemProperty -Path '$($Script:RdpKey)' -Name PortNumber -Value $OldPort
-netsh advfirewall firewall add rule name="OPS-RDP-$OldPort-TCP" dir=in action=allow protocol=TCP localport=$OldPort | Out-Null
-netsh advfirewall firewall add rule name="OPS-RDP-$OldPort-UDP" dir=in action=allow protocol=UDP localport=$OldPort | Out-Null
+if (-not (Get-NetFirewallRule -DisplayName 'OPS-RDP-$OldPort-TCP' -ErrorAction SilentlyContinue)) { netsh advfirewall firewall add rule name="OPS-RDP-$OldPort-TCP" dir=in action=allow protocol=TCP localport=$OldPort | Out-Null }
+if (-not (Get-NetFirewallRule -DisplayName 'OPS-RDP-$OldPort-UDP' -ErrorAction SilentlyContinue)) { netsh advfirewall firewall add rule name="OPS-RDP-$OldPort-UDP" dir=in action=allow protocol=UDP localport=$OldPort | Out-Null }
+$dropNew
 Restart-Service TermService -Force
 Remove-Item -Path '$($Script:RdpStateKey)' -Recurse -Force -ErrorAction SilentlyContinue
 eventcreate /L APPLICATION /SO OPS-command /ID 100 /T WARNING /D "OPS-command RDP watchdog: not confirmed within $Minutes minutes, RDP port reverted to $OldPort." | Out-Null
@@ -1385,21 +1397,21 @@ function Invoke-RdpPortChange {
     $busy = Get-NetTCPConnection -State Listen -LocalPort $NewPort -ErrorAction SilentlyContinue
     if ($busy) { throw ("Port $NewPort 已經有程式在監聽（PID {0}），換過去 RDP 會起不來。" -f (($busy.OwningProcess | Sort-Object -Unique) -join ',')) }
 
-    Add-RdpFirewallRule -Port $NewPort
-    if (-not (Register-RdpWatchdog -OldPort ([int]$cur) -Minutes $Minutes)) {
-        Remove-RdpFirewallRule -Port $NewPort
+    $newRules = Add-RdpFirewallRule -Port $NewPort
+    if (-not (Register-RdpWatchdog -OldPort ([int]$cur) -Minutes $Minutes -NewPort $NewPort -RemoveNewRules $newRules)) {
+        if ($newRules) { Remove-RdpFirewallRule -Port $NewPort }
         throw "看門狗建不起來（$Script:WatchdogError），這次不做變更——沒有自動還原就換 Port 太危險。"
     }
     # 狀態要在改 port「之前」寫好：「立即還原」靠它知道舊 port 是多少。
-    try { Save-RdpState -OldPort ([int]$cur) -NewPort $NewPort -Minutes $Minutes }
+    try { Save-RdpState -OldPort ([int]$cur) -NewPort $NewPort -Minutes $Minutes -NewRulesCreated $newRules }
     catch {
-        Unregister-RdpWatchdog; Remove-RdpFirewallRule -Port $NewPort
+        Unregister-RdpWatchdog; if ($newRules) { Remove-RdpFirewallRule -Port $NewPort }
         throw "狀態寫不進登錄檔（$($_.Exception.Message)），這次不做變更。"
     }
     Set-ItemProperty -Path $Script:RdpKey -Name PortNumber -Value $NewPort
     $now = Get-RdpPort
     if ([int]$now -ne $NewPort) {
-        Unregister-RdpWatchdog; Clear-RdpState; Remove-RdpFirewallRule -Port $NewPort
+        Unregister-RdpWatchdog; Clear-RdpState; if ($newRules) { Remove-RdpFirewallRule -Port $NewPort }
         throw "寫入後讀回來還是 $now，設定沒有生效（可能被群組原則鎖住）。已撤回看門狗與防火牆規則，系統維持原狀。"
     }
     "[完成] 登錄檔已改為 $NewPort；看門狗 $Minutes 分鐘後會自動還原成 $cur。"
@@ -1428,9 +1440,11 @@ function Invoke-RdpPortConfirm {
 function Invoke-RdpPortRestore {
     $old = Get-RdpOldPort
     if (-not $old) { throw "找不到進行中的變更紀錄（$Script:RdpStateKey），沒有可還原的變更。" }
+    $st = Get-ItemProperty -Path $Script:RdpStateKey -ErrorAction SilentlyContinue
     Set-ItemProperty -Path $Script:RdpKey -Name PortNumber -Value ([int]$old)
-    Add-RdpFirewallRule -Port ([int]$old)
+    [void](Add-RdpFirewallRule -Port ([int]$old))
     Unregister-RdpWatchdog
+    if ($st -and $st.NewRulesCreated -eq 1 -and $st.NewPort -and [int]$st.NewPort -ne [int]$old) { Remove-RdpFirewallRule -Port ([int]$st.NewPort); "已收掉這次為新 Port $($st.NewPort) 建的防火牆規則。" }
     $now = Get-RdpPort
     if ([int]$now -ne [int]$old) { throw "寫入後讀回來是 $now，還原沒有生效。看門狗已取消，請手動檢查登錄檔 $Script:RdpKey" }
     Clear-RdpState
