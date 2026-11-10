@@ -55,6 +55,14 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 計時器步驟用 .GetNewClosure()，閉包只看得到全域的函式：一定要用 powershell -File 執行
+# （-File 的腳本跑在全域）。在 PowerShell 視窗裡打 .\Test-Gui.ps1 或用 & 呼叫時，每一步都會
+# 「無法辨識詞彙」，與其跑完半小時全部失敗，不如現在就停。
+function Test-OpsGuiScope { $true }
+if (-not @(& ({ Get-Command Test-OpsGuiScope -CommandType Function -ErrorAction SilentlyContinue }.GetNewClosure())).Count) {
+    Write-Host '[無法執行] 請用 powershell -STA -File Test-Gui.ps1 執行（或透過 Invoke-Interactive.ps1），不要用 .\ 或 & 呼叫。'
+    exit 2
+}
 if (-not $Path) { $Path = Split-Path -Parent $PSScriptRoot }
 if (-not $OutDir) { $OutDir = Join-Path $env:TEMP ("OPS-command-tests\gui-" + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null

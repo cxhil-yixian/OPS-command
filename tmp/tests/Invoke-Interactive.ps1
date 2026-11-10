@@ -62,12 +62,14 @@ $keepLog = [bool]$LogFile
 if (-not $LogFile) { $LogFile = Join-Path $env:TEMP "$TaskName.log" }
 Remove-Item -LiteralPath $LogFile -Force -ErrorAction SilentlyContinue
 
-# 包一層：把目標腳本的所有輸出寫進記錄檔，並把它的結束碼帶出來
+# 包一層：把目標腳本的所有輸出寫進記錄檔，並把它的結束碼帶出來。
+# 目標腳本一定要用 -File 另起行程執行，不能用 & 呼叫：& 會讓腳本跑在子範圍，
+# 裡面 .GetNewClosure() 的閉包就看不到腳本自己的函式（實測：Test-Gui 每一步都「無法辨識詞彙」）。
 $q = { param($s) "'" + ($s -replace "'", "''") + "'" }
 $wrapper = @"
 `$global:LASTEXITCODE = 0
 try {
-    & $(& $q $Script) $Arguments *>&1 | Out-File -LiteralPath $(& $q $LogFile) -Encoding UTF8 -Width 500
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File $(& $q $Script) $Arguments *>&1 | Out-File -LiteralPath $(& $q $LogFile) -Encoding UTF8 -Width 500
 } catch {
     `$_ | Out-String | Out-File -LiteralPath $(& $q $LogFile) -Encoding UTF8 -Append
     exit 1

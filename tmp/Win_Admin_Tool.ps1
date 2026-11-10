@@ -2735,8 +2735,17 @@ function Show-WindowsPanel {
 }
 
 # 最外層的保險：面板建立失敗（缺元件、權限、程式錯誤）時，至少要讓人看到原因。
+#
+# 介面大量用 .GetNewClosure()，閉包只看得到「全域」的函式。用 -File 啟動（.bat、ops-win.ps1、
+# 提權重開）時腳本就在全域，沒問題；但在 PowerShell 視窗裡打 .\Win_Admin_Tool.ps1 或用 & 呼叫時，
+# 函式定義在子範圍，按鈕一按就是「無法辨識詞彙」（測試機實測）。這種情況改用 -File 另開一個。
+# （檢查放在這個 try 裡：測試程式載入函式時會切在「第一個呼叫 Show-WindowsPanel 的敘述」之前。）
 try {
-    Show-WindowsPanel
+    if (@(& ({ Get-Command Get-SelfPath -CommandType Function -ErrorAction SilentlyContinue }.GetNewClosure())).Count) {
+        Show-WindowsPanel
+    } else {
+        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$(Get-SelfPath)`"" -ErrorAction Stop
+    }
 } catch {
     try { Add-Type -AssemblyName System.Windows.Forms } catch { }
     Show-PanelError -Title '面板無法啟動' -ErrorRecord $_
