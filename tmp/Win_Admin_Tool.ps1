@@ -870,6 +870,13 @@ function Invoke-EventQuery {
 function Get-EventExplain {
     param($Ev)
     $p = ([string]$Ev.ProviderName) -replace '^Microsoft-Windows-', ''
+    # Windows 錯誤報告 1001 什麼都報（更新、市集、元件安裝…），只有程式當掉／沒回應那幾種才跟「程式」有關。
+    # 第 3 欄是類型、第 6 欄是程式；其他類型的內容是一串代碼，對新手沒有意義，統一說成「Windows 元件」。
+    if ($p -eq 'Windows Error Reporting' -and $Ev.Id -eq 1001) {
+        $type = try { [string]$Ev.Properties[2].Value } catch { '' }
+        if ($type -match '^(APPCRASH|AppHang|BEX|CLR20r3|MoAppCrash|MoAppHang)') { return @{ What = '程式出錯的錯誤報告'; Do = '通常和「程式當掉／沒有回應」一起出現，看同一時間那筆'; Warn = $false } }
+        return @{ What = 'Windows 元件的錯誤報告（更新、市集等）'; Do = '通常不用處理；Windows 更新一直失敗再看「Windows 更新」那一類'; Warn = $false }
+    }
     $e = $Script:EventExplain["$p|$($Ev.Id)"]
     if ($e) { return @{ What = $e[0]; Do = $e[1]; Warn = $(if ($e[2] -eq 'level') { $Ev.Level -in 1, 2, 3 } else { [bool]$e[2] }) } }
     # 表裡沒有的（自訂查詢）：用事件描述第一行，層級是嚴重／錯誤／警告的算要注意
@@ -898,8 +905,8 @@ function Get-EventSubject {
         1074 { if ($d.param7) { return "$($d.param7)，用 $((([string]$d.param1) -split ' ')[0] | Split-Path -Leaf)$(if ($d.param3) { "，原因：$($d.param3)" })" } }
         { $_ -in 55, 98, 130, 137 } { if ($d.DriveName) { return "磁碟 $($d.DriveName)" } }
         { $_ -in 1000, 1002 } { if ($first) { return "程式 $first" } }
-        # Windows 錯誤報告 1001（應用程式記錄）：第 3 欄是類型（APPCRASH、AppHangB1…），第 6 欄是程式
-        1001 { if ($Ev.ProviderName -eq 'Windows Error Reporting' -and $vals.Count -ge 6 -and $vals[5]) { return "$($vals[2])：$($vals[5])" } }
+        # Windows 錯誤報告 1001：只有程式當掉／沒回應的才抽程式名，其他類型的代碼不顯示
+        1001 { if ($Ev.ProviderName -eq 'Windows Error Reporting' -and $vals.Count -ge 6 -and $vals[5] -and $vals[2] -match '^(APPCRASH|AppHang|BEX|CLR20r3|MoAppCrash|MoAppHang)') { return "程式 $($vals[5])" } }
         4625 { return "帳號 $($d.TargetUserName)$(& $ip $d.IpAddress)" }
         { $_ -in 4740, 4648 } { if ($d.TargetUserName) { return "帳號 $($d.TargetUserName)" } }
         1149 { return "帳號 $($d.Param1)$(& $ip $d.Param3)" }
@@ -3700,7 +3707,7 @@ function Show-WindowsPanel {
     foreach($tile in @(
         @{Title='先看目前狀態';Body='每個功能視窗上方都會顯示目前的實際設定，改完自動重新讀取。'}
         @{Title='危險操作會再確認';Body='換 RDP Port 有看門狗自動還原；格式化、清除磁碟要再輸入一次才執行。'}
-        @{Title='長時間作業不卡畫面';Body='Hyper-V、校時、Windows 更新在背景執行，完成前不能關閉視窗。'}
+        @{Title='長時間作業不卡畫面';Body='Hyper-V、校時、Windows 更新在背景執行；會改系統的要等做完才能關視窗，只是查詢的可以直接關。'}
         @{Title='出錯會告訴你';Body="錯誤會跳出訊息，詳細內容寫在 %TEMP%\OPS-command-error.log。"}
     )){
         $tilePanel=New-Object Windows.Forms.Panel
