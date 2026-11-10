@@ -2489,6 +2489,179 @@ function Show-AppsPanel {
 
 # ================= 網路與防火牆 =================
 
+# ---- OpenSSH Server（E5；對應 Linux SSH）----
+# 一鍵：沒裝就裝（Windows 選用功能 OpenSSH.Server）→ 設定 Port → 防火牆放行 → 自動啟動並啟動。
+# 不把自己鎖在外面：
+#   - sshd 正在執行時不換 Port（換 Port 一定會斷線，這裡沒有看門狗；要換請先停用再啟用）。
+#   - 設定跟現在一樣就什麼都不改、不重新啟動 sshd，重按「啟用」是安全的。
+#   - 停用前列出目前的 SSH 連線，確認視窗會說哪些會被斷掉。
+# 防火牆規則名稱 OPS-SSH-<Port>（跟 README 教的手動做法同名，手動建過的會被沿用）。
+$Script:SshConfigPath = Join-Path $(if ($env:ProgramData) { $env:ProgramData } else { 'C:\ProgramData' }) 'ssh\sshd_config'
+
+# 背景執行（另一個 runspace）。前半段是純函式，測試會單獨載入「# ---- 主流程」之前的部分。
+$Script:WorkerSsh = @'
+param([int]$Port, [string]$Shell, [string]$ConfigPath)
+$ErrorActionPreference = 'Stop'
+
+# sshd_config 裡第一個 Match 之前、沒被註解的 Port；沒有就是 22
+function Get-SshConfigPort([string[]]$Lines) {
+    foreach ($l in $Lines) {
+        if ($l -match '^\s*Match\s') { break }
+        if ($l -match '^\s*Port\s+(\d+)\s*$') { return [int]$Matches[1] }
+    }
+    22
+}
+# 把 Port 改成 $Port：改第一個 Match 之前的 Port 行；沒有就改「#Port 22」那行；再沒有就加在最前面
+function Set-SshConfigPort([string[]]$Lines, [int]$Port) {
+    $out = New-Object System.Collections.Generic.List[string]
+    $done = $false; $inMatch = $false
+    foreach ($l in $Lines) {
+        if ($l -match '^\s*Match\s') { $inMatch = $true }
+        if (-not $done -and -not $inMatch -and $l -match '^\s*Port\s+\d+\s*$') { $out.Add("Port $Port"); $done = $true; continue }
+        $out.Add($l)
+    }
+    if (-not $done) {
+        $i = -1
+        for ($k = 0; $k -lt $out.Count; $k++) { if ($out[$k] -match '^\s*Match\s') { break }; if ($out[$k] -match '^\s*#\s*Port\s+\d+') { $i = $k; break } }
+        if ($i -ge 0) { $out.Insert($i + 1, "Port $Port") } else { $out.Insert(0, "Port $Port") }
+    }
+    , $out.ToArray()
+}
+# ---- 主流程
+$cap = Get-WindowsCapability -Online -Name 'OpenSSH.Server*' | Select-Object -First 1
+if (-not $cap) { throw '這台 Windows 沒有 OpenSSH Server 選用功能（Windows 10 1809 以後才有）。' }
+if ($cap.State -ne 'Installed') {
+    '安裝 OpenSSH Server（Windows 選用功能，要從 Windows Update 下載，可能要幾分鐘）…'
+    try { Add-WindowsCapability -Online -Name $cap.Name | Out-Null }
+    catch { throw "安裝失敗：$($_.Exception.Message)。如果 Windows 更新被停用（本工具「Windows 更新」可以還原），選用功能也裝不了。" }
+    '  安裝完成'
+} else { 'OpenSSH Server 已經安裝' }
+
+$svc = Get-Service sshd -ErrorAction SilentlyContinue
+if (-not $svc) { throw '安裝後還是找不到 sshd 服務，請重新開機後再試。' }
+if (-not (Test-Path $ConfigPath)) {
+    $default = Join-Path $env:SystemRoot 'System32\OpenSSH\sshd_config_default'
+    New-Item -ItemType Directory -Force -Path (Split-Path $ConfigPath) | Out-Null
+    Copy-Item $default $ConfigPath
+    "建立設定檔 $ConfigPath（從預設值複製）"
+}
+$lines = [IO.File]::ReadAllLines($ConfigPath)
+$cur = Get-SshConfigPort $lines
+if ($cur -ne $Port) {
+    if ($svc.Status -eq 'Running') { throw "sshd 正在 Port $cur 執行。換 Port 會讓 SSH 連線斷掉，這裡沒有看門狗保護，所以不做；要換請先按「停用」再用新 Port 啟用。" }
+    Copy-Item $ConfigPath "$ConfigPath.ops-bak" -Force
+    [IO.File]::WriteAllLines($ConfigPath, [string[]](Set-SshConfigPort $lines $Port), (New-Object Text.UTF8Encoding($false)))
+    "設定檔 Port：$cur → $Port（原檔備份為 sshd_config.ops-bak）"
+} else { "設定檔 Port 已經是 $Port，不改" }
+
+$rule = "OPS-SSH-$Port"
+if (Get-NetFirewallRule -Name $rule -ErrorAction SilentlyContinue) {
+    Enable-NetFirewallRule -Name $rule
+    "防火牆規則 $rule 已存在（確認為啟用）"
+} else {
+    New-NetFirewallRule -Name $rule -DisplayName "OpenSSH ($Port)" -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -Profile Any | Out-Null
+    "建立防火牆規則 $rule（TCP $Port 連入允許）"
+}
+
+$shellKey = 'HKLM:\SOFTWARE\OpenSSH'
+$ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$nowShell = (Get-ItemProperty $shellKey -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell
+if ($Shell -eq 'PowerShell' -and $nowShell -ne $ps) {
+    if (-not (Test-Path $shellKey)) { New-Item -Path $shellKey -Force | Out-Null }
+    Set-ItemProperty $shellKey -Name DefaultShell -Value $ps
+    '預設殼層改成 PowerShell（新連線才生效）'
+} elseif ($Shell -ne 'PowerShell' -and $nowShell) {
+    Remove-ItemProperty $shellKey -Name DefaultShell
+    '預設殼層改回 cmd（新連線才生效）'
+} else { "預設殼層不變（$(if ($nowShell) { 'PowerShell' } else { 'cmd' })）" }
+
+if ((Get-Service sshd).StartType -ne 'Automatic') { Set-Service sshd -StartupType Automatic; 'sshd 改成開機自動啟動' }
+if ((Get-Service sshd).Status -ne 'Running') {
+    Start-Service sshd
+    'sshd 已啟動'
+} else { 'sshd 已經在執行，不重新啟動（目前的連線不受影響）' }
+
+for ($i = 0; $i -lt 20; $i++) {
+    if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) { break }
+    Start-Sleep -Milliseconds 500
+}
+if (Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue) { "[完成] sshd 在 Port $Port 監聽中。連線：ssh 帳號@這台的IP -p $Port" }
+else { throw "sshd 啟動了，但 10 秒內沒有在 Port $Port 監聽，請看事件記錄（應用程式 / OpenSSH）。" }
+'@
+
+function Get-SshServerInfo {
+    $svc = Get-Service sshd -ErrorAction SilentlyContinue
+    $lines = if (Test-Path $Script:SshConfigPath) { [IO.File]::ReadAllLines($Script:SshConfigPath) } else { @() }
+    $port = 22
+    foreach ($l in $lines) { if ($l -match '^\s*Match\s') { break }; if ($l -match '^\s*Port\s+(\d+)\s*$') { $port = [int]$Matches[1]; break } }
+    $sessions = @(Get-NetTCPConnection -State Established -LocalPort $port -ErrorAction SilentlyContinue | Where-Object { $_.RemoteAddress -notmatch '^(127\.|::1$)' })
+    @{ Svc = $svc; Port = $port; HasConfig = [bool]$lines.Count; Sessions = $sessions
+       Listening = [bool](Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+       Shell = (Get-ItemProperty 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -ErrorAction SilentlyContinue).DefaultShell }
+}
+
+function Get-SshServerStatus {
+    $i = Get-SshServerInfo
+    if (-not $i.Svc) { '尚未安裝 OpenSSH Server。按「啟用」會自動安裝（要從 Windows Update 下載）。'; return }
+    "sshd 服務：$(if ($i.Svc.Status -eq 'Running') { '執行中' } else { '沒有執行' })　啟動類型：$($i.Svc.StartType)"
+    "Port：$($i.Port)$(if (-not $i.HasConfig) { '（還沒有設定檔，第一次啟動會建立）' })　$(if ($i.Listening) { '監聽中' } else { '沒有在監聽' })"
+    $rules = @(Get-NetFirewallRule -Name "OPS-SSH-$($i.Port)", 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' })
+    '防火牆：' + $(if ($rules.Count) { "有放行規則（$(($rules | ForEach-Object Name) -join '、')）" } else { "沒有看到放行 Port $($i.Port) 的規則" })
+    "預設殼層：$(if ($i.Shell) { 'PowerShell' } else { 'cmd（Windows 預設）' })"
+    "目前 SSH 連線：$(if ($i.Sessions.Count) { ($i.Sessions | ForEach-Object { $_.RemoteAddress } | Sort-Object -Unique) -join '、' } else { '無' })"
+    $off = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { -not $_.Enabled } | ForEach-Object Name)
+    if ($off.Count) { "[注意] 防火牆設定檔 $($off -join '、') 是關閉的：在這些網路上任何 Port 都是開的，SSH 也一樣。" }
+}
+
+function Disable-SshServer {
+    $i = Get-SshServerInfo
+    if (-not $i.Svc) { throw '沒有安裝 OpenSSH Server。' }
+    Stop-Service sshd -Force -ErrorAction Stop
+    Set-Service sshd -StartupType Disabled
+    $n = 0
+    foreach ($r in @(Get-NetFirewallRule -Name "OPS-SSH-$($i.Port)", 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) { Disable-NetFirewallRule -Name $r.Name; $n++ }
+    "[完成] sshd 已停止並設為停用；停用了 $n 條防火牆放行規則（沒有刪除，重新啟用會沿用）。OpenSSH 本身沒有移除。"
+}
+
+function Show-SshServerPanel {
+    $i = Get-SshServerInfo
+    $worker = $Script:WorkerSsh
+    $cfg = $Script:SshConfigPath
+    Show-FeaturePanel -Title 'OpenSSH Server' -Subtitle '讓這台可以用 SSH 連進來（備援管道：RDP 出問題時還能用 SSH 救）' -Width 900 -Height 700 `
+        -Note '「啟用」會：沒裝就安裝 OpenSSH Server → 設定 Port → 防火牆放行 → 開機自動啟動並啟動。已經在執行時重按不會重新啟動、不會斷線；執行中也不會換 Port（換 Port 會斷線）。管理員帳號的金鑰要放在 C:\ProgramData\ssh\administrators_authorized_keys，不是使用者資料夾。' `
+        -Status { Get-SshServerStatus } `
+        -Inputs @(
+            @{ Name = 'Port'; Label = 'SSH Port'; Type = 'Number'; Min = 1; Max = 65535; Default = $i.Port }
+            @{ Name = 'Shell'; Label = '連進來的預設殼層'; Type = 'Combo'; Items = @('PowerShell', 'cmd（Windows 預設）'); Default = $(if ($i.Shell -or -not $i.Svc) { 'PowerShell' } else { 'cmd（Windows 預設）' }) }
+        ) `
+        -Actions @(
+            @{ Text = '啟用'; Style = 'success'; Admin = $true
+               Confirm = { param($v)
+                   $now = Get-SshServerInfo
+                   if ($now.Svc -and $now.Svc.Status -eq 'Running' -and $v.Port -ne $now.Port) { return '' }   # 會在 Run 裡擋下，不用問
+                   "OpenSSH Server 將在 Port $($v.Port) 啟用（沒裝會先安裝），防火牆放行 TCP $($v.Port)，開機自動啟動。確定？" }
+               Run = { param($v)
+                   $now = Get-SshServerInfo
+                   if ($now.Svc -and $now.Svc.Status -eq 'Running' -and $v.Port -ne $now.Port) {
+                       throw "sshd 正在 Port $($now.Port) 執行。換 Port 會讓 SSH 連線斷掉，這裡沒有看門狗保護，所以不做；要換請先按「停用」再用新 Port 啟用。"
+                   }
+                   $used = Get-NetTCPConnection -State Listen -LocalPort $v.Port -ErrorAction SilentlyContinue | Where-Object { (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Name -ne 'sshd' }
+                   if ($used) { throw "Port $($v.Port) 已經被其他程式（$((Get-Process -Id @($used)[0].OwningProcess).Name)）佔用。" }
+                   '開始設定（背景執行）…'
+               }
+               Worker = $worker
+               WorkerArgs = { param($v) $v.Port, $(if ($v.Shell -eq 'PowerShell') { 'PowerShell' } else { 'cmd' }), $cfg }.GetNewClosure() }
+            @{ Text = '停用'; Style = 'danger'; Admin = $true
+               Confirm = {
+                   $now = Get-SshServerInfo
+                   $who = @($now.Sessions | ForEach-Object { $_.RemoteAddress } | Sort-Object -Unique)
+                   '停用會停止 sshd、設為停用，並停用放行規則。' +
+                   $(if ($who.Count) { "`r`n`r`n目前有 SSH 連線（$($who -join '、')），會馬上斷掉。" } else { '' }) +
+                   "`r`n`r`n確定？" }
+               Run = { Disable-SshServer } }
+        )
+}
+
 function Show-PingPanel {
     Show-FeaturePanel -Title 'Ping（ICMP）' -Subtitle '允許或拒絕本機回應 ping' `
         -Note '只管理本工具建立的規則（ICMP-Echo-Allow / ICMPv6-Echo-Allow / ICMP-Echo-Block）。是否真的 ping 得到，必須從另一台電腦測。' `
@@ -3822,6 +3995,7 @@ function Show-WindowsPanel {
     )
     & $addSection '網路與防火牆' @(
         @{Title='Ping (ICMP) 設定';Action={Show-PingPanel};Style='info'}
+        @{Title='OpenSSH Server（SSH 連線）';Action={Show-SshServerPanel};Style='info'}
         @{Title='IP / DNS 設定（含看門狗）';Action={Show-NetSetPanel};Style='danger'}
         @{Title='防火牆 Port 管理';Action={Show-PortManagementPanel};Style='info'}
         @{Title='批量新增 IP';Action={Show-BatchIpPanel};Style='success'}
