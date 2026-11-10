@@ -56,6 +56,8 @@ repo 本身被入侵時兩者會一起被換掉，這裡擋不住。剛推上新
 
 ### 點兩下的 exe（OPS-command.exe）
 
+> **目前還沒提供下載**：簽章完成後才會放上 GitHub Releases。想先用可以自己編譯（見「維護：改了程式之後」），或用上面的一行指令。
+
 給不想開 PowerShell 打指令的人。`OPS-command.exe` 是很小的**線上啟動器**，做的事和一行指令完全一樣：
 從 GitHub 下載最新的程式與 `SHA256SUMS`、核對、放到 `%LOCALAPPDATA%\OPS-command\`、開主面板。
 程式本身不在 exe 裡，所以工具改版不用重新下載 exe，每次點開都是 GitHub 上的最新版；
