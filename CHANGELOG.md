@@ -39,6 +39,14 @@ firewalld 的處理**只做了邏輯測試**：用會記錄呼叫的假 `firewal
 埠與封鎖方式同時改只重啟一次），連同原本 60 項共 70 項全過。ShellCheck 在改動的行上沒有新的告警。
 **沒有在真的 firewalld 機器上跑過**停用 → confirm / rollback 的完整流程。
 
+### Windows 圖形介面 2.1.0
+
+- **新增：RDP 只允許指定來源 IP。** 白名單以外的來源連不進遠端桌面（只擋 RDP 的 Port）。套用前目前所有 RDP 連線的來源都要在
+  白名單裡；有看門狗，時限內沒確認就恢復成套用前；確認時列出「套用之後才建立」的連線當證據；換 RDP Port 時規則跟著改。
+  測試機上 43 項邏輯與實際套用測試通過；測試機防火牆關著，「真的擋得住」還沒驗證。
+- **修正：一行指令開出的主面板是隱藏的。** `Start-Process -WindowStyle Hidden` 會讓行程第一個顯示的視窗（主面板）也隱藏，
+  改用 powershell 自己的 `-WindowStyle Hidden`。
+
 ### Windows 圖形介面 2.0.0
 
 `WINDOWS/` 整個改成圖形面板（WinForms），工具有了自己的版本號 2.0.0。細節見 [WINDOWS/README.md](WINDOWS/README.md)。

@@ -259,6 +259,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 |---|---|---|
 | 啟用 / 停用內建的 Administrator 帳號 | 帳號與安全 → 內建 Administrator 帳戶 | 啟用後記得設一個強密碼；停用自己正在用的帳號會特別警告 |
 | 改某個帳號的密碼 | 帳號與安全 → 變更本機帳號密碼 | — |
+| 只讓自己的 IP 連遠端桌面 | 遠端桌面 RDP → RDP 只允許指定來源 IP | 有看門狗；套用後要開一條新的遠端桌面連線確認。IP 會變的話不要用 |
 | 看誰用遠端桌面登入過 | 遠端桌面 RDP → RDP 登入紀錄 | — |
 | 讓同一個帳號可以開兩個遠端桌面 | 遠端桌面 RDP → RDP 多工作階段 | 專業版仍然只能同時一個人連；家用版不能用 |
 | Microsoft Store 在背景一直吃資源 | 系統與更新 → Microsoft Store 自動更新 | 按「關閉自動更新」 |
@@ -345,5 +346,5 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 
 ---
 
-<sub>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.0.0</sub>
+<sub>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.1.0</sub>
 <sub>想看更多細節，請看 [WINDOWS/README.md](../WINDOWS/README.md)。Linux 的版本在 [linux.md](linux.md)。</sub>

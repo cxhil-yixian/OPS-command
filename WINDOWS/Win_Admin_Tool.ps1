@@ -3,7 +3,7 @@
 # 工具版本（Windows 圖形介面自己的版本號，跟 Linux ops.sh 的版本無關）。
 # 改了程式就遞增：修 bug 加第三段、加功能加第二段、介面大改加第一段（見 README「版本號」）。
 # 主面板開啟後會到線上讀這一行比對版本，所以這一行要留在檔案開頭、格式不要改。
-$Script:ToolVersion = '2.0.0'
+$Script:ToolVersion = '2.1.0'
 
 # ===== 檢查目前是否為系統管理員 (不強制提權,先記錄狀態) =====
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -1415,6 +1415,7 @@ function Invoke-RdpPortChange {
         throw "寫入後讀回來還是 $now，設定沒有生效（可能被群組原則鎖住）。已撤回看門狗與防火牆規則，系統維持原狀。"
     }
     "[完成] 登錄檔已改為 $NewPort；看門狗 $Minutes 分鐘後會自動還原成 $cur。"
+    Sync-RdpAllowPorts
     "接下來："
     "  1. 重啟遠端桌面服務讓新 Port 生效（這條 RDP 連線會斷）"
     "  2. 用『另一台電腦』連 IP:$NewPort 確認能登入"
@@ -1435,6 +1436,7 @@ function Invoke-RdpPortConfirm {
         else { "保留舊 Port $old 的規則。" }
     }
     Clear-RdpState
+    Sync-RdpAllowPorts
 }
 
 function Invoke-RdpPortRestore {
@@ -1449,6 +1451,7 @@ function Invoke-RdpPortRestore {
     if ([int]$now -ne [int]$old) { throw "寫入後讀回來是 $now，還原沒有生效。看門狗已取消，請手動檢查登錄檔 $Script:RdpKey" }
     Clear-RdpState
     "[完成] 登錄檔已改回 $old。"
+    Sync-RdpAllowPorts
 }
 
 function Show-RdpPortPanel {
@@ -1576,6 +1579,292 @@ function Show-RdpLoginsPanel {
     Show-FeaturePanel -Title 'RDP 登入紀錄' -Subtitle '最近一年的遠端連線與登入失敗（唯讀）' -Mono `
         -Note $(if ($IsAdmin) { '要看更完整的登入事件，請用「事件檢視器」的「登入與帳號」。' } else { '目前不是管理員：登入失敗紀錄在 Security 記錄檔，一般權限讀不到，會標示「讀不到」。' }) `
         -Actions @($report) -OnOpen $report
+}
+
+# ---- RDP 只允許指定來源 IP（E1）----
+# 做法：一條「封鎖」規則，封鎖範圍＝白名單以外的所有位址（IPv4 與 IPv6 都算），只針對 RDP 的 Port。
+# Windows 防火牆裡封鎖規則優先於允許規則，所以不管機器上原本有幾條放行 RDP 的規則，白名單外都進不來；
+# 也不去改別人建的放行規則。
+# 不把自己鎖在外面：
+#   - 套用前列出目前所有 RDP 連線的來源，有任何一個不在白名單就拒絕套用。
+#   - 算出封鎖範圍後再核對一次，這些來源確實不在封鎖範圍裡（程式自己的保險）。
+#   - 先寫狀態、建看門狗才動規則；時限內沒確認就恢復成套用前（原本沒限制 → 拿掉規則；原本有 → 回到舊白名單）。
+#   - 已經建立的連線不受新規則影響，所以「確認」要看有沒有「套用之後才建立」的 RDP 連線來自白名單。
+# 狀態存 HKLM、還原指令放在排程本身、紀錄寫事件 100（同 W2）。
+$Script:RdpAllowKey   = 'HKLM:\SOFTWARE\OPS-command\RdpAllow'
+$Script:RdpAllowTask  = 'OPS-RdpAllow-Watchdog'
+$Script:RdpAllowRules = @('OPS-RdpAllow-Block-TCP', 'OPS-RdpAllow-Block-UDP')
+
+# 一項白名單 → @{ Family; Start; End }（BigInteger）。IPv4 要完整四段；CIDR 前綴要在範圍內。看不懂回傳 $null
+function ConvertTo-RdpAllowRange {
+    param([string]$Text)
+    $t = $Text.Trim()
+    $p = $t -split '/'
+    if ($p.Count -gt 2) { return $null }
+    $a = $null
+    if (-not [Net.IPAddress]::TryParse($p[0], [ref]$a)) { return $null }
+    $v6 = $a.AddressFamily -eq 'InterNetworkV6'
+    if (-not $v6 -and $p[0] -notmatch '^\d{1,3}(\.\d{1,3}){3}$') { return $null }
+    $bits = if ($v6) { 128 } else { 32 }
+    $len = $bits
+    if ($p.Count -eq 2) { if (-not [int]::TryParse($p[1], [ref]$len) -or $len -lt 0 -or $len -gt $bits) { return $null } }
+    $bytes = $a.GetAddressBytes(); [Array]::Reverse($bytes)
+    $n = New-Object Numerics.BigInteger (,[byte[]]($bytes + [byte]0))
+    $span = [Numerics.BigInteger]::Pow(2, $bits - $len) - 1
+    $start = $n - ($n % ($span + 1))
+    @{ Family = $(if ($v6) { 6 } else { 4 }); Start = $start; End = $start + $span }
+}
+
+function ConvertFrom-RdpAllowNumber {
+    param([Numerics.BigInteger]$N, [int]$Family)
+    $size = if ($Family -eq 6) { 16 } else { 4 }
+    $b = $N.ToByteArray()
+    $out = New-Object byte[] $size
+    for ($i = 0; $i -lt [Math]::Min($size, $b.Length); $i++) { $out[$i] = $b[$i] }
+    [Array]::Reverse($out)
+    ([Net.IPAddress]$out).ToString()
+}
+
+# 白名單以外的位址範圍（給防火牆 RemoteAddress 用的 "a-b" 字串）。本機（127.0.0.0/8、::1）一律算在白名單內
+function Get-RdpAllowBlockRanges {
+    param([string[]]$Whitelist)
+    $items = @(@($Whitelist) + @('127.0.0.0/8', '::1') | Where-Object { "$_".Trim() } | ForEach-Object { ConvertTo-RdpAllowRange $_ })
+    $out = @()
+    foreach ($fam in 4, 6) {
+        $max = [Numerics.BigInteger]::Pow(2, $(if ($fam -eq 6) { 128 } else { 32 })) - 1
+        $cur = [Numerics.BigInteger]::Zero
+        foreach ($r in @($items | Where-Object { $_.Family -eq $fam } | Sort-Object { $_.Start })) {
+            if ($r.Start -gt $cur) { $out += '{0}-{1}' -f (ConvertFrom-RdpAllowNumber $cur $fam), (ConvertFrom-RdpAllowNumber ($r.Start - 1) $fam) }
+            if ($r.End + 1 -gt $cur) { $cur = $r.End + 1 }
+        }
+        if ($cur -le $max) { $out += '{0}-{1}' -f (ConvertFrom-RdpAllowNumber $cur $fam), (ConvertFrom-RdpAllowNumber $max $fam) }
+    }
+    $out
+}
+
+# 這個 IP 會不會被這些封鎖範圍擋到
+function Test-RdpAllowBlocked {
+    param([string]$Ip, [string[]]$Ranges)
+    $x = ConvertTo-RdpAllowRange ($Ip -replace '^::ffff:', '')
+    if (-not $x) { return $false }
+    foreach ($r in $Ranges) {
+        $ab = $r -split '-'
+        $s = ConvertTo-RdpAllowRange $ab[0]; $e = ConvertTo-RdpAllowRange $ab[1]
+        if ($s.Family -eq $x.Family -and $x.Start -ge $s.Start -and $x.Start -le $e.Start) { return $true }
+    }
+    $false
+}
+
+function Split-RdpAllowList {
+    param([string]$Text)
+    @(($Text -split '[\s,;，、]+') | Where-Object { $_ } | Select-Object -Unique)
+}
+
+# 要擋的 Port：目前的 RDP Port，加上換 Port 進行中時的另一個
+function Get-RdpAllowPorts {
+    $p = @(Get-RdpPort)
+    $st = Get-ItemProperty -Path $Script:RdpStateKey -ErrorAction SilentlyContinue
+    if ($st) { $p += @($st.OldPort, $st.NewPort) }
+    @($p | Where-Object { $_ } | ForEach-Object { [int]$_ } | Sort-Object -Unique)
+}
+
+# 目前連進 RDP 的來源（TCP，排除本機）
+function Get-RdpAllowSources {
+    $ports = Get-RdpAllowPorts
+    @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } |
+        ForEach-Object { $_.RemoteAddress -replace '^::ffff:', '' } | Where-Object { $_ -notmatch '^(127\.|::1$)' } | Sort-Object -Unique)
+}
+
+function Test-RdpAllowActive { [bool](Get-NetFirewallRule -Name $Script:RdpAllowRules[0] -ErrorAction SilentlyContinue) }
+
+# 還原到套用前的指令（看門狗與「立即還原」共用）。$Prev = 套用前的封鎖範圍；空的 = 原本沒有限制
+function Get-RdpAllowRevertScript {
+    param([string[]]$Prev, [switch]$Watchdog)
+    $names = ($Script:RdpAllowRules | ForEach-Object { "'$_'" }) -join ','
+    $lines = @("`$ErrorActionPreference = 'Continue'")
+    if (@($Prev).Count) {
+        $lines += "Set-NetFirewallRule -Name $names -RemoteAddress @(" + (($Prev | ForEach-Object { "'$_'" }) -join ',') + ")"
+        $what = 'restored the previous allow list'
+    } else {
+        $lines += "Remove-NetFirewallRule -Name $names -ErrorAction SilentlyContinue"
+        $what = 'removed the RDP source restriction'
+    }
+    $lines += "Remove-ItemProperty -Path '$($Script:RdpAllowKey)' -Name Pending, Since, Minutes, Prev -ErrorAction SilentlyContinue"
+    if (-not @($Prev).Count) { $lines += "Remove-Item -Path '$($Script:RdpAllowKey)' -Recurse -Force -ErrorAction SilentlyContinue" }
+    if ($Watchdog) { $lines += "eventcreate /L APPLICATION /SO OPS-command /ID 100 /T WARNING /D `"OPS-command RDP allow-list watchdog: not confirmed in time, $what.`" | Out-Null" }
+    $lines += "Unregister-ScheduledTask -TaskName '$($Script:RdpAllowTask)' -Confirm:`$false -ErrorAction SilentlyContinue"
+    $lines -join "`r`n"
+}
+
+# 套用前的檢查（唯讀，確認視窗也用它）
+function Get-RdpAllowPlan {
+    param([string]$Text)
+    $list = @(Split-RdpAllowList $Text)
+    if (-not $list.Count) { throw '白名單是空的。至少要放你自己連進來的 IP。' }
+    $bad = @($list | Where-Object { -not (ConvertTo-RdpAllowRange $_) })
+    if ($bad.Count) { throw "白名單裡有看不懂的項目：$($bad -join '、')（只接受 IP 或 CIDR，例如 192.0.2.10、192.0.2.0/24）" }
+    $ranges = @(Get-RdpAllowBlockRanges $list)
+    if (-not $ranges.Count) { throw '白名單涵蓋了所有位址，等於沒有限制。' }
+    $src = @(Get-RdpAllowSources)
+    $out = @($src | Where-Object { Test-RdpAllowBlocked $_ $ranges })
+    if ($out.Count) { throw "目前有 RDP 連線來自 $($out -join '、')，不在白名單裡。套用後這些來源就再也連不進來（包括斷線重連）；確定是你自己的話請加進白名單。" }
+    @{ List = $list; Ranges = $ranges; Sources = $src; Ports = @(Get-RdpAllowPorts) }
+}
+
+function Enable-RdpAllow {
+    param([string]$Text, [int]$Minutes)
+    if (Get-ScheduledTask -TaskName $Script:RdpAllowTask -ErrorAction SilentlyContinue) { throw '上一次套用還沒確認。請先「確認可以連線」或「立即還原」。' }
+    $plan = Get-RdpAllowPlan $Text
+    $prev = @()
+    if (Test-RdpAllowActive) { $prev = @((Get-NetFirewallRule -Name $Script:RdpAllowRules[0] | Get-NetFirewallAddressFilter).RemoteAddress) }
+    try {
+        New-Item -Path $Script:RdpAllowKey -Force -ErrorAction Stop | Out-Null
+        Set-ItemProperty $Script:RdpAllowKey -Name Pending -Value 1 -Type DWord -ErrorAction Stop
+        Set-ItemProperty $Script:RdpAllowKey -Name Since -Value (Get-Date).ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+        Set-ItemProperty $Script:RdpAllowKey -Name Minutes -Value $Minutes -Type DWord
+        Set-ItemProperty $Script:RdpAllowKey -Name Prev -Value ([string[]]$prev) -Type MultiString
+    } catch { throw "狀態寫不進登錄檔（$($_.Exception.Message)），這次不做變更。" }
+    try {
+        $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes((Get-RdpAllowRevertScript -Prev $prev -Watchdog)))
+        $arg = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $enc"
+        if ($arg.Length -gt 32000) { throw "還原指令太長（$($arg.Length) 字元）" }
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        Register-ScheduledTask -TaskName $Script:RdpAllowTask -Force -ErrorAction Stop `
+            -Action (New-ScheduledTaskAction -Execute $ps -Argument $arg) `
+            -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($Minutes)) `
+            -Principal (New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest) `
+            -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries) | Out-Null
+    } catch {
+        if ($prev.Count) { Remove-ItemProperty $Script:RdpAllowKey -Name Pending, Since, Minutes, Prev -ErrorAction SilentlyContinue } else { Remove-Item $Script:RdpAllowKey -Recurse -Force -ErrorAction SilentlyContinue }
+        throw "看門狗建不起來（$($_.Exception.Message)），這次不做變更——沒有自動還原就限制 RDP 來源太危險。"
+    }
+    try {
+        Set-ItemProperty $Script:RdpAllowKey -Name Whitelist -Value ([string[]]$plan.List) -Type MultiString
+        foreach ($pr in 'TCP', 'UDP') {
+            $name = "OPS-RdpAllow-Block-$pr"
+            if (Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue) {
+                Set-NetFirewallRule -Name $name -RemoteAddress $plan.Ranges -LocalPort $plan.Ports -ErrorAction Stop
+            } else {
+                New-NetFirewallRule -Name $name -DisplayName "OPS-command：RDP 只允許白名單（$pr）" -Group 'OPS-RdpAllow' -Direction Inbound -Action Block `
+                    -Protocol $pr -LocalPort $plan.Ports -RemoteAddress $plan.Ranges -Profile Any -Description 'OPS-command：封鎖白名單以外的 RDP 來源' -ErrorAction Stop | Out-Null
+            }
+        }
+        # 讀回來核對：範圍數量一致、目前的來源都不在封鎖範圍裡
+        $got = @((Get-NetFirewallRule -Name $Script:RdpAllowRules[0] | Get-NetFirewallAddressFilter).RemoteAddress)
+        if ($got.Count -ne $plan.Ranges.Count) { throw "規則讀回來的範圍數量不對（$($got.Count)／$($plan.Ranges.Count)）" }
+        foreach ($s in $plan.Sources) { if (Test-RdpAllowBlocked $s $got) { throw "讀回來的規則會擋到目前的來源 $s" } }
+    } catch {
+        $msg = $_.Exception.Message
+        & ([scriptblock]::Create((Get-RdpAllowRevertScript -Prev $prev)))
+        throw "套用失敗（$msg），已恢復成套用前的樣子。"
+    }
+    "[完成] RDP（Port $($plan.Ports -join '、')）現在只允許：$($plan.List -join '、')"
+    "看門狗 $Minutes 分鐘後會自動恢復成套用前的樣子。接下來："
+    "  1. 保留這個視窗，另外開一條「新的」遠端桌面連線，確認連得進來"
+    "  2. 回到這裡按「確認可以連線」"
+    "  * 連不進來就什麼都別做，時間到自動恢復"
+    $off = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { -not $_.Enabled } | ForEach-Object Name)
+    if ($off.Count) { "[注意] 防火牆設定檔 $($off -join '、') 是關閉的：在這些網路上規則不會生效，任何來源都還連得進來。" }
+}
+
+# 套用之後才建立、來自白名單的 RDP 連線（證明新規則下連得進來）
+function Get-RdpAllowProof {
+    $st = Get-ItemProperty -Path $Script:RdpAllowKey -ErrorAction SilentlyContinue
+    if (-not $st -or -not $st.Since) { return @() }
+    $since = [datetime]::ParseExact($st.Since, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+    $ranges = @((Get-NetFirewallRule -Name $Script:RdpAllowRules[0] -ErrorAction SilentlyContinue | Get-NetFirewallAddressFilter).RemoteAddress)
+    $ports = Get-RdpAllowPorts
+    @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue | Where-Object {
+            $ports -contains $_.LocalPort -and $_.CreationTime -gt $since -and $_.RemoteAddress -notmatch '^(127\.|::1$)' -and -not (Test-RdpAllowBlocked $_.RemoteAddress $ranges) } |
+        ForEach-Object { "$($_.RemoteAddress)（$($_.CreationTime.ToString('HH:mm:ss')) 建立）" } | Sort-Object -Unique)
+}
+
+function Confirm-RdpAllow {
+    if (-not (Get-ScheduledTask -TaskName $Script:RdpAllowTask -ErrorAction SilentlyContinue)) { throw '目前沒有等待確認的套用。' }
+    $proof = @(Get-RdpAllowProof)
+    Unregister-ScheduledTask -TaskName $Script:RdpAllowTask -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-ItemProperty $Script:RdpAllowKey -Name Pending, Since, Minutes, Prev -ErrorAction SilentlyContinue
+    "[完成] 看門狗已取消，RDP 來源限制保留。" + $(if ($proof.Count) { "（套用後有新的連線進來：$($proof -join '、')）" } else { '' })
+}
+
+function Undo-RdpAllow {
+    $st = Get-ItemProperty -Path $Script:RdpAllowKey -ErrorAction SilentlyContinue
+    if (-not $st -or $st.Pending -ne 1) { throw '目前沒有等待確認的套用，沒有可還原的。要拿掉限制請按「取消限制」。' }
+    $prev = @($st.Prev | Where-Object { $_ })
+    & ([scriptblock]::Create((Get-RdpAllowRevertScript -Prev $prev)))
+    if ($prev.Count) { '[完成] 已恢復成上一次的白名單。' } else { '[完成] 已拿掉 RDP 來源限制（恢復成套用前：不限制）。' }
+}
+
+function Disable-RdpAllow {
+    Unregister-ScheduledTask -TaskName $Script:RdpAllowTask -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-NetFirewallRule -Name $Script:RdpAllowRules -ErrorAction SilentlyContinue
+    Remove-Item -Path $Script:RdpAllowKey -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-RdpAllowActive) { throw '規則刪不掉，請到「具有進階安全性的 Windows Defender 防火牆」手動刪除 OPS-RdpAllow 群組。' }
+    '[完成] 已取消 RDP 來源限制，任何來源都可以連（仍受其他防火牆規則與帳號密碼保護）。'
+}
+
+# 換 RDP Port 時跟著改規則的 Port（換 Port、確認、還原都會呼叫）
+function Sync-RdpAllowPorts {
+    if (-not (Test-RdpAllowActive)) { return }
+    $ports = Get-RdpAllowPorts
+    try { Set-NetFirewallRule -Name $Script:RdpAllowRules -LocalPort $ports -ErrorAction Stop; "RDP 來源限制的規則同步改成 Port $($ports -join '、')。" }
+    catch { "[注意] RDP 來源限制的規則沒能改成新的 Port（$($_.Exception.Message)），請到「RDP 只允許指定來源」按一次「套用」。" }
+}
+
+function Get-RdpAllowStatus {
+    $active = Test-RdpAllowActive
+    $st = Get-ItemProperty -Path $Script:RdpAllowKey -ErrorAction SilentlyContinue
+    if (-not $active) { '目前沒有限制：任何來源都可以連 RDP（仍受其他防火牆規則與帳號密碼保護）。' }
+    else {
+        $pf = @(Get-NetFirewallRule -Name $Script:RdpAllowRules[0] | Get-NetFirewallPortFilter).LocalPort
+        "已限制：RDP 只允許 $(if ($st.Whitelist) { @($st.Whitelist) -join '、' } else { '（讀不到白名單紀錄）' })"
+        $now = Get-RdpAllowPorts
+        "規則擋的 Port：$(@($pf) -join '、')" + $(if ((@($pf) -join ',') -ne ($now -join ',')) { "　[注意] 跟目前的 RDP Port（$($now -join '、')）不一致，請按一次「套用」" } else { '' })
+    }
+    $t = Get-ScheduledTask -TaskName $Script:RdpAllowTask -ErrorAction SilentlyContinue
+    if ($t) {
+        $at = $null; try { $at = [datetime]$t.Triggers[0].StartBoundary } catch { }
+        "▶ 等待確認：看門狗會在 $(if ($at) { $at.ToString('HH:mm:ss') } else { '時限到' }) 自動恢復成套用前的樣子。"
+        $proof = @(Get-RdpAllowProof)
+        '　套用後的新連線：' + $(if ($proof.Count) { $proof -join '、' } else { '還沒有（請另外開一條新的遠端桌面連線）' })
+    }
+    $src = @(Get-RdpAllowSources)
+    '目前連進來的 RDP 來源：' + $(if ($src.Count) { $src -join '、' } else { '無' })
+    $off = @(Get-NetFirewallProfile -ErrorAction SilentlyContinue | Where-Object { -not $_.Enabled } | ForEach-Object Name)
+    if ($off.Count) { "[注意] 防火牆設定檔 $($off -join '、') 是關閉的：在這些網路上規則不會生效。" }
+}
+
+function Show-RdpAllowPanel {
+    $st = Get-ItemProperty -Path $Script:RdpAllowKey -ErrorAction SilentlyContinue
+    $def = if ($st -and $st.Whitelist) { @($st.Whitelist) -join ', ' } else { @(Get-RdpAllowSources) -join ', ' }
+    Show-FeaturePanel -Title 'RDP 只允許指定來源 IP' -Subtitle '白名單以外的來源連不進遠端桌面；套用後有看門狗，沒確認就自動恢復' -Width 900 -Height 720 `
+        -Note '只擋 RDP 的 Port（TCP 與 UDP），SSH 等其他服務不受影響，可以當救援管道。白名單填 IP 或網段（CIDR），用逗號分隔；預設帶入「目前連進來的來源」。已經連著的連線不會被新規則切斷，所以套用後要另外開一條新的遠端桌面連線，確認連得進來再按「確認可以連線」。你的 IP 會變（家用網路、手機熱點）就不適合用這個功能。' `
+        -Status { Get-RdpAllowStatus } `
+        -Inputs @(
+            @{ Name = 'List'; Label = '白名單（IP 或 CIDR，逗號分隔）'; Width = 520; Default = $def }
+            @{ Name = 'Minutes'; Label = '看門狗時限（分鐘）'; Type = 'Number'; Min = 1; Max = 60; Default = 5 }
+        ) `
+        -Actions @(
+            @{ Text = '套用（含看門狗）'; Style = 'danger'; Admin = $true
+               Confirm = { param($v)
+                   $p = Get-RdpAllowPlan $v.List
+                   "RDP（Port $($p.Ports -join '、')）將只允許：`r`n  $($p.List -join "`r`n  ")`r`n`r`n" +
+                   "目前連進來的來源：$(if ($p.Sources.Count) { $p.Sources -join '、' } else { '無' })（都在白名單內）`r`n`r`n" +
+                   "看門狗 $($v.Minutes) 分鐘內沒按「確認可以連線」，就自動恢復成現在的樣子。你的 IP 會變的話不要用。確定套用？" }
+               Run = { param($v) Enable-RdpAllow $v.List $v.Minutes } }
+            @{ Text = '確認可以連線'; Style = 'success'; Admin = $true
+               Confirm = {
+                   $proof = @(Get-RdpAllowProof)
+                   if ($proof.Count) { "套用後有新的遠端桌面連線從白名單進來：$($proof -join '、')。`r`n`r`n取消看門狗、保留限制？" }
+                   else { "還沒看到「套用之後才建立」的遠端桌面連線。已經連著的連線不受新規則影響，不能當證據。`r`n`r`n建議先另外開一條新的遠端桌面連線確認連得進來。仍要確認？" } }
+               Run = { Confirm-RdpAllow } }
+            @{ Text = '立即還原'; Style = 'danger'; Admin = $true
+               Confirm = '恢復成這次套用之前的樣子，並取消看門狗。確定？'
+               Run = { Undo-RdpAllow } }
+            @{ Text = '取消限制'; Style = 'light'; Admin = $true
+               Confirm = '拿掉 RDP 來源限制，任何來源都可以連（仍受其他防火牆規則與帳號密碼保護）。確定？'
+               Run = { Disable-RdpAllow } }
+        )
 }
 
 # ================= 帳號與安全 =================
@@ -4029,6 +4318,7 @@ function Show-WindowsPanel {
         @{Title='更換 RDP Port（含確認／還原）';Action={Show-RdpPortPanel};Style='danger'}
         @{Title='RDP 多工作階段（開／關）';Action={Show-RdpMultiPanel};Style='info'}
         @{Title='CredSSP 加密預示修復';Action={Show-CredSspPanel};Style='info'}
+        @{Title='RDP 只允許指定來源 IP';Action={Show-RdpAllowPanel};Style='danger'}
         @{Title='RDP 登入紀錄';Action={Show-RdpLoginsPanel};Style='success'}
     )
     & $addSection '帳號與安全' @(
