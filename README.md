@@ -52,7 +52,8 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 ```
 
 第一行是 Windows PowerShell 5.1（Win10 內建）需要的——它預設不啟用 TLS 1.2，
-而 GitHub 只收 1.2 以上。PowerShell 7 可以省略。細節見 [WINDOWS/README.md](WINDOWS/README.md)。
+而 GitHub 只收 1.2 以上。PowerShell 7 可以省略。下載後會核對 SHA256 才執行，開出來是圖形面板。
+細節見 [WINDOWS/README.md](WINDOWS/README.md)，新手請看 [WIKI/windows.md](WIKI/windows.md)。
 
 兩種方式的選單完全一樣，`ops.sh` 會自己判斷：`$0` 旁邊有完整的 `SSH/` 就用本機的，
 沒有就走下載。要指到自己的 fork、內網鏡像或其他分支，設 `OPS_RAW_BASE` 即可：
@@ -174,9 +175,13 @@ OPS-command/
 ├── NET/                → 詳見 NET/README.md
 │   └── net-set.sh      IP 與 DNS 的增加 / 減少 / 替換（看門狗 + 新舊並存）
 ├── WINDOWS/            → 詳見 WINDOWS/README.md
-│   ├── ops-win.ps1         一行指令的進入點（下載主腳本到 %ProgramData% 再執行）
-│   ├── Win_Admin_Tool.bat  本機進入點（雙擊即可）
-│   └── Win_Admin_Tool.ps1  Windows 10/11 管理選單：RDP / 帳號 / 更新 / 防火牆 / 磁碟 / 事件檢視器
+│   ├── ops-win.ps1             一行指令的進入點（下載到 %LOCALAPPDATA%、核對 SHA256 再執行）
+│   ├── Win_Admin_Tool.bat      本機進入點（雙擊即可）
+│   ├── Win_Admin_Tool.ps1      Windows 10/11 圖形面板：RDP / 帳號 / 更新 / 網路 / 磁碟 / 事件 / 軟體安裝
+│   ├── Win_Schedule_Panel.ps1  自動排程視窗
+│   ├── SHA256SUMS              一行指令下載後核對用
+│   ├── tests/                  靜態檢查、畫面測試
+│   └── tools/                  重新產生 SHA256SUMS
 ├── WIKI/               給新手的使用指南（HTML 單檔離線可開 / Markdown 給 GitHub 閱讀）
 │   ├── linux.html / linux.md
 │   └── windows.html / windows.md
@@ -274,22 +279,15 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 
 | Windows 工具 | 狀態 |
 |---|---|
-| `ops-win.ps1`（一行指令進入點） | ❔ 從未在 Windows 上執行過 |
-| `Win_Admin_Tool.bat` + `.ps1`（本機進入點） | ⚠️ 六個功能在 Windows 10 22H2 實機跑過，其餘未驗證 |
+| `ops-win.ps1`（一行指令進入點） | ✅ `irm \| iex` 對本機假網站實測：正常時核對後啟動；改一個位元組、清單缺項、清單 404 都拒絕 |
+| `Win_Admin_Tool.ps1` 圖形面板（2.0.0） | ✅ 每個功能都在 Windows 10 22H2 的 RDP 桌面上實際按過按鈕、核對系統狀態並還原 |
 
-`Win_Admin_Tool.ps1` 已經在一台真的 Windows 10 22H2 上執行過：選單起得來、提權正常，
-實際跑過並還原的有六項——停止 / 還原 Windows 更新、Ping (ICMP) 設定、解除帳號密碼鎖定、
-CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假成功**的真實 bug
-（見 [CHANGELOG](CHANGELOG.md)）。**換 RDP Port 那條流程仍然完全沒驗證過**——它會重啟
-`TermService`，目前那條 RDP 連線必然中斷，第一次用請先在測試機上驗。1.14.0 新增的
-`L. 事件檢視器` 也**還沒在 Windows 上跑過**（它是唯讀的，跑錯不會改到系統）。
-逐項狀態見 [WINDOWS/README.md](WINDOWS/README.md#已知限制)。
-
-靜態檢查也用真正的 PowerShell 工具做過（在 Linux 的容器裡）：語法解析**兩支都 0 個錯誤**，
-編碼與行尾符合 `.gitattributes`。PSScriptAnalyzer 在 1.14.0 那一輪**抓到一個真的 bug**——
-事件檢視器的自訂查詢問了使用者「往回幾天」卻沒把值傳進去，輸入 30 天實際只查 7 天，
-畫面還照樣標「最近 7 天」——已修正；其餘告警逐項確認過不需要改，明細見
-[WINDOWS/README.md](WINDOWS/README.md#已知限制)。**解析過不等於跑得起來。**
+2026-11 這一輪在一台 Windows 10 專業版 22H2（繁中、KVM 雲端虛擬機）上逐項實測，包含**換 RDP Port 兩輪**
+（不確認讓看門狗自動還原、確認後保留再換回）、停用再啟用 OpenSSH、Windows 更新停止／還原、臨時帳號的鎖定與
+改密碼、在虛擬磁碟上改代號／格式化／清除、實際用 winget 安裝並移除軟體。過程中抓到並修掉的問題見
+[CHANGELOG](CHANGELOG.md)。**還沒驗證的**：Hyper-V 元件啟用與重開機後效果（測試機沒開放巢狀虛擬化）、
+防火牆設定檔開著時封鎖是否真的擋得住（測試機 Public 防火牆是關的）、Windows Server。
+逐項見 [WINDOWS/README.md](WINDOWS/README.md#實測紀錄與已知限制)。
 
 > **`time-set.sh` 在 CentOS 7.9 上驗過的部分**：`status` / `list` / `doctor`、時區變更的
 > **兩條路徑都實機跑過並還原**（`timedatectl set-timezone`，以及強制走「直接改
@@ -394,8 +392,8 @@ CredSSP 修復、RDP 多開，其中「停止 Windows 更新」抓到一個**假
 - **選單第 9 項會下載並以 root 執行第三方腳本**（`REPO/URL` 記錄的
   `https://linuxmirrors.cn/main.sh`）。本 repo 只記錄網址，不對其內容負責。
   不放心請先自行下載檢視再執行。
-- **Windows 換 RDP Port 一樣走「換 → 另一台測 → 確認」三步**。看門狗是排程工作，
-  腳本關掉、使用者登出、連線中斷都不影響它執行；看門狗建不起來就不做變更。
+- **Windows 換 RDP Port、改 IP 一樣走「換 → 用新的連回來 → 確認」**。看門狗是 SYSTEM 排程，
+  面板關掉、使用者登出、連線中斷都不影響它執行；看門狗建不起來就不做變更。
   詳見 [WINDOWS/README.md](WINDOWS/README.md)。
 - **`selfheal-ssh.sh` 純取證，不改變系統任何狀態、不封鎖任何 IP**。這是刻意的——
   自動封鎖腳本誤封跳板機或監控伺服器會讓機器直接失聯。要封鎖請用
