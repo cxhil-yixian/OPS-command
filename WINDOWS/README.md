@@ -3,7 +3,7 @@
 Windows 10 / 11 的系統管理工具箱，用圖形面板操作。跟 Linux 那邊同一個原則：
 **遠端操作時不要把自己鎖在門外。**
 
-工具版本：**2.1.0**（Windows 圖形介面自己的版本號，跟 Linux `ops.sh` 無關）
+工具版本：**2.1.1**（Windows 圖形介面自己的版本號，跟 Linux `ops.sh` 無關）
 
 | 檔案 | 用途 |
 |---|---|
@@ -222,8 +222,7 @@ Firefox、VC++ 2015-2022、.NET 8 桌面執行環境、windows_exporter。其他
 
 | 位置 | 內容 |
 |---|---|
-| `%LOCALAPPDATA%\OPS-command\` | 一行指令下載的程式、`actions.log`（操作記錄） |
-| `%TEMP%\OPS-command-error.log` | 程式出錯時的完整訊息與呼叫堆疊（回報問題用） |
+| `%LOCALAPPDATA%\OPS-command\` | **工具寫出的檔案都在這裡**：一行指令下載的程式、`actions.log`（操作記錄）、`error.log`（出錯時的完整訊息與呼叫堆疊，回報問題用）、匯出檔的預設位置、測試工具的輸出（`tests\`）。「操作記錄」視窗有「開啟資料夾」按鈕 |
 | `HKLM\SOFTWARE\OPS-command\RdpPort` | 換 RDP Port 進行中的狀態 |
 | `HKLM\SOFTWARE\OPS-command\NetChange` | IP 變更進行中的狀態 |
 | `HKLM\SOFTWARE\OPS-command\RdpGuard` | 暴力破解封鎖的設定、封鎖清單 |

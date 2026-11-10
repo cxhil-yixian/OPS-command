@@ -39,6 +39,12 @@ firewalld 的處理**只做了邏輯測試**：用會記錄呼叫的假 `firewal
 埠與封鎖方式同時改只重啟一次），連同原本 60 項共 70 項全過。ShellCheck 在改動的行上沒有新的告警。
 **沒有在真的 firewalld 機器上跑過**停用 → confirm / rollback 的完整流程。
 
+### Windows 圖形介面 2.1.1
+
+- **工具寫出的檔案都集中到 `%LOCALAPPDATA%\OPS-command\`**：錯誤紀錄從 `%TEMP%\OPS-command-error.log` 改成這裡的 `error.log`，
+  匯出檔的預設位置、winget 的暫存檔、測試工具的輸出也都改到這裡；「操作記錄」視窗新增「開啟資料夾」。
+  以 SYSTEM 執行的狀態（HKLM、排程、事件記錄）不搬：放進一般使用者寫得到的地方就是 W2 修掉的提權漏洞。
+
 ### Windows 圖形介面 2.1.0
 
 - **新增：RDP 只允許指定來源 IP。** 白名單以外的來源連不進遠端桌面（只擋 RDP 的 Port）。套用前目前所有 RDP 連線的來源都要在

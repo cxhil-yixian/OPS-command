@@ -28,7 +28,7 @@
     暫時排程的名稱，預設 OPS-Test-Run。
 
 .PARAMETER LogFile
-    目標腳本輸出的存放位置，預設 %TEMP%\<TaskName>.log（印出後刪除）；有指定就保留。
+    目標腳本輸出的存放位置，預設 %LOCALAPPDATA%\OPS-command\tests\<TaskName>.log（印出後刪除）；有指定就保留。
 
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Invoke-Interactive.ps1 -Script C:\OPS-test\tests\Test-Gui.ps1 -Arguments "-OutDir C:\OPS-test\gui" -TaskName OPS-Test-gui
@@ -59,7 +59,11 @@ if (-not $sessions.Count) {
 }
 
 $keepLog = [bool]$LogFile
-if (-not $LogFile) { $LogFile = Join-Path $env:TEMP "$TaskName.log" }
+if (-not $LogFile) {
+    $d = Join-Path $env:LOCALAPPDATA 'OPS-command\tests'
+    if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+    $LogFile = Join-Path $d "$TaskName.log"
+}
 Remove-Item -LiteralPath $LogFile -Force -ErrorAction SilentlyContinue
 
 # 包一層：把目標腳本的所有輸出寫進記錄檔，並把它的結束碼帶出來。

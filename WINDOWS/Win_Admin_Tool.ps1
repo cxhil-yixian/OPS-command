@@ -3,7 +3,7 @@
 # 工具版本（Windows 圖形介面自己的版本號，跟 Linux ops.sh 的版本無關）。
 # 改了程式就遞增：修 bug 加第三段、加功能加第二段、介面大改加第一段（見 README「版本號」）。
 # 主面板開啟後會到線上讀這一行比對版本，所以這一行要留在檔案開頭、格式不要改。
-$Script:ToolVersion = '2.1.0'
+$Script:ToolVersion = '2.1.1'
 
 # ===== 檢查目前是否為系統管理員 (不強制提權,先記錄狀態) =====
 $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -145,13 +145,15 @@ function Format-OpsInputs {
 }
 
 # 面板是用隱藏的 PowerShell 視窗跑的，錯誤訊息印在主控台等於沒人看得到。
-# 一律跳訊息框，並把完整內容（含呼叫堆疊）寫進 %TEMP%\OPS-command-error.log 方便回報。
-$Script:ErrorLogPath = Join-Path $env:TEMP 'OPS-command-error.log'
+# 一律跳訊息框，並把完整內容（含呼叫堆疊）寫進 %LOCALAPPDATA%\OPS-command\error.log 方便回報。
+# 工具寫出的檔案都集中在 %LOCALAPPDATA%\OPS-command\（SYSTEM 用的狀態除外，見 README「狀態與紀錄放在哪」）。
+$Script:ErrorLogPath = Join-Path $Script:LocalDir 'error.log'
 function Show-PanelError {
     param([string]$Title = 'OPS-command', $ErrorRecord)
     $msg = if ($ErrorRecord -is [Management.Automation.ErrorRecord]) { $ErrorRecord.Exception.Message } else { [string]$ErrorRecord }
     try {
         $detail = if ($ErrorRecord -is [Management.Automation.ErrorRecord]) { ($ErrorRecord | Out-String) + $ErrorRecord.ScriptStackTrace } else { $msg }
+        if (-not (Test-Path $Script:LocalDir)) { New-Item -ItemType Directory -Path $Script:LocalDir -Force | Out-Null }
         Add-Content -Path $Script:ErrorLogPath -Encoding UTF8 -Value ("[{0}] {1}`r`n{2}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Title, $detail)
         $msg += "`r`n`r`n詳細內容已寫入：`r`n$Script:ErrorLogPath"
     } catch { }
@@ -2492,7 +2494,10 @@ function Get-Table([string[]]$Lines) {
     }
 }
 function Get-Installed {
-    $f = Join-Path ([IO.Path]::GetTempPath()) ("ops-winget-" + [guid]::NewGuid().ToString('N') + '.json')
+    # 暫存檔也放在工具自己的資料夾（用完就刪）
+    $d = Join-Path $env:LOCALAPPDATA 'OPS-command'
+    if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+    $f = Join-Path $d ("winget-installed-" + [guid]::NewGuid().ToString('N') + '.json')
     try {
         $r = Invoke-Wg "export --output `"$f`" --source winget --include-versions --accept-source-agreements --disable-interactivity"
         if (-not (Test-Path $f)) { throw "winget export 沒有產生已安裝清單（結束碼 $(Format-Code $r.Code)）：$(($r.Lines | Select-Object -Last 3) -join ' / ')" }
@@ -3598,6 +3603,11 @@ function Show-ActionLogPanel {
         ''
         $lines
     } }
+    $folder = @{ Text = '開啟資料夾'; Style = 'light'; Run = {
+        if (-not (Test-Path $Script:LocalDir)) { New-Item -ItemType Directory -Path $Script:LocalDir -Force | Out-Null }
+        Start-Process explorer.exe -ArgumentList "`"$Script:LocalDir`""
+        "已開啟 $Script:LocalDir（操作記錄、錯誤紀錄、匯出的檔案都在這裡）"
+    } }
     $open = @{ Text = '用記事本開啟'; Style = 'light'; Run = {
         if (-not (Test-Path $Script:ActionLogPath)) { throw '還沒有記錄檔。' }
         Start-Process notepad.exe -ArgumentList "`"$Script:ActionLogPath`""
@@ -3605,7 +3615,7 @@ function Show-ActionLogPanel {
     } }
     Show-FeaturePanel -Title '操作記錄' -Subtitle '這個工具做過的每一項系統變更' -Mono -Width 1000 `
         -Note "記錄檔：$Script:ActionLogPath（只有這個帳號的記錄）。以管理員執行的動作，另外寫進 Windows 事件記錄：應用程式，來源 OPS-command，事件 200 = 成功、201 = 失敗。" `
-        -Actions @($report, $open) -OnOpen $report
+        -Actions @($report, $open, $folder) -OnOpen $report
 }
 
 function Show-StatusPanel {
@@ -3617,7 +3627,8 @@ function Show-StatusPanel {
         $dlg = New-Object Windows.Forms.SaveFileDialog
         $dlg.Title = '匯出系統現況'
         $dlg.Filter = '文字檔 (*.txt)|*.txt|所有檔案 (*.*)|*.*'
-        $dlg.InitialDirectory = [Environment]::GetFolderPath('Desktop')
+        if (-not (Test-Path $Script:LocalDir)) { New-Item -ItemType Directory -Path $Script:LocalDir -Force | Out-Null }
+        $dlg.InitialDirectory = $Script:LocalDir
         $dlg.FileName = "OPS-status_$($env:COMPUTERNAME)_$stamp.txt"
         $dlg.OverwritePrompt = $true
         try {
@@ -3885,6 +3896,7 @@ function Show-EventViewerPanel {
     $script:EventViewerForm = $form
     # 閉包裡的 $Script: 不是這支腳本，要用的值先在這一層取出來
     $worker = $Script:WorkerEvents
+    $localDir = $Script:LocalDir
     $scen = @(Get-EventScenarios)
     $cOk = [Drawing.Color]::FromArgb(21, 128, 61); $cWarn = [Drawing.Color]::FromArgb(180, 83, 9)
     $cGray = [Drawing.Color]::FromArgb(100, 116, 139); $cBad = [Drawing.Color]::FromArgb(185, 28, 28)
@@ -4080,6 +4092,8 @@ function Show-EventViewerPanel {
         if (-not $listView.Visible -or -not $ctx.Rows.Count) { [void][Windows.Forms.MessageBox]::Show($form, '請先點一張有紀錄的卡片，再匯出。', '匯出 CSV', 'OK', 'Information'); return }
         $save = New-Object Windows.Forms.SaveFileDialog
         $save.Filter = 'CSV 檔案 (*.csv)|*.csv'
+        if (-not (Test-Path $localDir)) { New-Item -ItemType Directory -Path $localDir -Force | Out-Null }
+        $save.InitialDirectory = $localDir
         $save.FileName = ('事件紀錄-{0}-{1}.csv' -f ($listTitle.Text -replace '[\\/:*?"<>| ]', '_'), (Get-Date -Format 'yyyyMMdd-HHmmss'))
         try {
             if ($save.ShowDialog($form) -ne 'OK') { return }
@@ -4221,7 +4235,7 @@ function Show-WindowsPanel {
         @{Title='先看目前狀態';Body='每個功能視窗上方都會顯示目前的實際設定，改完自動重新讀取。'}
         @{Title='危險操作會再確認';Body='換 RDP Port 有看門狗自動還原；格式化、清除磁碟要再輸入一次才執行。'}
         @{Title='長時間作業不卡畫面';Body='Hyper-V、校時、Windows 更新在背景執行；會改系統的要等做完才能關視窗，只是查詢的可以直接關。'}
-        @{Title='出錯會告訴你';Body="錯誤會跳出訊息，詳細內容寫在 %TEMP%\OPS-command-error.log。"}
+        @{Title='出錯會告訴你';Body="錯誤會跳出訊息，詳細內容寫在 %LOCALAPPDATA%\OPS-command\error.log。"}
     )){
         $tilePanel=New-Object Windows.Forms.Panel
         $tilePanel.Size=New-Object Drawing.Size(390,105)

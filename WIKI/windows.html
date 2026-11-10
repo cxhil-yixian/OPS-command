@@ -267,7 +267,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
   <ol>
     <li><strong>檢查與紀錄 → 檢查系統現況</strong>。</li>
     <li>視窗會列出遠端桌面 Port、Windows 更新狀態、帳號鎖定、能不能被 ping，以及目前有哪些 Port 正在使用。</li>
-    <li>要留存或傳給別人看，按「匯出成文字檔」，預設存到桌面。</li>
+    <li>要留存或傳給別人看，按「匯出成文字檔」。預設存在工具的資料夾（<code>%LOCALAPPDATA%\OPS-command</code>），存檔視窗裡也可以改存到桌面。</li>
   </ol>
   <p>這個功能只看不改，一般身分就能用，可以放心按。</p>
 </div>
@@ -467,7 +467,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 </ul>
 
 <h3>跳出錯誤訊息</h3>
-<p>訊息裡會寫詳細內容存在哪個檔案（<code>%TEMP%\OPS-command-error.log</code>），把這個檔案給懂的人看。</p>
+<p>訊息裡會寫詳細內容存在哪個檔案（<code>%LOCALAPPDATA%\OPS-command\error.log</code>），把這個檔案給懂的人看。「檢查與紀錄 → 操作記錄」視窗裡按「開啟資料夾」，就能直接打開這個資料夾。</p>
 
 <h3>不知道哪裡出了問題</h3>
 <p>先看<strong>檢查與紀錄</strong>裡的「檢查系統現況」和「事件檢視器」，這兩個都只看不改。</p>
@@ -504,7 +504,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 </dl>
 
 <footer>
-  <p>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.1.0</p>
+  <p>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.1.1</p>
   <p>想看更多細節，請看 <a href="https://github.com/cxhil-yixian/OPS-command/blob/main/WINDOWS/README.md">WINDOWS/README.md</a>。Linux 的版本在 <a href="linux.html">linux.md</a>。</p>
 </footer>
 

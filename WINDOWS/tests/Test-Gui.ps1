@@ -11,7 +11,7 @@
       2. 側邊欄的功能清單從主程式原始碼的 & $addSection 定義自動取得，和畫面上的按鈕比對。
       3. 逐一點每個功能按鈕 → 等視窗開出來、狀態讀完 → 截圖 → 記錄狀態欄與結果區 → 關閉。
       4. 期間跳出的訊息框自動關閉（有「否」按「否」、有「取消」按「取消」），內容寫進結果；
-         .NET 未處理例外、%TEMP%\OPS-command-error.log 新增的內容、標題含「錯誤／失敗」的訊息框、
+         .NET 未處理例外、%LOCALAPPDATA%\OPS-command\error.log 新增的內容、標題含「錯誤／失敗」的訊息框、
          狀態欄「讀取狀態失敗」、結果區「[錯誤]」都算失敗。
       5. 測試前後比對系統設定（RDP Port、Store、Windows 更新、帳號鎖定、防火牆 ICMP 規則、OPS 排程…），
          唯讀模式下前後必須相同。
@@ -29,7 +29,7 @@
     工具所在的資料夾（裡面要有 Win_Admin_Tool.ps1），預設是這支腳本的上一層。
 
 .PARAMETER OutDir
-    截圖與結果檔的資料夾，預設 %TEMP%\OPS-command-tests\gui-日期時間。
+    截圖與結果檔的資料夾，預設 %LOCALAPPDATA%\OPS-command\tests\gui-日期時間。
 
 .PARAMETER Modify
     執行會改動系統、但會自動還原的測試。
@@ -66,7 +66,7 @@ if (-not (& ({ ${function:Test-OpsGuiScope} }.GetNewClosure()))) {
 # 用 -File 執行時 -Only a,b 會收到一個字串 "a,b"，自己拆
 $Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if (-not $Path) { $Path = Split-Path -Parent $PSScriptRoot }
-if (-not $OutDir) { $OutDir = Join-Path $env:TEMP ("OPS-command-tests\gui-" + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
+if (-not $OutDir) { $OutDir = Join-Path $env:LOCALAPPDATA ("OPS-command\tests\gui-" + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $ResultFile = Join-Path $OutDir 'result.txt'
 [IO.File]::WriteAllText($ResultFile, '', (New-Object System.Text.UTF8Encoding($true)))
@@ -220,7 +220,7 @@ function Compare-Snapshot($Before, $After, [string]$When) {
 # 只執行到最外層第一個呼叫 Show-WindowsPanel 的敘述之前（也就是不自動開面板）。
 # 寫到暫存資料夾再 dot-source：函式裡的 $PSScriptRoot 才會指向那個資料夾，
 # 排程面板（Win_Schedule_Panel.ps1）也複製過去，「開啟自動排程管理」才找得到。
-$WorkDir = Join-Path $env:TEMP "OPS-gui-test-$PID"
+$WorkDir = Join-Path $env:LOCALAPPDATA "OPS-command\tests\work-$PID"
 New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
 $srcText = [IO.File]::ReadAllText($target, [Text.Encoding]::UTF8)
 $tk = $null; $pe = $null
@@ -256,7 +256,7 @@ foreach ($c in $srcAst.FindAll({ $args[0] -is [Management.Automation.Language.Co
 Log "側邊欄定義（從原始碼）：$($SidebarDef.Count) 個功能"
 
 $StateBefore = Get-StateSnapshot
-$ErrLogPath = Join-Path $env:TEMP 'OPS-command-error.log'
+$ErrLogPath = Join-Path $env:LOCALAPPDATA 'OPS-command\error.log'
 $ErrLogSize = if (Test-Path $ErrLogPath) { (Get-Item $ErrLogPath).Length } else { 0 }
 $ActionLogPath = Join-Path $env:LOCALAPPDATA 'OPS-command\actions.log'
 $TestStart = Get-Date
@@ -847,9 +847,9 @@ if (Test-Path $ErrLogPath) {
     if ($len -gt $ErrLogSize) {
         $fs = [IO.File]::Open($ErrLogPath, 'Open', 'Read', 'ReadWrite')
         try { $fs.Position = $ErrLogSize; $buf = New-Object byte[] ($len - $ErrLogSize); [void]$fs.Read($buf, 0, $buf.Length) } finally { $fs.Close() }
-        Add-TestFail "%TEMP%\OPS-command-error.log 新增了內容：$(OneLine ([Text.Encoding]::UTF8.GetString($buf)) 6)"
-    } else { Log '  [通過] OPS-command-error.log 沒有新增內容' }
-} else { Log '  [通過] 沒有 OPS-command-error.log' }
+        Add-TestFail "error.log 新增了內容：$(OneLine ([Text.Encoding]::UTF8.GetString($buf)) 6)"
+    } else { Log '  [通過] error.log 沒有新增內容' }
+} else { Log '  [通過] 沒有 error.log' }
 if ($global:GT.Unhandled.Count) { Log "  [失敗] .NET 未處理例外共 $($global:GT.Unhandled.Count) 個" } else { Log '  [通過] 沒有 .NET 未處理例外' }
 Compare-Snapshot $StateBefore (Get-StateSnapshot) $(if ($Modify) { '還原後' } else { '測試後' })
 
