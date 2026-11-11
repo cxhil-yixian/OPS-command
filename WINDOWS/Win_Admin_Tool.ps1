@@ -3,7 +3,7 @@
 # 工具版本（Windows 圖形介面自己的版本號，跟 Linux ops.sh 的版本無關）。
 # 改了程式就遞增：修 bug 加第三段、加功能加第二段、介面大改加第一段（見 README「版本號」）。
 # 主面板開啟後會到線上讀這一行比對版本，所以這一行要留在檔案開頭、格式不要改。
-$Script:ToolVersion = '2.2.1'
+$Script:ToolVersion = '2.2.2'
 
 # 「關閉時清除本工具的檔案」：主面板的勾選框。提權重開時用 -CleanupOnExit 把勾選狀態帶給新的管理員面板。
 $Script:CleanupOnExit = [bool]($args -contains '-CleanupOnExit')
@@ -4195,7 +4195,8 @@ function Show-WindowsPanel {
     $title.Font=New-Object Drawing.Font('Microsoft JhengHei UI',16,[Drawing.FontStyle]::Bold)
     $title.ForeColor=[Drawing.Color]::White
     $title.Location=New-Object Drawing.Point(22,10)
-    $title.Size=New-Object Drawing.Size(650,34)
+    # 只佔文字需要的寬度：原本固定 650 寬，右邊空白蓋住了「關閉時清除」的勾選框（只露出方框底邊，看起來像底線）
+    $title.AutoSize=$true
     $head.Controls.Add($title)
     $badge=New-Object Windows.Forms.Label
     $badge.Text=$role
@@ -4273,6 +4274,8 @@ function Show-WindowsPanel {
     $cleanupText.Cursor=[Windows.Forms.Cursors]::Hand
     $cleanupText.Add_Click({ $cleanup.Checked=-not $cleanup.Checked }.GetNewClosure())
     $head.Controls.Add($cleanupText)
+    # 視窗拉窄時標題可能延伸到這裡，勾選框要在最上層
+    $cleanup.BringToFront(); $cleanupText.BringToFront()
     $cleanup.Add_CheckedChanged({
         if ($cleanup.Checked) {
             $ans=[Windows.Forms.MessageBox]::Show($form, "關閉面板時會刪除：`r`n%LOCALAPPDATA%\OPS-command\ 整個資料夾`r`n（下載的程式、操作記錄、錯誤紀錄、匯出的檔案、測試輸出）`r`nWindows 事件記錄、看門狗與自動封鎖的設定不會動。`r`n確定要刪除？", '關閉時清除', 'YesNo', 'Question')
@@ -4282,8 +4285,11 @@ function Show-WindowsPanel {
     }.GetNewClosure())
     $positionHeaderButtons={
         $close.Location=New-Object Drawing.Point([Math]::Max(20,$head.ClientSize.Width-130),19)
-        $cleanupText.Location=New-Object Drawing.Point([Math]::Max(40,$close.Left-$cleanupText.Width-18),29)
-        $cleanup.Location=New-Object Drawing.Point(($cleanupText.Left-$cleanup.Width-2),(29+[int](($cleanupText.Height-$cleanup.Height)/2)))
+        # 平常跟「關閉面板」同一列；視窗窄到會碰到標題時，移到下面那一列（跟「目前權限」同列）
+        $tx=[Math]::Max(40,$close.Left-$cleanupText.Width-18)
+        $ty=if ($tx-$cleanup.Width-2 -lt $title.Right+12) { 48 } else { 29 }
+        $cleanupText.Location=New-Object Drawing.Point($tx,$ty)
+        $cleanup.Location=New-Object Drawing.Point(($cleanupText.Left-$cleanup.Width-2),($ty+[int](($cleanupText.Height-$cleanup.Height)/2)))
     }.GetNewClosure()
     $head.Add_Resize($positionHeaderButtons); & $positionHeaderButtons
 
