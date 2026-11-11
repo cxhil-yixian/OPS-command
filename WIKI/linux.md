@@ -99,13 +99,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/mai
 curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.sh | sh
 ```
 
-<b>③ 看到選單，第一次先按 <kbd>d</kbd> 再按 <kbd>Enter</kbd></b>
+<b>③ 看到選單，第一次先按 <kbd>d</kbd></b>
 
 <kbd>d</kbd> 是「環境自我診斷」，會告訴你這台機器缺什麼。缺東西的話，回到選單按 <kbd>i</kbd> 就會自動補裝。
 
 > [!TIP]
-> <b>操作方式都一樣：</b>輸入選項前面的數字或字母，按 <kbd>Enter</kbd>。
-> 子選單裡按 <kbd>b</kbd> 回到上一層，主選單按 <kbd>q</kbd> 離開。
+> <b>操作方式都一樣：</b>直接按選項前面的數字或字母就會執行；也可以用 <kbd>↑</kbd> <kbd>↓</kbd> 移到想要的那一項再按 <kbd>Enter</kbd>。
+> 子選單裡按 <kbd>Esc</kbd> 或 <kbd>b</kbd> 回到上一層，主選單按 <kbd>q</kbd> 離開。
+> 執行完會停在結果畫面，看完按 <kbd>Enter</kbd> 回到選單。
 
 下次要再用，重新貼一次第 ② 步那行就好。工具會自動更新成最新版。
 
@@ -116,27 +117,27 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 打開後會看到這個畫面（上半部是這台機器目前的狀態）：
 
 ```
-────────────────────────────────────────────────────
  OPS-command 運維工具箱  v1.16.1
-────────────────────────────────────────────────────
  系統   Rocky Linux 9.4
  SSH    服務 sshd = active   埠 22
  防護   防火牆 firewalld   SELinux enforcing   身分 root
 ────────────────────────────────────────────────────
  SSH 連接埠
-   1) 查看目前狀態
+ ▶ 1) 查看目前狀態        ← 反白的就是目前選到的
    2) 變更連接埠
    3) 確認新埠可用
    4) 立即還原
  SSH 監控與取證
    5) 即時監看   6) 一次性取證   7) 追蹤認證日誌   8) 解析排查
- b) 封鎖管理   s) 壓力測試   t) 時間與時區   a) 常用軟體   n) 網路設定
- 9) 更換套件來源鏡像   d) 環境自我診斷   i) 安裝缺少的相依套件
- q) 離開
- 請選擇：
+ 工具選單
+   b) 封鎖管理   s) 壓力測試   t) 時間與時區   a) 常用軟體   n) 網路設定
+ 系統
+   9) 更換套件來源鏡像   d) 環境自我診斷   i) 安裝缺少的相依套件
+   q) 離開
+ ↑↓ 選擇   Enter 執行   按代號直接執行   q 離開
 ```
 
-<sub>示意圖，實際畫面的說明文字更完整。</sub>
+<sub>示意圖，實際畫面的說明文字更完整。視窗太矮時選項會捲動，用 <kbd>↑</kbd> <kbd>↓</kbd> 就看得到。</sub>
 
 | 按鍵 | 用白話說 |
 |---|---|
@@ -195,7 +196,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 <b>第一步：看看是不是真的有人在猜</b>
 
-1. 主選單按 <kbd>5</kbd>，按 <kbd>Enter</kbd>。畫面每秒更新，會顯示正在連線的人和失敗次數。
+1. 主選單按 <kbd>5</kbd>。畫面每秒更新，會顯示正在連線的人和失敗次數。
 2. 看完按 <kbd>Ctrl</kbd> + <kbd>C</kbd> 離開。
 
 <b>第二步：開啟自動封鎖（只要做一次）</b>

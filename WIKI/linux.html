@@ -235,37 +235,37 @@
     <div class="cmd"><pre>curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.sh | sh</pre></div>
   </li>
   <li>
-    <strong>看到選單，第一次先按 <kbd>d</kbd> 再按 <kbd>Enter</kbd></strong>
+    <strong>看到選單，第一次先按 <kbd>d</kbd></strong>
     <p><kbd>d</kbd> 是「環境自我診斷」，會告訴你這台機器缺什麼。缺東西的話，回到選單按 <kbd>i</kbd> 就會自動補裝。</p>
   </li>
 </ol>
 <div class="note tip">
-  <p><strong>操作方式都一樣：</strong>輸入選項前面的數字或字母，按 <kbd>Enter</kbd>。子選單裡按 <kbd>b</kbd> 回到上一層，主選單按 <kbd>q</kbd> 離開。</p>
+  <p><strong>操作方式都一樣：</strong>直接按選項前面的數字或字母就會執行；也可以用 <kbd>↑</kbd> <kbd>↓</kbd> 移到想要的那一項再按 <kbd>Enter</kbd>。子選單裡按 <kbd>Esc</kbd> 或 <kbd>b</kbd> 回到上一層，主選單按 <kbd>q</kbd> 離開。執行完會停在結果畫面，看完按 <kbd>Enter</kbd> 回到選單。</p>
 </div>
 <p>下次要再用，重新貼一次第 2 步那行就好。工具會自動更新成最新版。</p>
 
 <!-- ───────────────────────── 4 ───────────────────────── -->
 <h2 id="menu"><span class="num">4</span>主選單一覽</h2>
 <p>打開後會看到這個畫面（上半部是這台機器目前的狀態）：</p>
-<pre class="screen"><span class="dim">────────────────────────────────────────────────────</span>
- OPS-command 運維工具箱  v1.16.1
-<span class="dim">────────────────────────────────────────────────────</span>
+<pre class="screen"> <strong>OPS-command 運維工具箱  v1.16.1</strong>
  系統   Rocky Linux 9.4
  SSH    服務 sshd = active   埠 22
  防護   防火牆 firewalld   SELinux enforcing   身分 root
 <span class="dim">────────────────────────────────────────────────────</span>
  SSH 連接埠
-   <span class="hl">1</span>) 查看目前狀態
+ <span class="hl">▶ 1) 查看目前狀態</span>        <span class="dim">← 反白的就是目前選到的</span>
    <span class="hl">2</span>) 變更連接埠
    <span class="hl">3</span>) 確認新埠可用
    <span class="hl">4</span>) 立即還原
  SSH 監控與取證
    <span class="hl">5</span>) 即時監看   <span class="hl">6</span>) 一次性取證   <span class="hl">7</span>) 追蹤認證日誌   <span class="hl">8</span>) 解析排查
- <span class="hl">b</span>) 封鎖管理   <span class="hl">s</span>) 壓力測試   <span class="hl">t</span>) 時間與時區   <span class="hl">a</span>) 常用軟體   <span class="hl">n</span>) 網路設定
- <span class="hl">9</span>) 更換套件來源鏡像   <span class="hl">d</span>) 環境自我診斷   <span class="hl">i</span>) 安裝缺少的相依套件
- <span class="hl">q</span>) 離開
- 請選擇：</pre>
-<p class="caption">示意圖，實際畫面的說明文字更完整。</p>
+ 工具選單
+   <span class="hl">b</span>) 封鎖管理   <span class="hl">s</span>) 壓力測試   <span class="hl">t</span>) 時間與時區   <span class="hl">a</span>) 常用軟體   <span class="hl">n</span>) 網路設定
+ 系統
+   <span class="hl">9</span>) 更換套件來源鏡像   <span class="hl">d</span>) 環境自我診斷   <span class="hl">i</span>) 安裝缺少的相依套件
+   <span class="hl">q</span>) 離開
+ <span class="dim">↑↓ 選擇   Enter 執行   按代號直接執行   q 離開</span></pre>
+<p class="caption">示意圖，實際畫面的說明文字更完整。視窗太矮時選項會捲動，用 <kbd>↑</kbd> <kbd>↓</kbd> 就看得到。</p>
 
 <div class="table-wrap">
 <table>
@@ -327,7 +327,7 @@
   <p class="when">什麼時候用：伺服器變慢，或是登入時看到「上次失敗登入 1532 次」這類訊息。</p>
   <p><strong>第一步：看看是不是真的有人在猜</strong></p>
   <ol>
-    <li>主選單按 <kbd>5</kbd>，按 <kbd>Enter</kbd>。畫面每秒更新，會顯示正在連線的人和失敗次數。</li>
+    <li>主選單按 <kbd>5</kbd>。畫面每秒更新，會顯示正在連線的人和失敗次數。</li>
     <li>看完按 <kbd>Ctrl</kbd> + <kbd>C</kbd> 離開。</li>
   </ol>
   <p><strong>第二步：開啟自動封鎖（只要做一次）</strong></p>

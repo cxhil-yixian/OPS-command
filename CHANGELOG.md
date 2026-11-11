@@ -13,6 +13,14 @@
 
 ### 新增
 
+- **Linux 選單改成全螢幕（`ops.sh`）**：↑↓／PgUp／PgDn／Home／End 移動、Enter 執行、直接按代號立刻執行、
+  子選單 Esc 返回；每頁上方照舊顯示目前狀態。只用 `sh`、`stty`、`dd`、`awk` 與 ANSI 控制碼，不需要
+  dialog / whiptail。執行動作時離開全螢幕，輸出留在一般畫面；回到選單時停在剛才那一項。
+  依顯示寬度截斷每一行（中文 2 欄）、視窗太矮時選項捲動。不是互動終端機、`TERM=dumb` 或
+  `OPS_TUI=0` 時退回舊式數字選單，代號不變。選單底下呼叫各工具的方式沒有改。
+  CentOS 7.9 實機用假終端機照劇本操作驗證：各種按鍵、進出子選單、離開、Ctrl-C、斷線，
+  結束後 `stty -a` 與開始前完全相同。**Ubuntu／Debian 的 dash、Alpine 的 busybox 還沒實機跑過。**
+
 - **換 SSH 埠時，firewalld 可以選擇保留或停用**（`ssh-port.sh` 1.2）。偵測到 firewalld 在跑，
   `set` 會先講清楚「firewalld reload / 重啟會清掉直接用 iptables 加的規則（fail2ban 的 `iptables-*`
   封鎖、手動規則、Docker）」，再讓你選：
@@ -27,6 +35,7 @@
 
 ### 變更
 
+- 從子選單回到主選單時不再多停一次「按 Enter 回到選單」（舊式數字選單也一樣）。
 - `ssh-port.sh` 在 firewalld 上放行 / 移除埠**不再 `firewall-cmd --reload`**。以前每個階段都 reload，
   直接用 iptables 加的規則會在換埠時被清掉。
 - `ssh-port.sh -h` 改成印到檔頭註解結束為止；原本寫死印第 3–30 行，檔頭一變長就會截斷。

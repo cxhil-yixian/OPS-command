@@ -294,6 +294,312 @@ confirm() {
     case "$_a" in y|Y|yes|YES) return 0 ;; *) printf ' 已取消\n'; return 1 ;; esac
 }
 
+# =========================================================
+# 全螢幕選單（TUI）
+#   只用一定內建的東西：sh、stty、dd 與 ANSI 控制碼，不需要 dialog / whiptail / ncurses。
+#   不是互動終端機、TERM=dumb、或設了 OPS_TUI=0 時，退回「印選單＋輸入代號」的方式。
+#
+#   選單內容用同一份清單描述，兩種方式畫出來的選項與代號完全一樣，一行一項：
+#     k|名稱|說明    一個選項（k 是快捷鍵，也是選到時的回傳值）
+#     #|標題         分類標題
+#     -              空行
+#
+#   操作：↑↓（或 PgUp/PgDn/Home/End）移動、Enter 執行、直接按代號立刻執行、Esc 返回。
+#   執行動作前會先離開全螢幕：動作的輸出留在一般畫面（往上捲得到），按 Enter 再回到選單。
+#   Ctrl-C 在選單畫面＝離開 ops.sh；在動作執行中照舊交給那個動作處理（例如結束 tail 回到選單）。
+# =========================================================
+TUI=0
+TUI_ON=0
+TUI_STTY=''
+
+tui_init() {
+    [ "${OPS_TUI:-1}" = 0 ] && return 0
+    [ -t 0 ] && [ -t 1 ] || return 0
+    case "${TERM:-dumb}" in dumb|unknown|'') return 0 ;; esac
+    has stty && has dd || return 0
+    TUI_STTY=$(stty -g 2>/dev/null) || return 0
+    [ -n "$TUI_STTY" ] || return 0
+    TUI_ESC=$(printf '\033')
+    TUI_CR=$(printf '\r')
+    TUI_NL='
+'
+    if [ "$UTF8_OK" = 1 ]; then TUI_MARK='▶'; TUI_UPDN='↑↓'; else TUI_MARK='>'; TUI_UPDN='Up/Down'; fi
+    TUI=1
+    # 不管怎麼離開（正常結束、被 kill、斷線），終端機都要還原，不然會留下一個打字沒回顯的畫面
+    trap 'tui_leave' EXIT
+    trap 'tui_leave; exit 129' HUP
+    trap 'tui_leave; exit 143' TERM
+}
+
+# 進入全螢幕：備用畫面（離開後原本的畫面原封不動）、藏游標、關掉自動換行（太長的行截掉，不會擠亂版面）、
+# 一次讀一個按鍵、不回顯
+tui_enter() {
+    [ "$TUI_ON" = 1 ] && return 0
+    stty -icanon -echo min 1 time 0 2>/dev/null
+    printf '\033[?1049h\033[?25l\033[?7l'
+    TUI_ON=1
+}
+
+tui_leave() {
+    [ "$TUI_ON" = 1 ] || return 0
+    printf '\033[0m\033[?7h\033[?25h\033[?1049l'
+    stty "$TUI_STTY" 2>/dev/null
+    TUI_ON=0
+}
+
+# 讀一個按鍵，結果放 TUI_K：UP DOWN PGUP PGDN HOME END ENTER ESC EOF NONE，或按下的那個字元。
+# busybox 的 read 沒有 -n1，所以用 dd 一次讀一個位元組；方向鍵是「ESC [ A」三個位元組，
+# 讀到 ESC 後等 0.1 秒把後面的一起讀進來，沒有後續就是單按 Esc。
+tui_key() {
+    TUI_K=$(dd bs=1 count=1 2>/dev/null; printf x)
+    TUI_K=${TUI_K%x}
+    case "$TUI_K" in
+        "$TUI_ESC")
+            stty min 0 time 1 2>/dev/null
+            _ts=$(dd bs=8 count=1 2>/dev/null)
+            stty min 1 time 0 2>/dev/null
+            case "$_ts" in
+                '[A'|'OA') TUI_K=UP ;;
+                '[B'|'OB') TUI_K=DOWN ;;
+                '[5~') TUI_K=PGUP ;;
+                '[6~') TUI_K=PGDN ;;
+                '[H'|'OH'|'[1~'|'[7~') TUI_K=HOME ;;
+                '[F'|'OF'|'[4~'|'[8~') TUI_K=END ;;
+                '') TUI_K=ESC ;;
+                *) TUI_K=NONE ;;
+            esac ;;
+        "$TUI_NL"|"$TUI_CR") TUI_K=ENTER ;;
+        '') TUI_K=EOF ;;
+    esac
+}
+
+# 選單。$1 標題  $2 標題右邊的灰字  $3 印狀態的函式（可空）  $4 清單  $5 按 Esc 時的回傳值
+#      $6 一開始反白哪個代號（可空，通常傳上一次選的，回到選單時停在原處）
+# 選到的代號放 TUI_KEY、名稱放 TUI_LABEL；讀不到鍵盤（終端機斷了）時 return 1。
+tui_pick() {
+    if [ "$TUI" != 1 ]; then tui_plain "$@"; return; fi
+    _tt=$1; _tr=$2; _tspec=$4; _tback=$5
+    _tst=''
+    [ -n "$3" ] && _tst=$($3 2>/dev/null)
+    # 有幾個可選項目、一開始停在哪一個
+    _tn=0; _tsel=1
+    while IFS='|' read -r _tk _tlb _tds; do
+        case "$_tk" in '#'|'-'|'') continue ;; esac
+        _tn=$((_tn + 1))
+        [ -n "${6:-}" ] && [ "$_tk" = "$6" ] && _tsel=$_tn
+    done <<EOF
+$_tspec
+EOF
+    [ "$_tn" -gt 0 ] || return 1
+    tui_enter
+    trap 'tui_leave; printf "\n"; exit 130' INT
+    _ttop=0
+    TUI_KEY=''; TUI_LABEL=''
+    while :; do
+        tui_draw
+        tui_key
+        case "$TUI_K" in
+            UP)   _tsel=$((_tsel - 1)); [ "$_tsel" -lt 1 ] && _tsel=$_tn ;;
+            DOWN) _tsel=$((_tsel + 1)); [ "$_tsel" -gt "$_tn" ] && _tsel=1 ;;
+            PGUP) _tsel=$((_tsel - 8)); [ "$_tsel" -lt 1 ] && _tsel=1 ;;
+            PGDN) _tsel=$((_tsel + 8)); [ "$_tsel" -gt "$_tn" ] && _tsel=$_tn ;;
+            HOME) _tsel=1 ;;
+            END)  _tsel=$_tn ;;
+            ENTER) tui_item "$_tsel"; break ;;
+            ESC)  TUI_KEY=$_tback; TUI_LABEL=''; break ;;
+            EOF)  trap - INT; tui_leave; return 1 ;;
+            NONE) : ;;
+            *)    # 直接按代號（不分大小寫）
+                  if tui_find "$TUI_K"; then break; fi ;;
+        esac
+    done
+    trap - INT
+    tui_leave
+    # 動作的輸出接在一般畫面上，先標一行是哪個動作
+    [ -n "$TUI_LABEL" ] && printf '\n%s%s %s%s\n\n' "$CB$CC" "$TUI_MARK" "$TUI_LABEL" "$C0"
+    return 0
+}
+
+# 第 $1 個可選項目 → TUI_KEY / TUI_LABEL
+tui_item() {
+    _ti=0
+    while IFS='|' read -r _tk _tlb _tds; do
+        case "$_tk" in '#'|'-'|'') continue ;; esac
+        _ti=$((_ti + 1))
+        if [ "$_ti" = "$1" ]; then TUI_KEY=$_tk; TUI_LABEL=$(printf '%s' "$_tlb" | sed 's/ *$//'); return 0; fi
+    done <<EOF
+$_tspec
+EOF
+}
+
+# 按下的字元是不是某個選項的代號
+tui_find() {
+    _tf=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+    _ti=0
+    while IFS='|' read -r _tk _tlb _tds; do
+        case "$_tk" in '#'|'-'|'') continue ;; esac
+        _ti=$((_ti + 1))
+        if [ "$(printf '%s' "$_tk" | tr 'A-Z' 'a-z')" = "$_tf" ]; then
+            _tsel=$_ti; TUI_KEY=$_tk; TUI_LABEL=$(printf '%s' "$_tlb" | sed 's/ *$//'); return 0
+        fi
+    done <<EOF
+$_tspec
+EOF
+    return 1
+}
+
+# 畫一整個畫面：標題列、狀態、選項（太多時捲動，反白的那項一定看得到）、操作說明列。
+# 全部組成一個字串再一次輸出，畫面不會閃。
+tui_draw() {
+    _trows=24; _tcols=80
+    # shellcheck disable=SC2046
+    set -- $(stty size 2>/dev/null)
+    [ -n "${1:-}" ] && [ "$1" -gt 0 ] 2>/dev/null && _trows=$1
+    [ -n "${2:-}" ] && [ "$2" -gt 20 ] 2>/dev/null && _tcols=$2
+
+    # 選項有幾行、反白的在第幾行
+    _tlines=0; _tsl=0; _ti=0
+    while IFS='|' read -r _tk _tlb _tds; do
+        _tlines=$((_tlines + 1))
+        case "$_tk" in '#'|'-'|'') continue ;; esac
+        _ti=$((_ti + 1))
+        [ "$_ti" = "$_tsel" ] && _tsl=$_tlines
+    done <<EOF
+$_tspec
+EOF
+    # 狀態有幾行
+    _tsn=0
+    [ -n "$_tst" ] && _tsn=$(printf '%s\n' "$_tst" | wc -l)
+    # 可用行數：扣掉標題列、狀態下的分隔線、操作說明列
+    _tavail=$((_trows - 3))
+    _tih=$_tlines
+    _tshow=$_tsn
+    if [ $((_tsn + _tlines)) -gt "$_tavail" ]; then
+        # 擠不下：選項至少留 8 行（或全部），剩下給狀態
+        _tih=$_tlines; [ "$_tih" -gt 8 ] && _tih=8
+        _tshow=$((_tavail - _tih)); [ "$_tshow" -lt 0 ] && _tshow=0
+        [ "$_tshow" -gt "$_tsn" ] && _tshow=$_tsn
+        _tih=$((_tavail - _tshow))
+        [ "$_tih" -lt 1 ] && _tih=1
+    fi
+    # 捲動：讓反白那一行留在視窗內
+    [ "$_tsl" -le "$_ttop" ] && _ttop=$((_tsl - 1))
+    [ "$_tsl" -gt $((_ttop + _tih)) ] && _ttop=$((_tsl - _tih))
+    [ "$_ttop" -lt 0 ] && _ttop=0
+
+    _to=$(printf '\033[H\033[1;37;44m %s  \033[22m%s\033[K\033[0m' "$_tt" "$_tr")
+    _tel=$(printf '\033[K\033[0m')
+    if [ "$_tshow" -gt 0 ]; then
+        _tc=0
+        while IFS= read -r _tsline; do
+            _tc=$((_tc + 1)); [ "$_tc" -gt "$_tshow" ] && break
+            _to="$_to$TUI_NL$_tsline$_tel"
+        done <<EOF
+$_tst
+EOF
+    fi
+    _to="$_to$TUI_NL$CD$HR$C0$(printf '\033[K')"
+
+    _tl=0; _ti=0; _tdrawn=0
+    while IFS='|' read -r _tk _tlb _tds; do
+        _tl=$((_tl + 1))
+        case "$_tk" in '#'|'-'|'') : ;; *) _ti=$((_ti + 1)) ;; esac
+        [ "$_tl" -le "$_ttop" ] && continue
+        [ "$_tdrawn" -ge "$_tih" ] && break
+        _tdrawn=$((_tdrawn + 1))
+        case "$_tk" in
+            '#') _tline=$(printf ' %s%s%s' "$CB$CC" "$_tlb" "$C0") ;;
+            '-'|'') _tline='' ;;
+            *)
+                if [ "$_ti" = "$_tsel" ]; then
+                    _tline=$(printf '\033[7m %s %s) %s  %s' "$TUI_MARK" "$_tk" "$_tlb" "$_tds")
+                else
+                    _tline=$(printf '   %s) %s  %s%s%s' "$_tk" "$_tlb" "$CD" "$_tds" "$C0")
+                fi ;;
+        esac
+        _to="$_to$TUI_NL$_tline$(printf '\033[K\033[0m')"
+    done <<EOF
+$_tspec
+EOF
+    # 空白補到說明列的位置
+    while [ "$_tdrawn" -lt "$_tih" ]; do
+        _to="$_to$TUI_NL$(printf '\033[K')"; _tdrawn=$((_tdrawn + 1))
+    done
+    _tmore=''
+    [ "$_ttop" -gt 0 ] && _tmore="上面還有"
+    [ $((_ttop + _tih)) -lt "$_tlines" ] && _tmore="${_tmore:+$_tmore、}下面還有"
+    _tbk='Esc 返回'
+    [ -z "$_tback" ] && _tbk='q 離開'
+    _to="$_to$TUI_NL$(printf '\033[7m %s 選擇   Enter 執行   按代號直接執行   %s  %s\033[K\033[0m' "$TUI_UPDN" "$_tbk" "${_tmore:+（$_tmore）}")"
+    # 每行依顯示寬度截斷（留最後一欄不用），再一次輸出；最後一行後面不換行，畫面才不會往上捲
+    printf '%s\n' "$_to" | tui_clip $((_tcols - 1))
+    printf '\033[J'
+}
+
+# 依顯示寬度截斷每一行：$1 = 最多幾欄。色碼（ESC [ … 字母）不佔寬度、一律保留；
+# 中日韓文字與全形標點算 2 欄，其他算 1 欄。用位元組判斷 UTF-8，在 C locale 跑，
+# gawk / mawk / busybox awk 結果一樣（不靠 awk 自己認不認得多位元組字元）。
+tui_clip() {
+    LC_ALL=C awk -v w="$1" '
+BEGIN { for (i = 1; i < 256; i++) ord[sprintf("%c", i)] = i }
+{
+    out = ""; col = 0; n = length($0); i = 1
+    while (i <= n) {
+        b = ord[substr($0, i, 1)]
+        if (b == 27) {
+            j = i + 1
+            if (substr($0, j, 1) == "[") {
+                j++
+                while (j <= n) { c = ord[substr($0, j, 1)]; if (c >= 64 && c <= 126) break; j++ }
+            }
+            out = out substr($0, i, j - i + 1); i = j + 1; continue
+        }
+        if (b < 128)      { len = 1; cw = 1 }
+        else if (b < 224) { len = 2; cw = 1 }
+        else if (b < 240) {
+            len = 3; cw = 1
+            if (b >= 227 && b <= 237) cw = 2
+            else if (b == 239) {
+                c = ord[substr($0, i + 1, 1)]; d = ord[substr($0, i + 2, 1)]
+                if (c == 188 || (c == 189 && d <= 160)) cw = 2
+            }
+        }
+        else { len = 4; cw = 2 }
+        if (col + cw <= w) { out = out substr($0, i, len); col += cw }
+        i += len
+    }
+    if (NR > 1) printf "\n"
+    printf "%s", out
+}'
+}
+
+# 退路：沒有終端機能力時，照原本的樣子印選單、讀一行代號
+tui_plain() {
+    clear 2>/dev/null || printf '\n\n'
+    hr
+    printf '%s %s%s  %s%s%s\n' "$CB$CC" "$1" "$C0" "$CD" "$2" "$C0"
+    hr
+    if [ -n "$3" ]; then
+        $3 2>/dev/null
+        hr
+    fi
+    while IFS='|' read -r _tk _tlb _tds; do
+        case "$_tk" in
+            '#') sect "$_tlb" ;;
+            '-') printf '\n' ;;
+            '') : ;;
+            *) if [ -n "$_tds" ]; then row "$_tk) $_tlb ${CD}$_tds${C0}"; else row "$_tk) $_tlb"; fi ;;
+        esac
+    done <<EOF
+$4
+EOF
+    printf '\n 請選擇：'
+    TUI_LABEL=''
+    read -r TUI_KEY 2>/dev/null || return 1
+    printf '\n'
+    return 0
+}
+
 need_root() {
     [ "$(id -u)" = 0 ] && return 0
     nomsg "這個動作需要 root 權限，目前身分是 $(id -un)"
@@ -505,11 +811,8 @@ check_deps() {
 # =========================================================
 # 標頭
 # =========================================================
-banner() {
-    clear 2>/dev/null || printf '\n\n'
-    hr
-    printf '%s OPS-command 運維工具箱%s  %sv%s%s\n' "$CB$CC" "$C0" "$CD" "$OPS_VERSION" "$C0"
-    hr
+# 主選單上方的狀態（每輪重新偵測，換完埠後要能立刻反映）
+main_status() {
     printf ' 系統   %s\n' "$OS_PRETTY  ${CD}(family=$OS_FAMILY, init=$INIT, pkg=$PKG)$C0"
     printf ' SSH    服務 %s = %s' "$SSH_SVC" \
         "$([ "$SSH_STATE" = active ] && printf '%sactive%s' "$CG" "$C0" || printf '%s%s%s' "$CR" "$SSH_STATE" "$C0")"
@@ -523,51 +826,165 @@ banner() {
     else
         printf ' 工具   本機 %s\n' "$ASSET_DIR"
     fi
-
     if [ "$PENDING" = 1 ]; then
-        printf '\n'
-        printf ' %s%s 有未確認的換埠作業進行中%s\n' "$CY$CB" "$MK_WARN" "$C0"
-        row "若新埠已測通請選 3 確認；不確定就選 4 還原。逾時看門狗會自動還原。"
+        printf ' %s%s 換埠還沒確認%s：測通選 3 確認，不確定選 4 還原（逾時會自動還原）\n' "$CY$CB" "$MK_WARN" "$C0"
     fi
-    hr
 }
 
-menu() {
-    sect "SSH 連接埠  (SSH/ssh-port.sh)"
-    row "1) 查看目前狀態"
-    row "2) 變更連接埠      ${CD}新舊埠並存 + 看門狗，不會把自己鎖在門外${C0}"
-    row "3) 確認新埠可用    ${CD}收掉舊埠，取消看門狗${C0}"
-    row "4) 立即還原        ${CD}回到變更前的設定${C0}"
-    printf '\n'
-    sect "SSH 監控與取證  (SSH/selfheal-ssh.sh)"
-    row "5) 即時監看        ${CD}每秒刷新，看得到誰在連、卡在哪個階段${C0}"
-    row "6) 一次性取證      ${CD}完整報告寫入 $OPS_SSH_DIR/${C0}"
-    row "7) 追蹤認證日誌    ${CD}即時 tail 登入成功/失敗事件${C0}"
-    row "8) 解析排查        ${CD}傾印原始 ss / ps 資料，回報問題時用${C0}"
-    printf '\n'
-    sect "封鎖管理  (FAIL2BAN/fail2ban.sh)"
-    row "b) 進入封鎖選單    ${CD}手動封鎖 / 解封 / 白名單 / 排行 / 報告，底層走 fail2ban${C0}"
-    printf '\n'
-    sect "壓力測試  (STRESS/stress-test.sh)"
-    row "s) 進入壓測選單    ${CD}CPU / 記憶體 / 磁碟 / SWAP / NTP，會把機器操到滿載${C0}"
-    printf '\n'
-    sect "時間與時區  (TIME/time-set.sh)"
-    row "t) 進入時間選單    ${CD}改時區 / 改系統時間 / 校時，改之前先算差距與後果${C0}"
-    printf '\n'
-    sect "常用軟體  (APPS/apps.sh)"
-    row "a) 進入安裝選單    ${CD}docker / nc / tcpping / mtr / nginx / tree / git / snmp${C0}"
-    printf '\n'
-    sect "網路設定  (NET/net-set.sh)"
-    row "n) 進入網路選單    ${CD}增減替換 IP 與 DNS，IP 變更有看門狗，不會把自己鎖在門外${C0}"
-    printf '\n'
-    sect "系統"
-    row "9) 更換套件來源鏡像 ${CD}呼叫 linuxmirrors.cn 的外部腳本${C0}"
-    row "d) 環境自我診斷     ${CD}檢查相依套件與已知相容性問題${C0}"
-    row "i) 安裝缺少的相依套件"
-    [ "$RUN_MODE" = remote ] && \
-        row "u) 更新腳本快取     ${CD}重新下載所有工具腳本${C0}"
-    row "q) 離開"
-    printf '\n'
+main_items() {
+    cat <<EOF
+#|SSH 連接埠  (SSH/ssh-port.sh)
+1|查看目前狀態    |
+2|變更連接埠      |新舊埠並存 + 看門狗，不會把自己鎖在門外
+3|確認新埠可用    |收掉舊埠，取消看門狗
+4|立即還原        |回到變更前的設定
+-
+#|SSH 監控與取證  (SSH/selfheal-ssh.sh)
+5|即時監看        |每秒刷新，看得到誰在連、卡在哪個階段
+6|一次性取證      |完整報告寫入 $OPS_SSH_DIR/
+7|追蹤認證日誌    |即時 tail 登入成功/失敗事件
+8|解析排查        |傾印原始 ss / ps 資料，回報問題時用
+-
+#|工具選單
+b|封鎖管理        |手動封鎖 / 解封 / 白名單 / 排行 / 報告，底層走 fail2ban
+s|壓力測試        |CPU / 記憶體 / 磁碟 / SWAP / NTP，會把機器操到滿載
+t|時間與時區      |改時區 / 改系統時間 / 校時，改之前先算差距與後果
+a|常用軟體        |docker / nc / tcpping / mtr / nginx / tree / git / snmp
+n|網路設定        |增減替換 IP 與 DNS，IP 變更有看門狗，不會把自己鎖在門外
+-
+#|系統
+9|更換套件來源鏡像|呼叫 linuxmirrors.cn 的外部腳本
+d|環境自我診斷    |檢查相依套件與已知相容性問題
+i|安裝缺少的相依套件|
+EOF
+    [ "$RUN_MODE" = remote ] && printf '%s\n' 'u|更新腳本快取    |重新下載所有工具腳本'
+    printf '%s\n' 'q|離開            |'
+}
+
+# =========================================================
+# 子選單的狀態與選項（tui_pick 用）
+# =========================================================
+f2b_status() {
+    if has fail2ban-client; then
+        sh "$F2B_SH" status 2>/dev/null | sed -n '1,12p'
+    else
+        wmsg "這台機器還沒安裝 fail2ban（選 i 安裝）"
+    fi
+}
+
+f2b_status_items() {
+    cat <<EOF
+1|已封鎖清單      |
+2|手動封鎖 IP     |預設所有 jail，會先檢查會不會鎖到自己
+3|解除封鎖        |自動找出是哪些 jail 封的
+4|查詢某個 IP     |封鎖狀態 / 白名單 / 歷史次數
+5|白名單：加入    |ignoreip，寫進 jail.d 並即時生效
+6|白名單：移除    |
+7|封鎖次數排行    |讀 fail2ban 日誌
+8|追蹤 fail2ban 日誌|Ctrl-C 結束，回到本選單
+9|清空所有封鎖    |要打 y 二次確認
+r|產生報告        |fail2ban 做了哪些事：時間軸 / 慣犯 / 防火牆比對，另存 HTML
+-
+e|建立 sshd jail  |埠號取實際生效值
+p|同步監控埠      |sshd jail 的埠跟上 SSH 實際的埠（用選單換埠時會自動做）
+t|封鎖門檻設定    |多久之內失敗幾次就封鎖、封多久
+d|環境檢查        |含「設了但不會生效」的常見情況
+i|安裝 fail2ban   |
+b|返回主選單      |
+EOF
+}
+
+stress_status() {
+    printf ' 輸出   %s%s/logs/%s\n' "$CB" "$OPS_STRESS_DIR" "$C0"
+    printf ' 參數   每項持續 %s%s%s 秒，記憶體配置 %s%s%%%s\n' "$CB" "$STRESS_DUR" "$C0" "$CB" "$STRESS_RAM_PCT" "$C0"
+    printf ' 工具   %s\n' "$(stress_tool_status)"
+}
+
+stress_status_items() {
+    cat <<EOF
+#|項目
+1|CPU             |所有核心拉滿，看 bogo ops 與 steal
+2|記憶體          |吃掉總記憶體 ${STRESS_RAM_PCT}%
+3|磁碟讀寫        |循序/隨機 各讀寫一輪 + 同步延遲，重點在 p99
+4|SWAP            |逼出換頁，有 OOM 風險，會先保護 sshd
+5|NTP 時間偏移    |時鐘往前撥 2 分鐘再還原，要單獨跑
+6|全部            |cpu -> ram -> disk -> swap，同一份報告（不含 ntp）
+-
+#|設定
+t|每項持續秒數    |目前 $STRESS_DUR
+p|記憶體配置比例  |目前 ${STRESS_RAM_PCT}%，>90 會狂換頁
+o|輸出目錄        |目前 $OPS_STRESS_DIR
+i|安裝壓測相依套件|
+b|返回主選單      |
+EOF
+}
+
+time_status() {
+    sh "$TIME_SH" status bare 2>/dev/null
+}
+
+time_status_items() {
+    cat <<EOF
+#|設定
+1|變更時區        |不會改變絕對時刻，只換顯示與換算方式
+2|手動設定時間    |會先算差距、講後果；校時服務在跑時會先問要不要停
+3|立刻校時一次    |向 NTP 來源校，不改服務的開機狀態
+-
+#|自動校時
+4|啟用            |偏差大的機器一啟動就會跳，會先警告
+5|停用            |要手動設時間之前用
+-
+#|其他
+6|寫回硬體時鐘    |沒寫回去的話，重開機會跳回舊值
+l|列出時區        |可用關鍵字過濾
+d|環境檢查        |含「改了會被拉回去」的情況（容器、VM 主機同步）
+i|安裝 chrony / tzdata|
+b|返回主選單      |
+EOF
+}
+
+net_status() {
+    sh "$NET_SH" status bare 2>/dev/null
+}
+
+net_status_items() {
+    cat <<EOF
+#|IP
+1|增加 IP         |看門狗保護，時限內要確認
+2|刪除 IP         |SSH 正在用的 IP 不能刪
+3|替換 IP         |同網段；新舊並存，從新 IP 登入後才移除舊的
+c|確認 IP 變更    |取消看門狗；替換時在這一步移除舊 IP
+r|立即還原        |回到變更前的設定
+-
+#|DNS
+4|增加 DNS        |先向新 DNS 查一次，可放最前面
+5|刪除 DNS        |不能刪最後一台
+6|替換 DNS        |保留原本的順序位置
+-
+#|其他
+d|環境檢查        |含「重開機會被蓋回去」的來源
+b|返回主選單      |
+EOF
+}
+
+apps_status() {
+    sh "$APPS_SH" status bare 2>/dev/null
+}
+
+apps_status_items() {
+    cat <<EOF
+1|docker          |官方 get.docker.com 腳本，裝完會啟動並設開機啟動
+2|nc              |netcat，測埠通不通、臨時收發資料
+3|tcpping         |用 TCP SYN 量延遲，ICMP 被擋時用（traceroute + 腳本）
+4|mtr             |traceroute + ping 合一，看是哪一跳在掉包
+5|nginx           |Debian 系裝完會立刻啟動並佔用 80 埠
+6|tree            |樹狀列出目錄結構
+7|git             |版本控制，拉設定檔 / 腳本 repo 用
+8|snmp            |snmpd 代理 + snmpwalk，給監控主機查；Debian 系裝完會啟動（只聽本機）
+9|全部            |上面還沒裝的一次裝
+c|自選多項        |例：nc mtr tcpping
+b|返回主選單      |
+EOF
 }
 
 # =========================================================
@@ -741,37 +1158,10 @@ act_f2b_tune() {
 
 act_f2b_menu() {
     require_script "$F2B_SH" "$F2B_REL" || return 0
+    _c=''
     while :; do
-        clear 2>/dev/null || printf '\n\n'
-        hr
-        printf '%s 封鎖管理%s  %sFAIL2BAN/fail2ban.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
-        hr
-        if has fail2ban-client; then
-            sh "$F2B_SH" status 2>/dev/null | sed -n '1,12p'
-        else
-            wmsg "這台機器還沒安裝 fail2ban（選 i 安裝）"
-        fi
-        hr
-        row "1) 已封鎖清單"
-        row "2) 手動封鎖 IP    ${CD}預設所有 jail，會先檢查會不會鎖到自己${C0}"
-        row "3) 解除封鎖        ${CD}自動找出是哪些 jail 封的${C0}"
-        row "4) 查詢某個 IP     ${CD}封鎖狀態 / 白名單 / 歷史次數${C0}"
-        row "5) 白名單：加入    ${CD}ignoreip，寫進 jail.d 並即時生效${C0}"
-        row "6) 白名單：移除"
-        row "7) 封鎖次數排行    ${CD}讀 fail2ban 日誌${C0}"
-        row "8) 追蹤 fail2ban 日誌"
-        row "9) 清空所有封鎖    ${CD}要打 y 二次確認${C0}"
-        row "r) 產生報告        ${CD}fail2ban 做了哪些事：時間軸 / 慣犯 / 防火牆比對，另存 HTML${C0}"
-        printf '\n'
-        row "e) 建立 sshd jail  ${CD}埠號取實際生效值${C0}"
-        row "p) 同步監控埠      ${CD}sshd jail 的埠跟上 SSH 實際的埠（用選單換埠時會自動做）${C0}"
-        row "t) 封鎖門檻設定    ${CD}多久之內失敗幾次就封鎖、封多久${C0}"
-        row "d) 環境檢查        ${CD}含「設了但不會生效」的常見情況${C0}"
-        row "i) 安裝 fail2ban"
-        row "b) 返回主選單"
-        printf '\n 請選擇：'
-        read -r _c 2>/dev/null || return 0
-        printf '\n'
+        tui_pick "封鎖管理" "FAIL2BAN/fail2ban.sh" f2b_status "$(f2b_status_items)" b "$_c" || return 0
+        _c=$TUI_KEY
         case "$_c" in
             1) sh "$F2B_SH" list ;;
             2) if f2b_ask_ip "要封鎖的 IP / CIDR"; then
@@ -1022,32 +1412,10 @@ stress_run() {
 
 act_stress_menu() {
     stress_guard || return 0
+    _c=''
     while :; do
-        clear 2>/dev/null || printf '\n\n'
-        hr
-        printf '%s 壓力測試%s  %sSTRESS/stress-test.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
-        hr
-        printf ' 輸出   %s%s/logs/%s\n' "$CB" "$OPS_STRESS_DIR" "$C0"
-        printf ' 參數   每項持續 %s%s%s 秒，記憶體配置 %s%s%%%s\n' "$CB" "$STRESS_DUR" "$C0" "$CB" "$STRESS_RAM_PCT" "$C0"
-        printf ' 工具   %s\n' "$(stress_tool_status)"
-        hr
-        sect "項目"
-        row "1) CPU             ${CD}所有核心拉滿，看 bogo ops 與 steal${C0}"
-        row "2) 記憶體          ${CD}吃掉總記憶體 ${STRESS_RAM_PCT}%${C0}"
-        row "3) 磁碟讀寫        ${CD}循序/隨機 各讀寫一輪 + 同步延遲，重點在 p99${C0}"
-        row "4) SWAP            ${CD}逼出換頁，有 OOM 風險，會先保護 sshd${C0}"
-        row "5) NTP 時間偏移    ${CD}時鐘往前撥 2 分鐘再還原，要單獨跑${C0}"
-        row "6) 全部            ${CD}cpu -> ram -> disk -> swap，同一份報告（不含 ntp）${C0}"
-        printf '\n'
-        sect "設定"
-        row "t) 每項持續秒數    ${CD}目前 $STRESS_DUR${C0}"
-        row "p) 記憶體配置比例  ${CD}目前 ${STRESS_RAM_PCT}%，>90 會狂換頁${C0}"
-        row "o) 輸出目錄        ${CD}目前 $OPS_STRESS_DIR${C0}"
-        row "i) 安裝壓測相依套件"
-        row "b) 返回主選單"
-        printf '\n 請選擇：'
-        read -r _c 2>/dev/null || return 0
-        printf '\n'
+        tui_pick "壓力測試" "STRESS/stress-test.sh" stress_status "$(stress_status_items)" b "$_c" || return 0
+        _c=$TUI_KEY
         case "$_c" in
             1) stress_run cpu ;;
             2) stress_run ram ;;
@@ -1110,31 +1478,10 @@ time_sync_now() {
 
 act_time_menu() {
     time_guard || return 0
+    _c=''
     while :; do
-        clear 2>/dev/null || printf '\n\n'
-        hr
-        printf '%s 時間與時區%s  %sTIME/time-set.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
-        hr
-        sh "$TIME_SH" status bare 2>/dev/null
-        hr
-        sect "設定"
-        row "1) 變更時區        ${CD}不會改變絕對時刻，只換顯示與換算方式${C0}"
-        row "2) 手動設定時間    ${CD}會先算差距、講後果；校時服務在跑時會先問要不要停${C0}"
-        row "3) 立刻校時一次    ${CD}向 NTP 來源校，不改服務的開機狀態${C0}"
-        printf '\n'
-        sect "自動校時"
-        row "4) 啟用            ${CD}偏差大的機器一啟動就會跳，會先警告${C0}"
-        row "5) 停用            ${CD}要手動設時間之前用${C0}"
-        printf '\n'
-        sect "其他"
-        row "6) 寫回硬體時鐘    ${CD}沒寫回去的話，重開機會跳回舊值${C0}"
-        row "l) 列出時區        ${CD}可用關鍵字過濾${C0}"
-        row "d) 環境檢查        ${CD}含「改了會被拉回去」的情況（容器、VM 主機同步）${C0}"
-        row "i) 安裝 chrony / tzdata"
-        row "b) 返回主選單"
-        printf '\n 請選擇：'
-        read -r _c 2>/dev/null || return 0
-        printf '\n'
+        tui_pick "時間與時區" "TIME/time-set.sh" time_status "$(time_status_items)" b "$_c" || return 0
+        _c=$TUI_KEY
         case "$_c" in
             1) time_pick_zone ;;
             2) time_set_clock ;;
@@ -1217,31 +1564,10 @@ net_dns_replace() {
 
 act_net_menu() {
     require_script "$NET_SH" "$NET_REL" || return 0
+    _c=''
     while :; do
-        clear 2>/dev/null || printf '\n\n'
-        hr
-        printf '%s 網路設定%s  %sNET/net-set.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
-        hr
-        sh "$NET_SH" status bare 2>/dev/null
-        hr
-        sect "IP"
-        row "1) 增加 IP         ${CD}看門狗保護，時限內要確認${C0}"
-        row "2) 刪除 IP         ${CD}SSH 正在用的 IP 不能刪${C0}"
-        row "3) 替換 IP         ${CD}同網段；新舊並存，從新 IP 登入後才移除舊的${C0}"
-        row "c) 確認 IP 變更    ${CD}取消看門狗；替換時在這一步移除舊 IP${C0}"
-        row "r) 立即還原        ${CD}回到變更前的設定${C0}"
-        printf '\n'
-        sect "DNS"
-        row "4) 增加 DNS        ${CD}先向新 DNS 查一次，可放最前面${C0}"
-        row "5) 刪除 DNS        ${CD}不能刪最後一台${C0}"
-        row "6) 替換 DNS        ${CD}保留原本的順序位置${C0}"
-        printf '\n'
-        sect "其他"
-        row "d) 環境檢查        ${CD}含「重開機會被蓋回去」的來源${C0}"
-        row "b) 返回主選單"
-        printf '\n 請選擇：'
-        read -r _c 2>/dev/null || return 0
-        printf '\n'
+        tui_pick "網路設定" "NET/net-set.sh" net_status "$(net_status_items)" b "$_c" || return 0
+        _c=$TUI_KEY
         case "$_c" in
             1) net_ip_add ;;
             2) net_ip_del ;;
@@ -1266,27 +1592,10 @@ act_net_menu() {
 # =========================================================
 act_apps_menu() {
     require_script "$APPS_SH" "$APPS_REL" || return 0
+    _c=''
     while :; do
-        clear 2>/dev/null || printf '\n\n'
-        hr
-        printf '%s 常用軟體%s  %sAPPS/apps.sh%s\n' "$CB$CC" "$C0" "$CD" "$C0"
-        hr
-        sh "$APPS_SH" status bare 2>/dev/null
-        hr
-        row "1) docker          ${CD}官方 get.docker.com 腳本，裝完會啟動並設開機啟動${C0}"
-        row "2) nc              ${CD}netcat，測埠通不通、臨時收發資料${C0}"
-        row "3) tcpping         ${CD}用 TCP SYN 量延遲，ICMP 被擋時用（traceroute + 腳本）${C0}"
-        row "4) mtr             ${CD}traceroute + ping 合一，看是哪一跳在掉包${C0}"
-        row "5) nginx           ${CD}Debian 系裝完會立刻啟動並佔用 80 埠${C0}"
-        row "6) tree            ${CD}樹狀列出目錄結構${C0}"
-        row "7) git             ${CD}版本控制，拉設定檔 / 腳本 repo 用${C0}"
-        row "8) snmp            ${CD}snmpd 代理 + snmpwalk，給監控主機查；Debian 系裝完會啟動（只聽本機）${C0}"
-        row "9) 全部            ${CD}上面還沒裝的一次裝${C0}"
-        row "c) 自選多項        ${CD}例：nc mtr tcpping${C0}"
-        row "b) 返回主選單"
-        printf '\n 請選擇：'
-        read -r _c 2>/dev/null || return 0
-        printf '\n'
+        tui_pick "常用軟體" "APPS/apps.sh" apps_status "$(apps_status_items)" b "$_c" || return 0
+        _c=$TUI_KEY
         case "$_c" in
             1) sh "$APPS_SH" install docker ;;
             2) sh "$APPS_SH" install nc ;;
@@ -1768,14 +2077,13 @@ if [ ! -t 0 ]; then
 fi
 
 startup_tasks
+tui_init
 
+choice=''
 while :; do
     detect                      # 每輪重測，換完埠後標頭要能立刻反映
-    banner
-    menu
-    printf ' 請選擇：'
-    read -r choice 2>/dev/null || break
-    printf '\n'
+    tui_pick "OPS-command 運維工具箱" "v$OPS_VERSION" main_status "$(main_items)" '' "$choice" || break
+    choice=$TUI_KEY
     case "$choice" in
         1) act_port_status ;;
         2) act_port_set ;;
@@ -1798,5 +2106,9 @@ while :; do
         '') continue ;;
         *) nomsg "無此選項：$choice" ;;
     esac
-    pause
+    # 子選單是自己按「返回」回來的，不用再停一次「按 Enter」
+    case "$choice" in
+        b|B|s|S|t|T|a|A|n|N) : ;;
+        *) pause ;;
+    esac
 done
