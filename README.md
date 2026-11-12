@@ -66,7 +66,7 @@ OPS_RAW_BASE=https://git.example.com/ops/raw/dev bash <(curl -fsSL .../ops.sh)
 `ops.sh` 或 clone——因為看門狗需要腳本的實體路徑，取不到就等於失去自動還原。
 
 ```
- OPS-command 運維工具箱  v1.16.1                                    ← 藍底標題列
+ OPS-command 運維工具箱  v1.17.0                                    ← 藍底標題列
  系統   Rocky Linux 9.4  (family=rhel, init=systemd, pkg=dnf)
  SSH    服務 sshd = active   埠 22
  防護   防火牆 firewalld   SELinux enforcing   身分 root

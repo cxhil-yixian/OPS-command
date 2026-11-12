@@ -117,7 +117,7 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 打開後會看到這個畫面（上半部是這台機器目前的狀態）：
 
 ```
- OPS-command 運維工具箱  v1.16.1
+ OPS-command 運維工具箱  v1.17.0
  系統   Rocky Linux 9.4
  SSH    服務 sshd = active   埠 22
  防護   防火牆 firewalld   SELinux enforcing   身分 root
@@ -456,7 +456,7 @@ fail2ban-client set sshd unbanip 你的IP
 
 ---
 
-<sub>OPS-command · Linux 新手指南 · 對應版本 v1.16.1</sub>
+<sub>OPS-command · Linux 新手指南 · 對應版本 v1.17.0</sub>
 <sub>想直接下指令、不用選單，或想看更多細節，請看各工具資料夾裡的 README：
 [SSH](../SSH/README.md)、[FAIL2BAN](../FAIL2BAN/README.md)、[TIME](../TIME/README.md)、[APPS](../APPS/README.md)、[STRESS](../STRESS/README.md)、[NET](../NET/README.md)。
 Windows 的版本在 [windows.md](windows.md)。</sub>

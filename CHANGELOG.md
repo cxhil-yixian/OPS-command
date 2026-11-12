@@ -11,6 +11,21 @@
 
 ## [Unreleased]
 
+### 規劃中（還沒做）
+
+sshd 相關、這一版討論過但排到之後的功能：
+
+- **慣犯加重處罰**：recidive jail（0.9 就能用），或 `bantime.increment`（0.11+）。
+- **filter 實測**：用 `fail2ban-regex` 拿這台的 sshd 日誌跑一次，確認失敗真的會被計數。
+- **切換 sshd jail 的 mode**（normal / aggressive）：`report` 已經算得出 fail2ban 看不到的連線，
+  但還沒有切換的入口。
+- **會一直存在的黑名單**（`deny` / `undeny`）：目前手動封鎖只存在 fail2ban 的資料庫裡，沒有可管理的清單。
+- **封鎖通知**（Telegram / Webhook）：這一版討論後決定先不做。
+
+---
+
+## [1.17.0] - 2026-11-12
+
 ### 新增
 
 - **Linux 選單改成全螢幕（`ops.sh`）**：↑↓／PgUp／PgDn／Home／End 移動、Enter 執行、直接按代號立刻執行、
@@ -135,17 +150,6 @@ firewalld 的處理**只做了邏輯測試**：用會記錄呼叫的假 `firewal
 包含 RDP 換 Port 兩輪、停用再啟用 SSH、Windows 更新停止／還原、臨時帳號的鎖定與改密碼、虛擬磁碟上的改代號／格式化／清除、
 實際安裝並移除軟體、一行指令的 SHA256 核對。**沒驗證的**：Hyper-V 元件啟用與重開機後效果（測試機沒開放巢狀虛擬化）、
 防火牆設定檔開著時封鎖是否真的擋得住（測試機 Public 防火牆是關的）、Windows Server。
-
-### 規劃中（還沒做）
-
-sshd 相關、這一版討論過但排到之後的功能：
-
-- **慣犯加重處罰**：recidive jail（0.9 就能用），或 `bantime.increment`（0.11+）。
-- **filter 實測**：用 `fail2ban-regex` 拿這台的 sshd 日誌跑一次，確認失敗真的會被計數。
-- **切換 sshd jail 的 mode**（normal / aggressive）：`report` 已經算得出 fail2ban 看不到的連線，
-  但還沒有切換的入口。
-- **會一直存在的黑名單**（`deny` / `undeny`）：目前手動封鎖只存在 fail2ban 的資料庫裡，沒有可管理的清單。
-- **封鎖通知**（Telegram / Webhook）：這一版討論後決定先不做。
 
 ---
 
@@ -1474,7 +1478,8 @@ curl -fsSL https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/ops.s
 
 - `LICENSE`（MIT）。
 
-[Unreleased]: https://github.com/cxhil-yixian/OPS-command/compare/v1.16.1...HEAD
+[Unreleased]: https://github.com/cxhil-yixian/OPS-command/compare/v1.17.0...HEAD
+[1.17.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.16.1...v1.17.0
 [1.16.1]: https://github.com/cxhil-yixian/OPS-command/compare/v1.16.0...v1.16.1
 [1.16.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.15.0...v1.16.0
 [1.15.0]: https://github.com/cxhil-yixian/OPS-command/compare/v1.14.0...v1.15.0
