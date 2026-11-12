@@ -182,7 +182,7 @@ function New-TaskTab($title, $type) {
     return $tab
 }
 
-# ===== 所有排程（唯讀）=====
+# ===== 所有排程 =====
 # 用工作排程器的 COM 介面一次讀完名稱、狀態、上次／下次執行、觸發與動作；
 # Get-ScheduledTaskInfo 要一個一個查，幾百個排程會卡好幾秒。
 # 這兩個函式會被事件閉包呼叫（透過變數），所以內容必須自給自足、不能再呼叫本檔的其他函式。
@@ -335,14 +335,264 @@ function Show-AllTaskDetail($r, $owner) {
     $d.Dispose()
 }
 
+# 「所有排程」分頁的修改動作。被事件閉包透過變數呼叫，所以內容自給自足、不呼叫本檔其他函式；
+# 寫操作記錄用參數 $log 傳進來（Write-TaskLog）。
+# $op：Edit／Delete／Disable／Enable／Run／Stop／Restore；$r：Get-AllTaskRows 的一列（Restore 時為 $null）。
+# 回傳 $true 表示有改到東西、需要重新讀取。
+function Invoke-AllTaskOp($op, $r, $owner, $log) {
+    $backupDir = Join-Path $(if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { Join-Path $env:USERPROFILE 'AppData\Local' }) 'OPS-command\task-backup'
+    $msg = { param($text, $title, $icon) [Windows.Forms.MessageBox]::Show($owner, $text, $title, 'OK', $icon) | Out-Null }
+    $ask = { param($text, $title) [Windows.Forms.MessageBox]::Show($owner, $text, $title, 'YesNo', 'Warning', 'Button2') -eq 'Yes' }
+    $explain = {
+        param($e)
+        $m = $e.Exception.Message
+        if ($e.Exception.HResult -eq -2147024891 -or $m -match 'Access is denied|存取被拒|拒絕存取|0x80070005') {
+            '權限不足。這個排程要系統管理員才能修改：請關掉面板，用系統管理員身分開啟 OPS-command 後再試。'
+        } else { $m }
+    }
+    $backup = {
+        param($task)
+        New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+        $safe = ($task.Path.TrimStart('\') -replace '[\\/:*?"<>|]', '_')
+        $file = Join-Path $backupDir ("{0}__{1}.xml" -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $safe)
+        [IO.File]::WriteAllText($file, $task.Xml, (New-Object Text.UnicodeEncoding $false, $true))
+        $file
+    }
+
+    if ($op -eq 'Restore') {
+        $dlg = New-Object Windows.Forms.OpenFileDialog
+        $dlg.Title = '選擇要還原的排程備份'
+        $dlg.Filter = '排程備份 (*.xml)|*.xml'
+        if (Test-Path $backupDir) { $dlg.InitialDirectory = $backupDir }
+        if ($dlg.ShowDialog($owner) -ne 'OK') { $dlg.Dispose(); return $false }
+        $file = $dlg.FileName; $dlg.Dispose()
+        try {
+            $xmlText = [IO.File]::ReadAllText($file)
+            $uri = ([xml]$xmlText).Task.RegistrationInfo.URI
+            if (-not $uri) { throw '備份檔裡沒有排程位置（RegistrationInfo/URI），無法判斷要還原到哪裡。' }
+            $uri = '\' + $uri.TrimStart('\')
+            $name = Split-Path -Leaf $uri
+            $folder = (Split-Path -Parent $uri).TrimEnd('\') + '\'
+            if ($name -like 'OPS-*') { throw 'OPS-command 自己的排程不從這裡還原。' }
+            $exists = [bool](Get-ScheduledTask -TaskPath $folder -TaskName $name -ErrorAction SilentlyContinue)
+            $q = "還原排程：$uri`r`n備份檔：$(Split-Path -Leaf $file)`r`n`r`n" + $(if ($exists) { '這個排程目前存在，還原會用備份的內容覆蓋它。' } else { '這個排程目前不存在，會重新建立。' }) + "`r`n確定還原？"
+            if (-not (& $ask $q '還原排程')) { return $false }
+            Register-ScheduledTask -Xml $xmlText -TaskName $name -TaskPath $folder -Force -ErrorAction Stop | Out-Null
+            & $log '還原（所有排程）' '成功' "$uri；備份 $(Split-Path -Leaf $file)"
+            & $msg "已還原 $uri。" '完成' 'Information'
+            return $true
+        } catch {
+            $why = & $explain $_
+            & $log '還原（所有排程）' '失敗' $why
+            & $msg $why '還原失敗' 'Error'
+            return $false
+        }
+    }
+
+    if (-not $r) { return $false }
+    if ($r.Name -like 'OPS-*') {
+        & $msg "「$($r.Name)」是 OPS-command 自己的排程，不從這一頁修改：`r`n・OPS-Task-* 請到前三頁管理`r`n・其他 OPS-* 是看門狗或守護排程，請用主面板對應的功能（確認、還原、停用），直接刪掉會讓保護失效。" 'OPS-command 的排程' 'Information'
+        return $false
+    }
+    $isMs = $r.Source -eq 'Microsoft'
+    $folderPath = $r.Folder.TrimEnd('\') + '\'
+    $svc = New-Object -ComObject Schedule.Service
+    try {
+        $svc.Connect()
+        $folder = $svc.GetFolder($r.Folder)
+        $task = $folder.GetTask($r.Name)
+    } catch {
+        & $msg "找不到排程 $($r.Path)，可能已經被刪除。請按「重新整理」。" '找不到排程' 'Warning'
+        return $true
+    }
+
+    try {
+        switch ($op) {
+            'Delete' {
+                $q = "刪除排程：$($r.Path)`r`n執行內容：$($r.Action)`r`n`r`n刪除前會先備份到 $backupDir，之後可以用「還原備份」放回來。"
+                if ($isMs) { $q += "`r`n`r`n⚠ 這是 Microsoft 的系統排程，刪掉可能讓 Windows 或 Office 的某些功能（更新、維護、診斷）不再自動執行。只是不想讓它跑，建議改用「停用」。" }
+                if (-not (& $ask ($q + "`r`n`r`n確定刪除？") '刪除排程')) { return $false }
+                if ($isMs) {
+                    Add-Type -AssemblyName Microsoft.VisualBasic
+                    $typed = [Microsoft.VisualBasic.Interaction]::InputBox("再確認一次：請輸入排程名稱「$($r.Name)」", '刪除系統排程', '')
+                    if ($typed -cne $r.Name) { & $msg '名稱不符，沒有刪除。' '已取消' 'Information'; return $false }
+                }
+                $file = & $backup $task
+                $folder.DeleteTask($r.Name, 0)
+                & $log '刪除（所有排程）' '成功' "$($r.Path)；備份 $(Split-Path -Leaf $file)"
+                & $msg "已刪除 $($r.Path)。`r`n備份：$file" '完成' 'Information'
+                return $true
+            }
+            'Disable' {
+                if ($r.State -eq '已停用') { & $msg '這個排程已經是停用的。' '停用' 'Information'; return $false }
+                $q = "停用排程：$($r.Path)`r`n停用後不會再自動執行，之後可以按「啟用」恢復。"
+                if ($isMs) { $q += "`r`n`r`n這是 Microsoft 的系統排程，停用可能讓相關的自動維護不再執行。" }
+                if (-not (& $ask ($q + "`r`n`r`n確定停用？") '停用排程')) { return $false }
+                Disable-ScheduledTask -TaskPath $folderPath -TaskName $r.Name -ErrorAction Stop | Out-Null
+                & $log '停用（所有排程）' '成功' $r.Path
+                return $true
+            }
+            'Enable' {
+                if ($r.State -ne '已停用') { & $msg '這個排程已經是啟用的。' '啟用' 'Information'; return $false }
+                Enable-ScheduledTask -TaskPath $folderPath -TaskName $r.Name -ErrorAction Stop | Out-Null
+                & $log '啟用（所有排程）' '成功' $r.Path
+                return $true
+            }
+            'Run' {
+                if (-not (& $ask "現在立刻執行一次：$($r.Path)`r`n執行內容：$($r.Action)`r`n`r`n確定執行？" '立即執行')) { return $false }
+                Start-ScheduledTask -TaskPath $folderPath -TaskName $r.Name -ErrorAction Stop
+                & $log '立即執行（所有排程）' '成功' $r.Path
+                return $true
+            }
+            'Stop' {
+                if ($r.State -ne '執行中') { & $msg '這個排程現在沒有在執行。' '停止' 'Information'; return $false }
+                if (-not (& $ask "強制停止正在執行的 $($r.Path)？" '停止執行')) { return $false }
+                Stop-ScheduledTask -TaskPath $folderPath -TaskName $r.Name -ErrorAction Stop
+                & $log '停止（所有排程）' '成功' $r.Path
+                return $true
+            }
+            'Edit' {
+                $def = $task.Definition
+                $p = $def.Principal
+                if ([int]$p.LogonType -in @(1, 6)) {
+                    & $msg "這個排程設定成「用帳號密碼執行」（$($p.UserId)），存檔時要重新輸入那個帳號的密碼，請到「工作排程器」修改。" '無法在這裡編輯' 'Information'
+                    return $false
+                }
+                $acts = @($def.Actions)
+                $canAct = ($acts.Count -eq 1 -and [int]$acts[0].Type -eq 0)
+                $dayKeys = @('星期一','星期二','星期三','星期四','星期五','星期六','星期日')
+                $dayBits = @(2, 4, 8, 16, 32, 64, 1)
+
+                $f = New-Object Windows.Forms.Form
+                $f.Text = "編輯排程｜$($r.Name)"
+                $f.Size = New-Object Drawing.Size(640, 520)
+                $f.StartPosition = 'CenterParent'; $f.FormBorderStyle = 'FixedDialog'; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+                $f.Font = New-Object Drawing.Font('Microsoft JhengHei UI', 10)
+                $f.BackColor = [Drawing.Color]::FromArgb(241,245,249)
+                $y = 16
+                $addRow = {
+                    param($label, $ctl, $h)
+                    $l = New-Object Windows.Forms.Label; $l.Text = $label; $l.Location = New-Object Drawing.Point(16, ($y + 3)); $l.Size = New-Object Drawing.Size(120, 24)
+                    $ctl.Location = New-Object Drawing.Point(140, $y); $ctl.Size = New-Object Drawing.Size(462, $h)
+                    $f.Controls.Add($l); $f.Controls.Add($ctl)
+                    Set-Variable -Name y -Value ($y + $h + 12) -Scope 1
+                }
+                $where = New-Object Windows.Forms.Label; $where.Text = $r.Path; $where.AutoEllipsis = $true; & $addRow '位置' $where 24
+                $exe = New-Object Windows.Forms.TextBox; & $addRow '程式' $exe 26
+                $exe.Width = 372
+                $browse = New-Object Windows.Forms.Button; $browse.Text = '瀏覽…'; $browse.Size = New-Object Drawing.Size(84, 26); $browse.Location = New-Object Drawing.Point(518, $exe.Top); $f.Controls.Add($browse)
+                $arg = New-Object Windows.Forms.TextBox; & $addRow '參數' $arg 26
+                $wd = New-Object Windows.Forms.TextBox; & $addRow '起始資料夾' $wd 26
+                if ($canAct) { $exe.Text = [string]$acts[0].Path; $arg.Text = [string]$acts[0].Arguments; $wd.Text = [string]$acts[0].WorkingDirectory }
+                else { foreach ($c in @($exe, $arg, $wd, $browse)) { $c.Enabled = $false }; $exe.Text = '（這個排程有多個動作或不是執行程式，只能改執行時機）' }
+                $when = New-Object Windows.Forms.ComboBox; $when.DropDownStyle = 'DropDownList'
+                [void]$when.Items.AddRange(@("保持原本：$($r.Trigger)", '單次', '每天', '每週', '登入時（目前使用者）', '開機時')); $when.SelectedIndex = 0
+                & $addRow '執行時機' $when 26
+                $date = New-Object Windows.Forms.DateTimePicker; $date.Format = 'Custom'; $date.CustomFormat = 'yyyy/MM/dd HH:mm'; $date.ShowUpDown = $true
+                $date.Value = (Get-Date).Date.AddDays(1).AddHours(3)
+                try { $first = @($def.Triggers)[0]; if ($first -and $first.StartBoundary) { $date.Value = [datetime]$first.StartBoundary } } catch { }
+                & $addRow '日期／時間' $date 26
+                $days = New-Object Windows.Forms.CheckedListBox; $days.CheckOnClick = $true; $days.MultiColumn = $true; $days.ColumnWidth = 110; [void]$days.Items.AddRange([object[]]$dayKeys)
+                & $addRow '每週日期' $days 48
+                $desc = New-Object Windows.Forms.TextBox; $desc.Text = [string]$def.RegistrationInfo.Description; & $addRow '說明' $desc 26
+                $en = New-Object Windows.Forms.CheckBox; $en.Text = '啟用這個排程'; $en.Checked = [bool]$def.Settings.Enabled; & $addRow '' $en 26
+                $note = New-Object Windows.Forms.Label; $note.ForeColor = [Drawing.Color]::FromArgb(71,85,105); $note.AutoSize = $false
+                $note.Text = '存檔前會先備份原本的設定，之後可用「還原備份」放回。' + $(if ($isMs) { "`r`n⚠ 這是 Microsoft 的系統排程，改錯可能讓相關的自動維護失效。" } else { '' })
+                & $addRow '' $note 40
+                $sync = { $m = $when.SelectedIndex; $date.Enabled = ($m -in 1, 2, 3); $days.Enabled = ($m -eq 3) }.GetNewClosure()
+                $when.add_SelectedIndexChanged($sync); & $sync
+                $browse.Add_Click({
+                    $o = New-Object Windows.Forms.OpenFileDialog; $o.Filter = '程式或腳本 (*.exe;*.bat;*.cmd;*.ps1)|*.exe;*.bat;*.cmd;*.ps1|所有檔案 (*.*)|*.*'
+                    if ($o.ShowDialog() -eq 'OK') { $exe.Text = $o.FileName; if (-not $wd.Text) { $wd.Text = Split-Path $o.FileName } }
+                    $o.Dispose()
+                }.GetNewClosure())
+                $ok = New-Object Windows.Forms.Button; $ok.Text = '儲存'; $ok.Size = New-Object Drawing.Size(90, 32); $ok.Location = New-Object Drawing.Point(414, ($y + 4)); $ok.DialogResult = 'OK'; $ok.FlatStyle = 'Flat'; $ok.BackColor = [Drawing.Color]::FromArgb(22,101,52); $ok.ForeColor = [Drawing.Color]::White
+                $cancel = New-Object Windows.Forms.Button; $cancel.Text = '取消'; $cancel.Size = New-Object Drawing.Size(90, 32); $cancel.Location = New-Object Drawing.Point(512, ($y + 4)); $cancel.DialogResult = 'Cancel'
+                $f.Controls.AddRange(@($ok, $cancel)); $f.AcceptButton = $ok; $f.CancelButton = $cancel
+                $f.ClientSize = New-Object Drawing.Size(624, ($y + 52))
+
+                while ($true) {
+                    if ($f.ShowDialog($owner) -ne 'OK') { $f.Dispose(); return $false }
+                    try {
+                        $changes = @()
+                        if ($canAct) {
+                            $a = $acts[0]
+                            $ne = $exe.Text.Trim(); $na = $arg.Text.Trim(); $nw = $wd.Text.Trim()
+                            if (-not $ne) { throw '程式不能空白。' }
+                            if ($ne -ne [string]$a.Path) { $changes += "程式：$($a.Path) → $ne" }
+                            if ($na -ne [string]$a.Arguments) { $changes += "參數：$($a.Arguments) → $na" }
+                            if ($nw -ne [string]$a.WorkingDirectory) { $changes += "起始資料夾：$($a.WorkingDirectory) → $nw" }
+                        }
+                        $m = $when.SelectedIndex
+                        $mask = 0; for ($i = 0; $i -lt 7; $i++) { if ($days.GetItemChecked($i)) { $mask = $mask -bor $dayBits[$i] } }
+                        if ($m -eq 3 -and $mask -eq 0) { throw '每週至少要選一天。' }
+                        if ($m -gt 0) {
+                            $hm = $date.Value.ToString('HH:mm')
+                            $newWhen = switch ($m) {
+                                1 { '單次 ' + $date.Value.ToString('yyyy/MM/dd HH:mm') }
+                                2 { "每天 $hm" }
+                                3 { '每週' + ((@(0..6 | Where-Object { $days.GetItemChecked($_) } | ForEach-Object { $dayKeys[$_].Substring(2) })) -join '、') + " $hm" }
+                                4 { '目前使用者登入時' }
+                                5 { '開機時' }
+                            }
+                            $changes += "執行時機：$($r.Trigger) → $newWhen"
+                        }
+                        if ($desc.Text -ne [string]$def.RegistrationInfo.Description) { $changes += '說明' }
+                        if ($en.Checked -ne [bool]$def.Settings.Enabled) { $changes += $(if ($en.Checked) { '啟用' } else { '停用' }) }
+                        if (-not $changes.Count) { & $msg '沒有任何變更。' '編輯排程' 'Information'; $f.Dispose(); return $false }
+                        if (-not (& $ask ("將修改 $($r.Path)：`r`n・" + ($changes -join "`r`n・") + "`r`n`r`n確定儲存？") '確認修改')) { continue }
+
+                        $file = & $backup $task
+                        if ($canAct) { $a.Path = $ne; $a.Arguments = $na; $a.WorkingDirectory = $nw }
+                        if ($m -gt 0) {
+                            $def.Triggers.Clear()
+                            $start = $date.Value.ToString('yyyy-MM-ddTHH:mm:ss')
+                            switch ($m) {
+                                1 { $t = $def.Triggers.Create(1); $t.StartBoundary = $start }
+                                2 { $t = $def.Triggers.Create(2); $t.StartBoundary = $start; $t.DaysInterval = 1 }
+                                3 { $t = $def.Triggers.Create(3); $t.StartBoundary = $start; $t.DaysOfWeek = $mask; $t.WeeksInterval = 1 }
+                                4 { $t = $def.Triggers.Create(9); $t.UserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+                                5 { $t = $def.Triggers.Create(8) }
+                            }
+                        }
+                        $def.RegistrationInfo.Description = $desc.Text
+                        $def.Settings.Enabled = $en.Checked
+                        $uid = if ($p.UserId) { $p.UserId } elseif ($p.GroupId) { $p.GroupId } else { $null }
+                        [void]$folder.RegisterTaskDefinition($r.Name, $def, 4, $uid, $null, [int]$p.LogonType)
+                        & $log '編輯（所有排程）' '成功' ("$($r.Path)；" + ($changes -join '；') + "；備份 $(Split-Path -Leaf $file)")
+                        & $msg "已儲存。`r`n備份：$file" '完成' 'Information'
+                        $f.Dispose()
+                        return $true
+                    } catch {
+                        $why = & $explain $_
+                        & $log '編輯（所有排程）' '失敗' "$($r.Path)；$why"
+                        & $msg $why '無法儲存' 'Error'
+                        if ($why -like '權限不足*') { $f.Dispose(); return $false }
+                        # 其他錯誤（例如漏填）回到編輯視窗讓使用者改
+                        $task = $folder.GetTask($r.Name); $def = $task.Definition; $p = $def.Principal; $acts = @($def.Actions)
+                    }
+                }
+            }
+        }
+    } catch {
+        $why = & $explain $_
+        & $log "$op（所有排程）" '失敗' "$($r.Path)；$why"
+        & $msg $why '操作失敗' 'Error'
+        return $true
+    } finally {
+        [System.Runtime.InteropServices.Marshal]::ReleaseComObject($svc) | Out-Null
+    }
+    return $false
+}
+
 function New-AllTasksTab {
-    $tab = New-Object Windows.Forms.TabPage; $tab.Text = '所有排程（唯讀）'
+    $tab = New-Object Windows.Forms.TabPage; $tab.Text = '所有排程'
     $tab.BackColor = [Drawing.Color]::FromArgb(241,245,249)
 
-    $top = New-Object Windows.Forms.FlowLayoutPanel; $top.Dock = 'Top'; $top.Height = 40; $top.FlowDirection = 'LeftToRight'; $top.Padding = New-Object Windows.Forms.Padding(4,6,0,0)
+    $top = New-Object Windows.Forms.FlowLayoutPanel; $top.Dock = 'Top'; $top.AutoSize = $true; $top.AutoSizeMode = 'GrowAndShrink'; $top.FlowDirection = 'LeftToRight'; $top.Padding = New-Object Windows.Forms.Padding(4,6,0,4)
     $searchLabel = New-Object Windows.Forms.Label; $searchLabel.Text = '搜尋'; $searchLabel.AutoSize = $true; $searchLabel.Margin = New-Object Windows.Forms.Padding(3,5,3,0)
     $search = New-Object Windows.Forms.TextBox; $search.Width = 240
-    $showMs = New-Object Windows.Forms.CheckBox; $showMs.Text = '顯示 Microsoft 的排程（Windows、Office 等，\Microsoft\ 底下）'; $showMs.AutoSize = $true; $showMs.Margin = New-Object Windows.Forms.Padding(14,4,3,0)
+    $showMs = New-Object Windows.Forms.CheckBox; $showMs.Text = '顯示 Microsoft 的排程（Windows、Office）'; $showMs.AutoSize = $true; $showMs.Margin = New-Object Windows.Forms.Padding(14,4,3,0)
     $count = New-Object Windows.Forms.Label; $count.AutoSize = $true; $count.Margin = New-Object Windows.Forms.Padding(14,5,3,0); $count.ForeColor = [Drawing.Color]::FromArgb(71,85,105)
     $top.Controls.AddRange(@($searchLabel, $search, $showMs, $count))
 
@@ -352,20 +602,35 @@ function New-AllTasksTab {
     }
     foreach ($n in @('State','Next','Last')) { $grid.Columns[$n].AutoSizeMode = 'AllCells' }
 
-    $panel = New-Object Windows.Forms.FlowLayoutPanel; $panel.Dock = 'Bottom'; $panel.Height = 48; $panel.FlowDirection = 'LeftToRight'; $panel.WrapContents = $false
-    $detail = New-Object Windows.Forms.Button; $detail.Text = '詳細資料'; $detail.Width = 100; $detail.FlatStyle = 'Flat'; $detail.BackColor = [Drawing.Color]::FromArgb(30,64,175); $detail.ForeColor = [Drawing.Color]::White
-    $refresh = New-Object Windows.Forms.Button; $refresh.Text = '重新整理'; $refresh.Width = 90; $refresh.FlatStyle = 'Flat'; $refresh.BackColor = [Drawing.Color]::FromArgb(219,234,254); $refresh.ForeColor = [Drawing.Color]::FromArgb(30,64,175)
-    $native = New-Object Windows.Forms.Button; $native.Text = '開啟工作排程器'; $native.Width = 130; $native.FlatStyle = 'Flat'; $native.BackColor = [Drawing.Color]::FromArgb(219,234,254); $native.ForeColor = [Drawing.Color]::FromArgb(30,64,175)
-    $hint = New-Object Windows.Forms.Label; $hint.AutoSize = $true; $hint.Margin = New-Object Windows.Forms.Padding(10,10,3,0); $hint.ForeColor = [Drawing.Color]::FromArgb(71,85,105)
-    $hint.Text = '這頁只能看，要修改請用「工作排程器」。'
+    $panel = New-Object Windows.Forms.FlowLayoutPanel; $panel.Dock = 'Bottom'; $panel.AutoSize = $true; $panel.AutoSizeMode = 'GrowAndShrink'; $panel.FlowDirection = 'LeftToRight'; $panel.WrapContents = $true; $panel.Padding = New-Object Windows.Forms.Padding(0,4,0,4)
+    $mkBtn = {
+        param($text, $w, $bg, $fg)
+        $b = New-Object Windows.Forms.Button; $b.Text = $text; $b.Width = $w; $b.Height = 30; $b.FlatStyle = 'Flat'
+        $b.BackColor = [Drawing.Color]::FromArgb($bg[0], $bg[1], $bg[2]); $b.ForeColor = [Drawing.Color]::FromArgb($fg[0], $fg[1], $fg[2]); $b
+    }
+    $white = @(255,255,255); $blueTxt = @(30,64,175); $light = @(219,234,254)
+    $detail  = & $mkBtn '詳細資料' 90 @(30,64,175) $white
+    $edit    = & $mkBtn '編輯' 70 @(22,101,52) $white
+    $delete  = & $mkBtn '刪除' 70 @(153,27,27) $white
+    $disable = & $mkBtn '停用' 70 @(194,65,12) $white
+    $enable  = & $mkBtn '啟用' 70 @(30,64,175) $white
+    $run     = & $mkBtn '立即執行' 90 @(15,118,110) $white
+    $stop    = & $mkBtn '停止' 70 @(100,116,139) $white
+    $refresh = & $mkBtn '重新整理' 90 $light $blueTxt
+    $restore = & $mkBtn '還原備份' 90 $light $blueTxt
+    $native  = & $mkBtn '開啟工作排程器' 130 $light $blueTxt
+    $panel.Controls.AddRange(@($detail, $edit, $delete, $disable, $enable, $run, $stop, $refresh, $restore, $native))
     $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    if (-not $isAdmin) { $hint.Text += '（不是系統管理員，部分系統排程看不到）' }
-    $panel.Controls.AddRange(@($detail, $refresh, $native, $hint))
+    if (-not $isAdmin) {
+        $hint = New-Object Windows.Forms.Label; $hint.AutoSize = $true; $hint.Margin = New-Object Windows.Forms.Padding(14,5,3,0); $hint.ForeColor = [Drawing.Color]::FromArgb(180,83,9)
+        $hint.Text = '不是系統管理員：部分系統排程看不到、也不能修改'
+        $top.Controls.Add($hint)
+    }
     $tab.Controls.Add($grid); $tab.Controls.Add($top); $tab.Controls.Add($panel)
 
     # 閉包會複製變數，所以把要共用、會變動的資料放在同一個雜湊表裡
     $st = @{ Rows = @(); Loaded = $false }
-    $getRows = ${function:Get-AllTaskRows}; $showDetail = ${function:Show-AllTaskDetail}
+    $getRows = ${function:Get-AllTaskRows}; $showDetail = ${function:Show-AllTaskDetail}; $taskOp = ${function:Invoke-AllTaskOp}; $taskLog = ${function:Write-TaskLog}
     $fill = {
         $q = $search.Text.Trim()
         $grid.SuspendLayout(); $grid.Rows.Clear()
@@ -386,7 +651,15 @@ function New-AllTasksTab {
     $load = {
         $tab.Cursor = [Windows.Forms.Cursors]::WaitCursor
         $count.Text = '讀取中…'; $count.Refresh()
-        try { $st.Rows = @(& $getRows); $st.Loaded = $true; & $fill }
+        $keep = if ($grid.SelectedRows.Count) { $grid.SelectedRows[0].Tag.Path } else { $null }
+        try {
+            $st.Rows = @(& $getRows); $st.Loaded = $true; & $fill
+            if ($keep) {
+                foreach ($row in $grid.Rows) {
+                    if ($row.Tag.Path -eq $keep) { $grid.ClearSelection(); $row.Selected = $true; $grid.CurrentCell = $row.Cells[0]; break }
+                }
+            }
+        }
         catch { $count.Text = '讀取失敗'; [Windows.Forms.MessageBox]::Show($_.Exception.Message,'讀取排程失敗','OK','Error') | Out-Null }
         finally { $tab.Cursor = [Windows.Forms.Cursors]::Default }
     }.GetNewClosure()
@@ -403,6 +676,23 @@ function New-AllTasksTab {
     $detail.Add_Click($open)
     $grid.add_CellDoubleClick({ param($s, $e) if ($e.RowIndex -ge 0) { & $open } }.GetNewClosure())
     $native.Add_Click({ Start-Process "$env:SystemRoot\System32\taskschd.msc" })
+    # 修改動作：回傳 $true 才重新讀取
+    $doOp = {
+        param($op)
+        $r = $null
+        if ($op -ne 'Restore') {
+            if ($grid.SelectedRows.Count -eq 0) { [Windows.Forms.MessageBox]::Show($tab.FindForm(), '請先在表格選一個排程。', '沒有選擇', 'OK', 'Information') | Out-Null; return }
+            $r = $grid.SelectedRows[0].Tag
+        }
+        if (& $taskOp $op $r $tab.FindForm() $taskLog) { & $load }
+    }.GetNewClosure()
+    $edit.Add_Click({ & $doOp 'Edit' }.GetNewClosure())
+    $delete.Add_Click({ & $doOp 'Delete' }.GetNewClosure())
+    $disable.Add_Click({ & $doOp 'Disable' }.GetNewClosure())
+    $enable.Add_Click({ & $doOp 'Enable' }.GetNewClosure())
+    $run.Add_Click({ & $doOp 'Run' }.GetNewClosure())
+    $stop.Add_Click({ & $doOp 'Stop' }.GetNewClosure())
+    $restore.Add_Click({ & $doOp 'Restore' }.GetNewClosure())
     return $tab
 }
 
@@ -419,7 +709,7 @@ $tabs.TabPages.Add((New-TaskTab '定時執行腳本' 'Script'))
 $tabs.TabPages.Add((New-TaskTab '關機／重新啟動' 'Shutdown'))
 $tabs.TabPages.Add((New-AllTasksTab))
 $footer=New-Object Windows.Forms.Panel; $footer.Dock='Bottom'; $footer.Height=42; $footer.BackColor=[Drawing.Color]::FromArgb(219,234,254)
-$note=New-Object Windows.Forms.Label; $note.Dock='Fill'; $note.Text='前三頁只管理 OPS-command 建立的排程；「所有排程」可查看這台電腦全部的排程。倒數期間可用 shutdown /a 取消關機／重啟。'; $note.TextAlign='MiddleLeft'; $note.Padding=New-Object Windows.Forms.Padding(8,0,0,0); $footer.Controls.Add($note)
+$note=New-Object Windows.Forms.Label; $note.Dock='Fill'; $note.Text='前三頁只管理 OPS-command 建立的排程；「所有排程」可查看、修改這台電腦全部的排程（改之前自動備份）。倒數期間可用 shutdown /a 取消關機／重啟。'; $note.TextAlign='MiddleLeft'; $note.Padding=New-Object Windows.Forms.Padding(8,0,0,0); $footer.Controls.Add($note)
 $closePanel=New-Object Windows.Forms.Button; $closePanel.Text='關閉視窗'; $closePanel.Dock='Right'; $closePanel.Width=100; $closePanel.FlatStyle='Flat'; $closePanel.BackColor=[Drawing.Color]::FromArgb(254,226,226); $closePanel.ForeColor=[Drawing.Color]::FromArgb(153,27,27); $closePanel.Add_Click({$form.Close()}.GetNewClosure()); $footer.Controls.Add($closePanel)
 $form.Controls.Add($tabs); $form.Controls.Add($footer)
 [void]$form.ShowDialog()

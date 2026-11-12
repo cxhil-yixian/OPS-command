@@ -111,7 +111,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 | <b>系統與更新</b> | 暫停／恢復 Windows 更新、Store、Hyper-V、時間時區、裝常用軟體 | 會 |
 | <b>網路與防火牆</b> | Ping、開 SSH、改 IP／DNS、開關防火牆 Port、一次加很多個 IP | 會 |
 | <b>磁碟管理</b> | 看磁碟狀況、改代號、格式化、清除整顆磁碟 | 會（格式化、清除會刪掉資料） |
-| <b>自動排程</b> | 開機自動執行程式、定時跑腳本、定時關機；查看這台電腦所有排程 | 會（查看不會） |
+| <b>自動排程</b> | 開機自動執行程式、定時跑腳本、定時關機；查看、修改、刪除這台電腦所有排程 | 會 |
 
 ---
 
@@ -268,7 +268,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 | 一張網卡加很多個 IP | 網路與防火牆 → 批量新增 IP | 只能用在固定 IP 的網卡 |
 | 看磁碟用了多少 | 磁碟管理 → 唯讀磁碟視覺化 | 只看不改 |
 | 開機自動執行程式、定時關機 | 自動排程 → 開啟自動排程管理 | 只管理這個工具建立的排程 |
-| 看這台電腦有哪些排程、上次有沒有跑成功 | 自動排程 → 開啟自動排程管理 → 「所有排程」分頁 | 只能看；失敗的會標紅，點兩下看詳細 |
+| 看這台電腦有哪些排程、改時間、刪掉不要的 | 自動排程 → 開啟自動排程管理 → 「所有排程」分頁 | 失敗的會標紅、點兩下看詳細；改或刪之前自動備份，弄錯按「還原備份」 |
 | 看這個工具改過什麼 | 檢查與紀錄 → 操作記錄 | — |
 | 用完不想在這台電腦留下這個工具的東西 | 主面板右上角勾「關閉時清除本工具的檔案」 | 關閉面板時刪掉工具下載的程式、紀錄、匯出的檔案，以及指令歷史裡那行一行指令；匯出的檔案要留請先搬走 |
 
@@ -349,5 +349,5 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 
 ---
 
-<sub>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.3.0</sub>
+<sub>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.4.0</sub>
 <sub>想看更多細節，請看 [WINDOWS/README.md](../WINDOWS/README.md)。Linux 的版本在 [linux.md](linux.md)。</sub>

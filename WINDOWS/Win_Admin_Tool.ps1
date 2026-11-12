@@ -3,7 +3,7 @@
 # 工具版本（Windows 圖形介面自己的版本號，跟 Linux ops.sh 的版本無關）。
 # 改了程式就遞增：修 bug 加第三段、加功能加第二段、介面大改加第一段（見 README「版本號」）。
 # 主面板開啟後會到線上讀這一行比對版本，所以這一行要留在檔案開頭、格式不要改。
-$Script:ToolVersion = '2.3.0'
+$Script:ToolVersion = '2.4.0'
 
 # 「關閉時清除本工具的檔案」：主面板的勾選框。提權重開時用 -CleanupOnExit 把勾選狀態帶給新的管理員面板。
 $Script:CleanupOnExit = [bool]($args -contains '-CleanupOnExit')
@@ -176,7 +176,7 @@ function Close-PanelIfElevated {
 function Set-OpsCleanupOnExit { param([bool]$On) $Script:CleanupOnExit = $On }
 
 # 關閉主面板時清除本工具留下的東西：%LOCALAPPDATA%\OPS-command\ 整個資料夾（程式、操作記錄、錯誤紀錄、
-# 匯出檔、測試輸出），以及 PowerShell 指令歷史裡跟 OPS 有關的那幾行。
+# 匯出檔、排程備份、測試輸出），以及 PowerShell 指令歷史裡跟 OPS 有關的那幾行。
 # 不碰：Windows 事件記錄（只能整個記錄檔清，會連別的程式一起刪）、SYSTEM 用的狀態與排程（看門狗確認或還原後本來就會刪；
 # 暴力破解封鎖、自動排程是你刻意要它們留著的）。
 function Invoke-OpsCleanup {
@@ -4278,7 +4278,7 @@ function Show-WindowsPanel {
     $cleanup.BringToFront(); $cleanupText.BringToFront()
     $cleanup.Add_CheckedChanged({
         if ($cleanup.Checked) {
-            $ans=[Windows.Forms.MessageBox]::Show($form, "關閉面板時會刪除：`r`n%LOCALAPPDATA%\OPS-command\ 整個資料夾`r`n（下載的程式、操作記錄、錯誤紀錄、匯出的檔案、測試輸出）`r`nWindows 事件記錄、看門狗與自動封鎖的設定不會動。`r`n確定要刪除？", '關閉時清除', 'YesNo', 'Question')
+            $ans=[Windows.Forms.MessageBox]::Show($form, "關閉面板時會刪除：`r`n%LOCALAPPDATA%\OPS-command\ 整個資料夾`r`n（下載的程式、操作記錄、錯誤紀錄、匯出的檔案、排程備份、測試輸出）`r`nWindows 事件記錄、看門狗與自動封鎖的設定不會動。`r`n確定要刪除？", '關閉時清除', 'YesNo', 'Question')
             if ($ans -ne 'Yes') { $cleanup.Checked=$false; return }
         }
         Set-OpsCleanupOnExit $cleanup.Checked

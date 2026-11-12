@@ -252,7 +252,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
     <tr><td><strong>系統與更新</strong></td><td>暫停／恢復 Windows 更新、Store、Hyper-V、時間時區、裝常用軟體</td><td>會</td></tr>
     <tr><td><strong>網路與防火牆</strong></td><td>Ping、開 SSH、改 IP／DNS、開關防火牆 Port、一次加很多個 IP</td><td>會</td></tr>
     <tr><td><strong>磁碟管理</strong></td><td>看磁碟狀況、改代號、格式化、清除整顆磁碟</td><td>會（格式化、清除會刪掉資料）</td></tr>
-    <tr><td><strong>自動排程</strong></td><td>開機自動執行程式、定時跑腳本、定時關機；查看這台電腦所有排程</td><td>會（查看不會）</td></tr>
+    <tr><td><strong>自動排程</strong></td><td>開機自動執行程式、定時跑腳本、定時關機；查看、修改、刪除這台電腦所有排程</td><td>會</td></tr>
   </tbody>
 </table>
 </div>
@@ -435,7 +435,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
       <tr><td>一張網卡加很多個 IP</td><td>網路與防火牆 → 批量新增 IP</td><td>只能用在固定 IP 的網卡</td></tr>
       <tr><td>看磁碟用了多少</td><td>磁碟管理 → 唯讀磁碟視覺化</td><td>只看不改</td></tr>
       <tr><td>開機自動執行程式、定時關機</td><td>自動排程 → 開啟自動排程管理</td><td>只管理這個工具建立的排程</td></tr>
-      <tr><td>看這台電腦有哪些排程、上次有沒有跑成功</td><td>自動排程 → 開啟自動排程管理 → 「所有排程」分頁</td><td>只能看；失敗的會標紅，點兩下看詳細</td></tr>
+      <tr><td>看這台電腦有哪些排程、改時間、刪掉不要的</td><td>自動排程 → 開啟自動排程管理 → 「所有排程」分頁</td><td>失敗的會標紅、點兩下看詳細；改或刪之前自動備份，弄錯按「還原備份」</td></tr>
       <tr><td>看這個工具改過什麼</td><td>檢查與紀錄 → 操作記錄</td><td>—</td></tr>
       <tr><td>用完不想在這台電腦留下這個工具的東西</td><td>主面板右上角勾「關閉時清除本工具的檔案」</td><td>關閉面板時刪掉工具下載的程式、紀錄、匯出的檔案，以及指令歷史裡那行一行指令；匯出的檔案要留請先搬走</td></tr>
     </tbody>
@@ -506,7 +506,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 </dl>
 
 <footer>
-  <p>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.3.0</p>
+  <p>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.4.0</p>
   <p>想看更多細節，請看 <a href="https://github.com/cxhil-yixian/OPS-command/blob/main/WINDOWS/README.md">WINDOWS/README.md</a>。Linux 的版本在 <a href="linux.html">linux.md</a>。</p>
 </footer>
 
