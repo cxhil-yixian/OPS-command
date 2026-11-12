@@ -3,7 +3,7 @@
 # 工具版本（Windows 圖形介面自己的版本號，跟 Linux ops.sh 的版本無關）。
 # 改了程式就遞增：修 bug 加第三段、加功能加第二段、介面大改加第一段（見 README「版本號」）。
 # 主面板開啟後會到線上讀這一行比對版本，所以這一行要留在檔案開頭、格式不要改。
-$Script:ToolVersion = '2.2.2'
+$Script:ToolVersion = '2.3.0'
 
 # 「關閉時清除本工具的檔案」：主面板的勾選框。提權重開時用 -CleanupOnExit 把勾選狀態帶給新的管理員面板。
 $Script:CleanupOnExit = [bool]($args -contains '-CleanupOnExit')

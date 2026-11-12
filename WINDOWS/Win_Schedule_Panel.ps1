@@ -182,6 +182,230 @@ function New-TaskTab($title, $type) {
     return $tab
 }
 
+# ===== 所有排程（唯讀）=====
+# 用工作排程器的 COM 介面一次讀完名稱、狀態、上次／下次執行、觸發與動作；
+# Get-ScheduledTaskInfo 要一個一個查，幾百個排程會卡好幾秒。
+# 這兩個函式會被事件閉包呼叫（透過變數），所以內容必須自給自足、不能再呼叫本檔的其他函式。
+function Get-AllTaskRows {
+    $resultText = @{
+        '0x0'='成功'; '0x1'='失敗（一般錯誤）'; '0x2'='找不到檔案'
+        '0x41300'='可以執行'; '0x41301'='正在執行'; '0x41302'='已停用'; '0x41303'='還沒執行過'
+        '0x41304'='沒有排定下一次'; '0x41306'='被手動或逾時終止'
+        '0x8004131F'='上一次還在跑，這次沒有啟動'; '0x80041326'='工作已停用'
+        '0x80070002'='找不到要執行的檔案'; '0x80070005'='權限不足'
+        '0x800710E0'='條件不符被拒絕（例如帳號沒登入）'; '0x8004130F'='沒有可用的帳號密碼'
+        '0xC000013A'='被中斷（關機或按 Ctrl+C）'; '0xC0000142'='程式無法初始化'
+        '0x80004005'='未指定的錯誤'; '0x80040154'='要用的元件沒有註冊'
+    }
+    $dayNames = @('日','一','二','三','四','五','六')
+    $fmtTime = { param($d) if ($d -is [datetime] -and $d.Year -ge 2000) { $d.ToString('yyyy/MM/dd HH:mm') } else { '' } }
+    $fmtSpan = {
+        param($iso)
+        try { $s = [Xml.XmlConvert]::ToTimeSpan($iso) } catch { return $iso }
+        if ($s.TotalDays -ge 1 -and $s.TotalDays -eq [math]::Floor($s.TotalDays)) { return "$([int]$s.TotalDays) 天" }
+        if ($s.TotalHours -ge 1 -and $s.TotalHours -eq [math]::Floor($s.TotalHours)) { return "$([int]$s.TotalHours) 小時" }
+        if ($s.TotalMinutes -ge 1) { return "$([int]$s.TotalMinutes) 分鐘" }
+        return "$([int]$s.TotalSeconds) 秒"
+    }
+    $fmtTrigger = {
+        param($t)
+        $hm = ''
+        if ($t.StartBoundary) { try { $hm = ([datetime]$t.StartBoundary).ToString('HH:mm') } catch { } }
+        $txt = switch ([int]$t.Type) {
+            0  { '發生指定事件時' }
+            1  {
+                $at = ''; if ($t.StartBoundary) { try { $at = ([datetime]$t.StartBoundary).ToString('yyyy/MM/dd HH:mm') } catch { } }
+                $rep = ''; try { $rep = [string]$t.Repetition.Interval } catch { }
+                if ($rep) { "從 $at 起" } else { "單次 $at" }
+            }
+            2  { if ($t.DaysInterval -gt 1) { "每 $($t.DaysInterval) 天 $hm" } else { "每天 $hm" } }
+            3  {
+                $d = @(); for ($i = 0; $i -lt 7; $i++) { if ($t.DaysOfWeek -band (1 -shl $i)) { $d += $dayNames[$i] } }
+                $w = if ($t.WeeksInterval -gt 1) { "每 $($t.WeeksInterval) 週" } else { '每週' }
+                "$w$($d -join '、') $hm"
+            }
+            4  { "每月指定日期 $hm" }
+            5  { "每月第幾週的星期幾 $hm" }
+            6  { '電腦閒置時' }
+            7  { '建立或修改排程時' }
+            8  { '開機時' }
+            9  { if ($t.UserId) { "$($t.UserId) 登入時" } else { '任何使用者登入時' } }
+            11 { '工作階段變化時（連線、中斷、鎖定、解鎖）' }
+            12 { '系統內部條件觸發' }
+            default { "其他（類型 $($t.Type)）" }
+        }
+        try { if ($t.Repetition.Interval) { $txt += $(if ([int]$t.Type -eq 1) { '' } else { '，' }) + "每 $(& $fmtSpan $t.Repetition.Interval)重複" } } catch { }
+        if (-not $t.Enabled) { $txt += '（這個觸發已停用）' }
+        $txt.Trim()
+    }
+
+    $svc = New-Object -ComObject Schedule.Service
+    $svc.Connect()
+    $rows = New-Object System.Collections.Generic.List[object]
+    $folders = New-Object System.Collections.Generic.Queue[object]
+    $folders.Enqueue($svc.GetFolder('\'))
+    while ($folders.Count -gt 0) {
+        $f = $folders.Dequeue()
+        try { foreach ($sub in $f.GetFolders(0)) { $folders.Enqueue($sub) } } catch { }
+        $tasks = try { @($f.GetTasks(1)) } catch { @() }   # 1 = 連隱藏的排程也列出
+        foreach ($t in $tasks) {
+            $state = switch ([int]$t.State) { 1 {'已停用'} 2 {'排隊中'} 3 {'已啟用'} 4 {'執行中'} default {'不明'} }
+            $code = [int]$t.LastTaskResult
+            $hex = '0x{0:X}' -f [BitConverter]::ToUInt32([BitConverter]::GetBytes($code), 0)
+            $lastRun = & $fmtTime $t.LastRunTime
+            $result = if (-not $lastRun -and $hex -in @('0x0','0x41303')) { '還沒執行過' }
+                      elseif ($resultText.ContainsKey($hex)) { $resultText[$hex] } else { "代碼 $hex" }
+            $ok = $hex -in @('0x0','0x41300','0x41301','0x41303','0x41304') -or -not $lastRun
+            $triggers = @(); $actions = @(); $runAs = ''; $author = ''; $desc = ''; $highest = $false
+            try {
+                $def = $t.Definition
+                foreach ($tr in $def.Triggers) { $triggers += (& $fmtTrigger $tr) }
+                foreach ($a in $def.Actions) {
+                    $actions += switch ([int]$a.Type) {
+                        0 { ("$($a.Path) $($a.Arguments)").Trim() }
+                        5 { "COM 元件 $($a.ClassId)" }
+                        6 { '寄送電子郵件（Windows 已淘汰）' }
+                        7 { '顯示訊息（Windows 已淘汰）' }
+                        default { "其他動作（類型 $($a.Type)）" }
+                    }
+                }
+                $p = $def.Principal
+                $runAs = if ($p.UserId) { $p.UserId } elseif ($p.GroupId) { "群組 $($p.GroupId)" } else { '' }
+                if ($runAs -in @('S-1-5-18','SYSTEM','NT AUTHORITY\SYSTEM')) { $runAs = 'SYSTEM' }
+                elseif ($runAs -in @('S-1-5-19','LOCAL SERVICE')) { $runAs = 'LOCAL SERVICE' }
+                elseif ($runAs -in @('S-1-5-20','NETWORK SERVICE')) { $runAs = 'NETWORK SERVICE' }
+                $highest = ([int]$p.RunLevel -eq 1)
+                $author = [string]$def.RegistrationInfo.Author
+                $desc = [string]$def.RegistrationInfo.Description
+            } catch { $actions += '（沒有權限讀取內容）' }
+            $folder = Split-Path -Parent $t.Path; if (-not $folder) { $folder = '\' }
+            $source = if ($t.Path -like '\Microsoft\*') { 'Microsoft' } elseif ($t.Name -like 'OPS-*') { 'OPS-command' } else { '其他' }
+            $rows.Add([pscustomobject]@{
+                Name=$t.Name; Path=$t.Path; Folder=$folder; Source=$source; State=$state
+                Trigger=$(if ($triggers.Count) { (@($triggers | Select-Object -Unique) -join '；') } else { '（沒有排定的觸發）' }); Triggers=$triggers; Action=($actions -join '；'); Actions=$actions
+                Next=(& $fmtTime $t.NextRunTime); Last=$lastRun; Result=$result; ResultCode=$hex; ResultOk=$ok
+                RunAs=$runAs; Highest=$highest; Author=$author; Description=$desc
+            })
+        }
+    }
+    [System.Runtime.InteropServices.Marshal]::ReleaseComObject($svc) | Out-Null
+    $rows | Sort-Object @{e={ switch ($_.Source) { 'OPS-command' {0} '其他' {1} default {2} } }}, Path
+}
+
+function Show-AllTaskDetail($r, $owner) {
+    $lines = @(
+        "名稱：$($r.Name)"
+        "位置：$($r.Path)"
+        "來源：$($r.Source)"
+        "狀態：$($r.State)"
+        "執行身分：$($r.RunAs)$(if ($r.Highest) { '（最高權限）' })"
+    )
+    if ($r.Author) { $lines += "作者：$($r.Author)" }
+    if ($r.Description) { $lines += "說明：$($r.Description)" }
+    $lines += ''
+    $lines += '觸發時機：'
+    if ($r.Triggers.Count) { $lines += @($r.Triggers | ForEach-Object { "  ・$_" }) } else { $lines += '  （沒有排定的觸發：可能由 Windows 自動維護、其他程式呼叫或手動執行）' }
+    $lines += ''
+    $lines += '執行內容：'
+    if ($r.Actions.Count) { $lines += @($r.Actions | ForEach-Object { "  ・$_" }) } else { $lines += '  （沒有動作）' }
+    $lines += ''
+    $lines += "上次執行：$(if ($r.Last) { $r.Last } else { '（沒有紀錄）' })"
+    $lines += "上次結果：$($r.Result)（$($r.ResultCode)）"
+    $lines += "下次執行：$(if ($r.Next) { $r.Next } else { '（沒有排定）' })"
+
+    $d = New-Object Windows.Forms.Form
+    $d.Text = "排程詳細資料｜$($r.Name)"
+    $d.Size = New-Object Drawing.Size(720, 520)
+    $d.MinimumSize = New-Object Drawing.Size(480, 320)
+    $d.StartPosition = 'CenterParent'
+    $d.Font = New-Object Drawing.Font('Microsoft JhengHei UI', 10)
+    $d.BackColor = [Drawing.Color]::FromArgb(241,245,249)
+    $box = New-Object Windows.Forms.TextBox
+    $box.Multiline = $true; $box.ReadOnly = $true; $box.ScrollBars = 'Both'; $box.WordWrap = $false
+    $box.Dock = 'Fill'; $box.BackColor = [Drawing.Color]::White
+    $box.Text = $lines -join "`r`n"
+    $bar = New-Object Windows.Forms.Panel; $bar.Dock = 'Bottom'; $bar.Height = 44
+    $close = New-Object Windows.Forms.Button; $close.Text = '關閉'; $close.Size = New-Object Drawing.Size(90, 30)
+    $close.Anchor = 'Top,Right'; $close.Location = New-Object Drawing.Point(($bar.Width - 100), 7); $close.DialogResult = 'Cancel'
+    $bar.Controls.Add($close)
+    $d.Controls.Add($box); $d.Controls.Add($bar)
+    $d.CancelButton = $close
+    $d.Add_Shown({ $box.SelectionStart = 0; $box.SelectionLength = 0; $close.Focus() }.GetNewClosure())
+    [void]$d.ShowDialog($owner)
+    $d.Dispose()
+}
+
+function New-AllTasksTab {
+    $tab = New-Object Windows.Forms.TabPage; $tab.Text = '所有排程（唯讀）'
+    $tab.BackColor = [Drawing.Color]::FromArgb(241,245,249)
+
+    $top = New-Object Windows.Forms.FlowLayoutPanel; $top.Dock = 'Top'; $top.Height = 40; $top.FlowDirection = 'LeftToRight'; $top.Padding = New-Object Windows.Forms.Padding(4,6,0,0)
+    $searchLabel = New-Object Windows.Forms.Label; $searchLabel.Text = '搜尋'; $searchLabel.AutoSize = $true; $searchLabel.Margin = New-Object Windows.Forms.Padding(3,5,3,0)
+    $search = New-Object Windows.Forms.TextBox; $search.Width = 240
+    $showMs = New-Object Windows.Forms.CheckBox; $showMs.Text = '顯示 Microsoft 的排程（Windows、Office 等，\Microsoft\ 底下）'; $showMs.AutoSize = $true; $showMs.Margin = New-Object Windows.Forms.Padding(14,4,3,0)
+    $count = New-Object Windows.Forms.Label; $count.AutoSize = $true; $count.Margin = New-Object Windows.Forms.Padding(14,5,3,0); $count.ForeColor = [Drawing.Color]::FromArgb(71,85,105)
+    $top.Controls.AddRange(@($searchLabel, $search, $showMs, $count))
+
+    $grid = New-Object Windows.Forms.DataGridView; $grid.Dock = 'Fill'; $grid.ReadOnly = $true; $grid.AllowUserToAddRows = $false; $grid.AllowUserToDeleteRows = $false; $grid.AllowUserToResizeRows = $false; $grid.SelectionMode = 'FullRowSelect'; $grid.MultiSelect = $false; $grid.AutoSizeColumnsMode = 'Fill'; $grid.RowHeadersVisible = $false; $grid.BackgroundColor = [Drawing.Color]::White; $grid.EnableHeadersVisualStyles = $false; $grid.ColumnHeadersDefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(30,58,138); $grid.ColumnHeadersDefaultCellStyle.ForeColor = [Drawing.Color]::White; $grid.DefaultCellStyle.Font = New-Object Drawing.Font('Microsoft JhengHei UI',9); $grid.AlternatingRowsDefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(239,246,255); $grid.ShowCellToolTips = $true
+    foreach ($c in @(@('Name','名稱',18), @('Source','來源',9), @('State','狀態',7), @('Trigger','執行時機',20), @('Next','下次執行',11), @('Last','上次執行',11), @('Result','上次結果',13), @('Action','執行內容',24))) {
+        $i = $grid.Columns.Add($c[0], $c[1]); $grid.Columns[$i].FillWeight = $c[2]
+    }
+    foreach ($n in @('State','Next','Last')) { $grid.Columns[$n].AutoSizeMode = 'AllCells' }
+
+    $panel = New-Object Windows.Forms.FlowLayoutPanel; $panel.Dock = 'Bottom'; $panel.Height = 48; $panel.FlowDirection = 'LeftToRight'; $panel.WrapContents = $false
+    $detail = New-Object Windows.Forms.Button; $detail.Text = '詳細資料'; $detail.Width = 100; $detail.FlatStyle = 'Flat'; $detail.BackColor = [Drawing.Color]::FromArgb(30,64,175); $detail.ForeColor = [Drawing.Color]::White
+    $refresh = New-Object Windows.Forms.Button; $refresh.Text = '重新整理'; $refresh.Width = 90; $refresh.FlatStyle = 'Flat'; $refresh.BackColor = [Drawing.Color]::FromArgb(219,234,254); $refresh.ForeColor = [Drawing.Color]::FromArgb(30,64,175)
+    $native = New-Object Windows.Forms.Button; $native.Text = '開啟工作排程器'; $native.Width = 130; $native.FlatStyle = 'Flat'; $native.BackColor = [Drawing.Color]::FromArgb(219,234,254); $native.ForeColor = [Drawing.Color]::FromArgb(30,64,175)
+    $hint = New-Object Windows.Forms.Label; $hint.AutoSize = $true; $hint.Margin = New-Object Windows.Forms.Padding(10,10,3,0); $hint.ForeColor = [Drawing.Color]::FromArgb(71,85,105)
+    $hint.Text = '這頁只能看，要修改請用「工作排程器」。'
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $isAdmin) { $hint.Text += '（不是系統管理員，部分系統排程看不到）' }
+    $panel.Controls.AddRange(@($detail, $refresh, $native, $hint))
+    $tab.Controls.Add($grid); $tab.Controls.Add($top); $tab.Controls.Add($panel)
+
+    # 閉包會複製變數，所以把要共用、會變動的資料放在同一個雜湊表裡
+    $st = @{ Rows = @(); Loaded = $false }
+    $getRows = ${function:Get-AllTaskRows}; $showDetail = ${function:Show-AllTaskDetail}
+    $fill = {
+        $q = $search.Text.Trim()
+        $grid.SuspendLayout(); $grid.Rows.Clear()
+        $hidden = 0; $shown = 0
+        foreach ($r in $st.Rows) {
+            if (-not $showMs.Checked -and $r.Source -eq 'Microsoft') { $hidden++; continue }
+            if ($q -and ("$($r.Path) $($r.Action) $($r.Description) $($r.Author) $($r.RunAs)").IndexOf($q, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+            $i = $grid.Rows.Add($r.Name, $r.Source, $r.State, $r.Trigger, $r.Next, $r.Last, $r.Result, $r.Action)
+            $row = $grid.Rows[$i]; $row.Tag = $r
+            $row.Cells[0].ToolTipText = $r.Path
+            if (-not $r.ResultOk) { $row.Cells[6].Style.BackColor = [Drawing.Color]::FromArgb(254,226,226); $row.Cells[6].Style.ForeColor = [Drawing.Color]::FromArgb(153,27,27) }
+            if ($r.State -eq '已停用') { $row.DefaultCellStyle.ForeColor = [Drawing.Color]::FromArgb(148,163,184) }
+            $shown++
+        }
+        $grid.ResumeLayout()
+        $count.Text = "顯示 $shown 個" + $(if ($hidden) { "（另有 $hidden 個 Microsoft 的排程已隱藏）" } else { '' })
+    }.GetNewClosure()
+    $load = {
+        $tab.Cursor = [Windows.Forms.Cursors]::WaitCursor
+        $count.Text = '讀取中…'; $count.Refresh()
+        try { $st.Rows = @(& $getRows); $st.Loaded = $true; & $fill }
+        catch { $count.Text = '讀取失敗'; [Windows.Forms.MessageBox]::Show($_.Exception.Message,'讀取排程失敗','OK','Error') | Out-Null }
+        finally { $tab.Cursor = [Windows.Forms.Cursors]::Default }
+    }.GetNewClosure()
+    $open = {
+        if ($grid.SelectedRows.Count -eq 0) { return }
+        & $showDetail $grid.SelectedRows[0].Tag $tab.FindForm()
+    }.GetNewClosure()
+
+    # 切到這一頁才讀，打開面板不用等
+    $tab.add_VisibleChanged({ if ($tab.Visible -and -not $st.Loaded) { & $load } }.GetNewClosure())
+    $search.add_TextChanged($fill)
+    $showMs.add_CheckedChanged($fill)
+    $refresh.Add_Click($load)
+    $detail.Add_Click($open)
+    $grid.add_CellDoubleClick({ param($s, $e) if ($e.RowIndex -ge 0) { & $open } }.GetNewClosure())
+    $native.Add_Click({ Start-Process "$env:SystemRoot\System32\taskschd.msc" })
+    return $tab
+}
+
 $form=New-Object Windows.Forms.Form
 $form.Text='OPS-command｜自動排程管理'
 $form.Size=New-Object Drawing.Size(1000,540)
@@ -193,8 +417,9 @@ $tabs=New-Object Windows.Forms.TabControl; $tabs.Dock='Fill'
 $tabs.TabPages.Add((New-TaskTab '登入啟動程式' 'Startup'))
 $tabs.TabPages.Add((New-TaskTab '定時執行腳本' 'Script'))
 $tabs.TabPages.Add((New-TaskTab '關機／重新啟動' 'Shutdown'))
+$tabs.TabPages.Add((New-AllTasksTab))
 $footer=New-Object Windows.Forms.Panel; $footer.Dock='Bottom'; $footer.Height=42; $footer.BackColor=[Drawing.Color]::FromArgb(219,234,254)
-$note=New-Object Windows.Forms.Label; $note.Dock='Fill'; $note.Text='此面板只管理 OPS-command 建立的排程；倒數期間可用 shutdown /a 取消關機／重啟。'; $note.TextAlign='MiddleLeft'; $note.Padding=New-Object Windows.Forms.Padding(8,0,0,0); $footer.Controls.Add($note)
+$note=New-Object Windows.Forms.Label; $note.Dock='Fill'; $note.Text='前三頁只管理 OPS-command 建立的排程；「所有排程」可查看這台電腦全部的排程。倒數期間可用 shutdown /a 取消關機／重啟。'; $note.TextAlign='MiddleLeft'; $note.Padding=New-Object Windows.Forms.Padding(8,0,0,0); $footer.Controls.Add($note)
 $closePanel=New-Object Windows.Forms.Button; $closePanel.Text='關閉視窗'; $closePanel.Dock='Right'; $closePanel.Width=100; $closePanel.FlatStyle='Flat'; $closePanel.BackColor=[Drawing.Color]::FromArgb(254,226,226); $closePanel.ForeColor=[Drawing.Color]::FromArgb(153,27,27); $closePanel.Add_Click({$form.Close()}.GetNewClosure()); $footer.Controls.Add($closePanel)
 $form.Controls.Add($tabs); $form.Controls.Add($footer)
 [void]$form.ShowDialog()
