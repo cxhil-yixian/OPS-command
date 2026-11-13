@@ -11,6 +11,16 @@
 
 ## [Unreleased]
 
+### Windows 一行指令（ops-win.ps1）
+
+- **修正：剛推新版的 5 分鐘內，一行指令會開到舊版**（你實際遇到：推 2.6.0 後執行，開到 2.5.0）。
+  原因是 raw.githubusercontent.com 的 `main` 網址有 5 分鐘快取，程式和 SHA256SUMS 都是舊的、彼此對得上，
+  所以核對照樣通過。現在先問 GitHub API `main` 指到哪個 commit，改用那個 commit 的網址下載（內容固定）；
+  畫面多一行「版本  main 最新 commit xxxxxxx」。API 問不到（離線、被擋、超過每小時 60 次）就照舊用 `main`，
+  並註明可能要等 5 分鐘。有設 `OPS_RAW_BASE` / `-BaseUrl` 時不受影響。
+  實測：查得到時下載的是 commit 網址、開到 2.6.0；把 API 網址改成連不到的，退回 `main` 並顯示說明，兩種都核對通過。
+  `OPS-command.exe` 還是用 `main` 網址（要重新編譯才能改，見 TODO）。
+
 ### Windows 圖形介面 2.6.0
 
 - **常用登錄檔設定加 10 項**（你問還有沒有其他好用的），共 24 項：

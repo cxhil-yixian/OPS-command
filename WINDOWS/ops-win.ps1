@@ -37,9 +37,24 @@ try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 
 # 參數也吃環境變數：irm | iex 這種跑法沒辦法帶參數，設環境變數最省事。
+$pinNote = ''
 if (-not $BaseUrl) {
     if ($env:OPS_RAW_BASE) { $BaseUrl = $env:OPS_RAW_BASE }
-    else { $BaseUrl = 'https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main' }
+    else {
+        $BaseUrl = 'https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main'
+        # raw.githubusercontent.com 的 main 網址有 5 分鐘快取（Cache-Control: max-age=300）：剛推新版的幾分鐘內
+        # 會拿到舊版程式＋舊版 SHA256SUMS，核對照樣通過、開出來是舊版（實測：推 2.6.0 後立刻跑，開到 2.5.0）。
+        # 先問 GitHub API main 現在指到哪個 commit，改用那個 commit 的網址下載（內容固定、不會新舊混雜）。
+        # API 也有 60 秒快取、未登入每小時 60 次；問不到就照舊用 main，不影響使用。
+        try {
+            $ref = Invoke-RestMethod -Uri 'https://api.github.com/repos/cxhil-yixian/OPS-command/git/ref/heads/main' -UseBasicParsing -TimeoutSec 8
+            $sha = [string]$ref.object.sha
+            if ($sha -match '^[0-9a-f]{40}$') {
+                $BaseUrl = "https://raw.githubusercontent.com/cxhil-yixian/OPS-command/$sha"
+                $pinNote = "main 最新 commit $($sha.Substring(0, 7))"
+            }
+        } catch { $pinNote = '查不到最新 commit，改用 main（剛推的新版可能要等 5 分鐘）' }
+    }
 }
 if (-not $UseCached -and $env:OPS_USE_CACHED -eq '1') { $UseCached = $true }
 
@@ -65,6 +80,7 @@ function Get-OpsLfSha256([string]$Path) {
 Write-Host ""
 Write-Host " OPS-command Windows 工具" -ForegroundColor Cyan
 Write-Host " 來源  $url"
+if ($pinNote) { Write-Host " 版本  $pinNote" }
 Write-Host " 落地  $dst"
 Write-Host " 面板  $gui"
 Write-Host ""
