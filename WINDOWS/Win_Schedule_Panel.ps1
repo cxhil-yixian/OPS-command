@@ -19,11 +19,16 @@ function New-TaskDefinition($meta, $action, $trigger) {
     Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $description -ErrorAction Stop | Out-Null
 }
 
-function Get-ScheduleTrigger($mode, $date, $days) {
+function Get-ScheduleTrigger($mode, $date, $days, $every) {
     switch ($mode) {
         '登入時' { return New-ScheduledTaskTrigger -AtLogOn -User $script:CurrentUser }
         '單次'   { return New-ScheduledTaskTrigger -Once -At $date }
         '每天'   { return New-ScheduledTaskTrigger -Daily -At $date }
+        '每隔一段時間' {
+            if (-not $every) { throw '請選擇間隔。' }
+            # 不給 -RepetitionDuration = 無限期重複
+            return New-ScheduledTaskTrigger -Once -At $date -RepetitionInterval $every
+        }
         '每週'   {
             if (-not $days -or $days.Count -eq 0) { throw '每週排程至少要選一天。' }
             return New-ScheduledTaskTrigger -Weekly -DaysOfWeek $days -At $date
@@ -58,11 +63,29 @@ function Show-TaskDialog($kind, $scheduleAction, $registerAction) {
     $browse = New-Object Windows.Forms.Button; $browse.Text='瀏覽…'; $browse.Location=New-Object Drawing.Point(470, 59); $browse.Size=New-Object Drawing.Size(80,26); $form.Controls.Add($browse)
     $argBox = New-Object Windows.Forms.TextBox; Add-Row $(if($kind -eq 'Shutdown'){'延遲秒數'} else {'參數'}) $argBox 2
     $schedule = New-Object Windows.Forms.ComboBox; $schedule.DropDownStyle='DropDownList'; [void]$schedule.Items.AddRange(@('單次','每天','每週'))
+    # 定時腳本才有「每隔」；關機每 10 分鐘重複沒有意義
+    if ($kind -eq 'Script') { [void]$schedule.Items.Add('每隔一段時間') }
     if ($kind -eq 'Startup') { [void]$schedule.Items.Add('登入時') }; $schedule.SelectedItem=if($kind -eq 'Startup'){'登入時'}else{'每天'}; Add-Row '執行時機' $schedule 3
-    $date = New-Object Windows.Forms.DateTimePicker; $date.Format='Custom'; $date.CustomFormat='yyyy/MM/dd HH:mm'; $date.ShowUpDown=$true; $date.Value=(Get-Date).Date.AddHours(23); Add-Row '日期／時間' $date 4
+    $date = New-Object Windows.Forms.DateTimePicker; $date.Format='Custom'; $date.CustomFormat='HH:mm'; $date.ShowUpDown=$true; $date.Value=(Get-Date).Date.AddHours(23); Add-Row '時間' $date 4
+    $date.Width = 200
+    $dateLabel = $form.Controls | Where-Object { $_ -is [Windows.Forms.Label] -and $_.Text -eq '時間' } | Select-Object -First 1
+    # 「每隔」的間隔放在時間右邊同一列
+    $everyList = [ordered]@{ '5 分鐘'=5; '10 分鐘'=10; '15 分鐘'=15; '20 分鐘'=20; '30 分鐘'=30; '1 小時'=60; '2 小時'=120; '3 小時'=180; '4 小時'=240; '6 小時'=360; '8 小時'=480; '12 小時'=720 }
+    $everyLabel = New-Object Windows.Forms.Label; $everyLabel.Text='每隔'; $everyLabel.Location=New-Object Drawing.Point(365, 188); $everyLabel.Size=New-Object Drawing.Size(45,25); $everyLabel.Visible=$false; $form.Controls.Add($everyLabel)
+    $every = New-Object Windows.Forms.ComboBox; $every.DropDownStyle='DropDownList'; [void]$every.Items.AddRange([object[]]@($everyList.Keys)); $every.SelectedItem='30 分鐘'
+    $every.Location=New-Object Drawing.Point(410, 185); $every.Size=New-Object Drawing.Size(140, 26); $every.Visible=$false; $form.Controls.Add($every)
     $days = New-Object Windows.Forms.CheckedListBox; $days.Items.AddRange([object[]]@($dayMap.Keys)); $days.CheckOnClick=$true; $days.Location=New-Object Drawing.Point(150, 227); $days.Size=New-Object Drawing.Size(400, 52); $days.Visible=$false; $form.Controls.Add($days)
     $dayLabel = New-Object Windows.Forms.Label; $dayLabel.Text='每週日期'; $dayLabel.Location=New-Object Drawing.Point(18,230); $dayLabel.Size=New-Object Drawing.Size(125,25); $dayLabel.Visible=$false; $form.Controls.Add($dayLabel)
-    $schedule.add_SelectedIndexChanged({ $show=$schedule.SelectedItem -eq '每週'; $days.Visible=$show; $dayLabel.Visible=$show })
+    $syncSchedule = {
+        $mode = [string]$schedule.SelectedItem
+        $show=$mode -eq '每週'; $days.Visible=$show; $dayLabel.Visible=$show
+        $showEvery = ($mode -eq '每隔一段時間'); $everyLabel.Visible = $showEvery; $every.Visible = $showEvery
+        # 單次才需要選日期；每天、每週、每隔只選時間
+        $date.CustomFormat = if ($mode -eq '單次') { 'yyyy/MM/dd HH:mm' } else { 'HH:mm' }
+        $date.Enabled = ($mode -ne '登入時')
+        if ($dateLabel) { $dateLabel.Text = switch ($mode) { '單次' { '日期／時間' } '每隔一段時間' { '從幾點開始' } default { '時間' } } }
+    }
+    $schedule.add_SelectedIndexChanged($syncSchedule); & $syncSchedule
 
     $browse.Add_Click({
         $dlg=New-Object Windows.Forms.OpenFileDialog
@@ -91,14 +114,20 @@ function Show-TaskDialog($kind, $scheduleAction, $registerAction) {
         $label=$nameBox.Text.Trim()
         $dayNames=@($days.CheckedItems | ForEach-Object { $dayMap[[string]$_] })
         if (-not $label) { throw '請輸入顯示名稱。' }
-        $meta=[ordered]@{ Type=$kind; Name=$label; Path=$pathBox.Text.Trim(); Arguments=$argBox.Text.Trim(); Schedule=[string]$schedule.SelectedItem; At=$date.Value.ToString('yyyy-MM-dd HH:mm'); Days=@($days.CheckedItems) }
+        $mode=[string]$schedule.SelectedItem
+        # 每天／每週／每隔：日期一律用今天，只取時間（時間已過 Windows 會從下一次開始）
+        $at = if ($mode -eq '單次') { $date.Value } else { (Get-Date).Date.Add($date.Value.TimeOfDay) }
+        if ($mode -eq '單次' -and $at -le (Get-Date)) { throw "單次的時間 $($at.ToString('yyyy/MM/dd HH:mm')) 已經過了，請改成之後的時間。" }
+        $everySpan = if ($mode -eq '每隔一段時間') { New-TimeSpan -Minutes $everyList[[string]$every.SelectedItem] } else { $null }
+        $atText = switch ($mode) { '單次' { $at.ToString('yyyy-MM-dd HH:mm') } '每隔一段時間' { "從 $($at.ToString('HH:mm')) 起每 $($every.SelectedItem)" } default { $at.ToString('HH:mm') } }
+        $meta=[ordered]@{ Type=$kind; Name=$label; Path=$pathBox.Text.Trim(); Arguments=$argBox.Text.Trim(); Schedule=$mode; At=$atText; Days=@($days.CheckedItems) }
         if ($kind -eq 'Startup') {
             if (-not (Test-Path $meta.Path -PathType Leaf) -or [IO.Path]::GetExtension($meta.Path) -ne '.exe') { throw '請選擇存在的 .exe 程式。' }
-            $trigger=& $scheduleAction '登入時' $date.Value @()
+            $trigger=& $scheduleAction '登入時' $at @() $null
             $action=New-ScheduledTaskAction -Execute $meta.Path -Argument $meta.Arguments -WorkingDirectory (Split-Path $meta.Path)
         } elseif ($kind -eq 'Script') {
             if (-not (Test-Path $meta.Path -PathType Leaf)) { throw '請選擇存在的腳本檔案。' }
-            $trigger=& $scheduleAction $meta.Schedule $date.Value $dayNames
+            $trigger=& $scheduleAction $meta.Schedule $at $dayNames $everySpan
             $ext=[IO.Path]::GetExtension($meta.Path).ToLowerInvariant()
             if ($ext -eq '.ps1') { $exe="$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"; $actionArgs="-NoProfile -ExecutionPolicy Bypass -File `"$($meta.Path)`" $($meta.Arguments)" }
             elseif ($ext -in @('.bat','.cmd')) {
@@ -112,7 +141,7 @@ function Show-TaskDialog($kind, $scheduleAction, $registerAction) {
         } else {
             if ($meta.Arguments -notmatch '^\d+$' -or [int]$meta.Arguments -lt 0 -or [int]$meta.Arguments -gt 3600) { throw '延遲秒數請輸入 0 到 3600。' }
             $meta['Action']=[string]$typeBox.SelectedItem
-            $trigger=& $scheduleAction $meta.Schedule $date.Value $dayNames
+            $trigger=& $scheduleAction $meta.Schedule $at $dayNames $everySpan
             $shutdownMode=if($meta.Action -eq '關機'){'/s'}else{'/r'}
             $action=New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\shutdown.exe" -Argument "$shutdownMode /t $($meta.Arguments)"
         }
@@ -157,7 +186,8 @@ function New-TaskTab($title, $type) {
         $grid.Rows.Clear()
         foreach($item in (& $getManagedTasks | Where-Object {$_.Meta.Type -eq $type})) {
             $m=$item.Meta
-            $detail=if($type -eq 'Startup') { "登入時：$($m.Path) $($m.Arguments)" } elseif($type -eq 'Script') { "$($m.Schedule) $($m.At)：$($m.Path) $($m.Arguments)" } else { "$($m.Schedule) $($m.At)：$($m.Action)" }
+            $when=if($m.Schedule -eq '每隔一段時間') { $m.At } elseif($m.Schedule -eq '每週') { "每週$((@($m.Days) | ForEach-Object { ([string]$_).Substring(2) }) -join '、') $($m.At)" } else { "$($m.Schedule) $($m.At)" }
+            $detail=if($type -eq 'Startup') { "登入時：$($m.Path) $($m.Arguments)" } elseif($type -eq 'Script') { "$when：$($m.Path) $($m.Arguments)" } else { "$when：$($m.Action)" }
             $state=if($item.State -eq 'Disabled'){'已停用'}else{'已啟用'}
             $i=$grid.Rows.Add($m.Name,$detail,$state); $grid.Rows[$i].Tag=$item.Task.TaskName
         }
@@ -470,11 +500,13 @@ function Invoke-AllTaskOp($op, $r, $owner, $log) {
                 $f.Font = New-Object Drawing.Font('Microsoft JhengHei UI', 10)
                 $f.BackColor = [Drawing.Color]::FromArgb(241,245,249)
                 $y = 16
+                $lbls = @{}
                 $addRow = {
                     param($label, $ctl, $h)
                     $l = New-Object Windows.Forms.Label; $l.Text = $label; $l.Location = New-Object Drawing.Point(16, ($y + 3)); $l.Size = New-Object Drawing.Size(120, 24)
                     $ctl.Location = New-Object Drawing.Point(140, $y); $ctl.Size = New-Object Drawing.Size(462, $h)
                     $f.Controls.Add($l); $f.Controls.Add($ctl)
+                    if ($label) { $lbls[$label] = $l }
                     Set-Variable -Name y -Value ($y + $h + 12) -Scope 1
                 }
                 $where = New-Object Windows.Forms.Label; $where.Text = $r.Path; $where.AutoEllipsis = $true; & $addRow '位置' $where 24
@@ -486,20 +518,44 @@ function Invoke-AllTaskOp($op, $r, $owner, $log) {
                 if ($canAct) { $exe.Text = [string]$acts[0].Path; $arg.Text = [string]$acts[0].Arguments; $wd.Text = [string]$acts[0].WorkingDirectory }
                 else { foreach ($c in @($exe, $arg, $wd, $browse)) { $c.Enabled = $false }; $exe.Text = '（這個排程有多個動作或不是執行程式，只能改執行時機）' }
                 $when = New-Object Windows.Forms.ComboBox; $when.DropDownStyle = 'DropDownList'
-                [void]$when.Items.AddRange(@("保持原本：$($r.Trigger)", '單次', '每天', '每週', '登入時（目前使用者）', '開機時')); $when.SelectedIndex = 0
+                # 0 保持原本 1 單次 2 每天 3 每週 4 每隔一段時間 5 登入時 6 開機時
+                [void]$when.Items.AddRange(@("保持原本：$($r.Trigger)", '單次（指定日期與時間）', '每天（指定時間）', '每週（指定星期幾與時間）', '每隔一段時間重複（例如每 10 分鐘）', '登入時（目前使用者）', '開機時')); $when.SelectedIndex = 0
                 & $addRow '執行時機' $when 26
                 $date = New-Object Windows.Forms.DateTimePicker; $date.Format = 'Custom'; $date.CustomFormat = 'yyyy/MM/dd HH:mm'; $date.ShowUpDown = $true
                 $date.Value = (Get-Date).Date.AddDays(1).AddHours(3)
                 try { $first = @($def.Triggers)[0]; if ($first -and $first.StartBoundary) { $date.Value = [datetime]$first.StartBoundary } } catch { }
-                & $addRow '日期／時間' $date 26
+                & $addRow '時間' $date 26
+                $date.Width = 200
+                $every = New-Object Windows.Forms.ComboBox; $every.DropDownStyle = 'DropDownList'
+                $everyList = [ordered]@{ '5 分鐘'='PT5M'; '10 分鐘'='PT10M'; '15 分鐘'='PT15M'; '20 分鐘'='PT20M'; '30 分鐘'='PT30M'; '1 小時'='PT1H'; '2 小時'='PT2H'; '3 小時'='PT3H'; '4 小時'='PT4H'; '6 小時'='PT6H'; '8 小時'='PT8H'; '12 小時'='PT12H' }
+                [void]$every.Items.AddRange([object[]]@($everyList.Keys)); $every.SelectedItem = '30 分鐘'
+                & $addRow '每隔' $every 26
+                $every.Width = 200
                 $days = New-Object Windows.Forms.CheckedListBox; $days.CheckOnClick = $true; $days.MultiColumn = $true; $days.ColumnWidth = 110; [void]$days.Items.AddRange([object[]]$dayKeys)
                 & $addRow '每週日期' $days 48
+                $hintWhen = New-Object Windows.Forms.Label; $hintWhen.ForeColor = [Drawing.Color]::FromArgb(71,85,105); $hintWhen.AutoSize = $false
+                & $addRow '' $hintWhen 22
                 $desc = New-Object Windows.Forms.TextBox; $desc.Text = [string]$def.RegistrationInfo.Description; & $addRow '說明' $desc 26
                 $en = New-Object Windows.Forms.CheckBox; $en.Text = '啟用這個排程'; $en.Checked = [bool]$def.Settings.Enabled; & $addRow '' $en 26
                 $note = New-Object Windows.Forms.Label; $note.ForeColor = [Drawing.Color]::FromArgb(71,85,105); $note.AutoSize = $false
                 $note.Text = '存檔前會先備份原本的設定，之後可用「還原備份」放回。' + $(if ($isMs) { "`r`n⚠ 這是 Microsoft 的系統排程，改錯可能讓相關的自動維護失效。" } else { '' })
                 & $addRow '' $note 40
-                $sync = { $m = $when.SelectedIndex; $date.Enabled = ($m -in 1, 2, 3); $days.Enabled = ($m -eq 3) }.GetNewClosure()
+                $sync = {
+                    $m = $when.SelectedIndex
+                    $date.Enabled = ($m -in 1, 2, 3, 4); $days.Enabled = ($m -eq 3); $every.Enabled = ($m -eq 4)
+                    # 單次才需要日期；每天／每週／每隔只看時間，日期由程式自動用今天
+                    $date.CustomFormat = if ($m -eq 1) { 'yyyy/MM/dd HH:mm' } else { 'HH:mm' }
+                    $lbls['時間'].Text = switch ($m) { 1 { '日期／時間' } 4 { '從幾點開始' } default { '時間' } }
+                    $hintWhen.Text = switch ($m) {
+                        0 { '執行時機不變。要改請從上面的清單選。' }
+                        1 { '只在指定的那一天、那個時間執行一次。' }
+                        2 { '每天在這個時間執行（不用選日期）。' }
+                        3 { '每週勾選的那幾天、在這個時間執行。' }
+                        4 { '從這個時間開始，之後每隔一段時間執行一次，一直重複。' }
+                        5 { '目前這個帳號登入 Windows 時執行。' }
+                        6 { '電腦開機時執行（不用有人登入）。' }
+                    }
+                }.GetNewClosure()
                 $when.add_SelectedIndexChanged($sync); & $sync
                 $browse.Add_Click({
                     $o = New-Object Windows.Forms.OpenFileDialog; $o.Filter = '程式或腳本 (*.exe;*.bat;*.cmd;*.ps1)|*.exe;*.bat;*.cmd;*.ps1|所有檔案 (*.*)|*.*'
@@ -526,14 +582,18 @@ function Invoke-AllTaskOp($op, $r, $owner, $log) {
                         $m = $when.SelectedIndex
                         $mask = 0; for ($i = 0; $i -lt 7; $i++) { if ($days.GetItemChecked($i)) { $mask = $mask -bor $dayBits[$i] } }
                         if ($m -eq 3 -and $mask -eq 0) { throw '每週至少要選一天。' }
+                        if ($m -eq 1 -and $date.Value -le (Get-Date)) { throw "單次的時間 $($date.Value.ToString('yyyy/MM/dd HH:mm')) 已經過了，請改成之後的時間。" }
+                        # 每天／每週／每隔：日期一律用今天，只取時間（時間已過的話 Windows 會從下一次開始）
+                        $when0 = if ($m -eq 1) { $date.Value } else { (Get-Date).Date.Add($date.Value.TimeOfDay) }
                         if ($m -gt 0) {
                             $hm = $date.Value.ToString('HH:mm')
                             $newWhen = switch ($m) {
                                 1 { '單次 ' + $date.Value.ToString('yyyy/MM/dd HH:mm') }
                                 2 { "每天 $hm" }
                                 3 { '每週' + ((@(0..6 | Where-Object { $days.GetItemChecked($_) } | ForEach-Object { $dayKeys[$_].Substring(2) })) -join '、') + " $hm" }
-                                4 { '目前使用者登入時' }
-                                5 { '開機時' }
+                                4 { "從 $hm 起每 $($every.SelectedItem)重複" }
+                                5 { '目前使用者登入時' }
+                                6 { '開機時' }
                             }
                             $changes += "執行時機：$($r.Trigger) → $newWhen"
                         }
@@ -546,13 +606,15 @@ function Invoke-AllTaskOp($op, $r, $owner, $log) {
                         if ($canAct) { $a.Path = $ne; $a.Arguments = $na; $a.WorkingDirectory = $nw }
                         if ($m -gt 0) {
                             $def.Triggers.Clear()
-                            $start = $date.Value.ToString('yyyy-MM-ddTHH:mm:ss')
+                            $start = $when0.ToString('yyyy-MM-ddTHH:mm:ss')
                             switch ($m) {
                                 1 { $t = $def.Triggers.Create(1); $t.StartBoundary = $start }
                                 2 { $t = $def.Triggers.Create(2); $t.StartBoundary = $start; $t.DaysInterval = 1 }
                                 3 { $t = $def.Triggers.Create(3); $t.StartBoundary = $start; $t.DaysOfWeek = $mask; $t.WeeksInterval = 1 }
-                                4 { $t = $def.Triggers.Create(9); $t.UserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
-                                5 { $t = $def.Triggers.Create(8) }
+                                # 時間觸發 + 重複間隔、不設持續時間 = 無限期重複（同工作排程器的「無限期」）
+                                4 { $t = $def.Triggers.Create(1); $t.StartBoundary = $start; $t.Repetition.Interval = $everyList[[string]$every.SelectedItem]; $t.Repetition.StopAtDurationEnd = $false }
+                                5 { $t = $def.Triggers.Create(9); $t.UserId = [Security.Principal.WindowsIdentity]::GetCurrent().Name }
+                                6 { $t = $def.Triggers.Create(8) }
                             }
                         }
                         $def.RegistrationInfo.Description = $desc.Text

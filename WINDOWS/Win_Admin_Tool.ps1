@@ -3,7 +3,7 @@
 # 工具版本（Windows 圖形介面自己的版本號，跟 Linux ops.sh 的版本無關）。
 # 改了程式就遞增：修 bug 加第三段、加功能加第二段、介面大改加第一段（見 README「版本號」）。
 # 主面板開啟後會到線上讀這一行比對版本，所以這一行要留在檔案開頭、格式不要改。
-$Script:ToolVersion = '2.4.0'
+$Script:ToolVersion = '2.5.0'
 
 # 「關閉時清除本工具的檔案」：主面板的勾選框。提權重開時用 -CleanupOnExit 把勾選狀態帶給新的管理員面板。
 $Script:CleanupOnExit = [bool]($args -contains '-CleanupOnExit')
@@ -176,7 +176,7 @@ function Close-PanelIfElevated {
 function Set-OpsCleanupOnExit { param([bool]$On) $Script:CleanupOnExit = $On }
 
 # 關閉主面板時清除本工具留下的東西：%LOCALAPPDATA%\OPS-command\ 整個資料夾（程式、操作記錄、錯誤紀錄、
-# 匯出檔、排程備份、測試輸出），以及 PowerShell 指令歷史裡跟 OPS 有關的那幾行。
+# 匯出檔、排程與登錄檔備份、測試輸出），以及 PowerShell 指令歷史裡跟 OPS 有關的那幾行。
 # 不碰：Windows 事件記錄（只能整個記錄檔清，會連別的程式一起刪）、SYSTEM 用的狀態與排程（看門狗確認或還原後本來就會刪；
 # 暴力破解封鎖、自動排程是你刻意要它們留著的）。
 function Invoke-OpsCleanup {
@@ -2401,6 +2401,295 @@ function Show-StorePanel {
         )
 }
 
+# ---- 常用登錄檔設定 ----
+# 每一項只有「開啟」與「Windows 預設」兩種狀態。Off = $null 表示刪掉這個值（回到沒設定＝預設）。
+#   Kind   DWord（預設）／String／Key（機碼存在就是開啟，例如 Windows 11 舊版右鍵選單）
+#   OnAlso 其他也算「開啟」的值（例如 NumLock 的 2147483650 = 0x80000002）
+#   For    Win11／Server：只有那種系統能勾，其他顯示「不適用」
+# 改之前把原本的值存成 JSON（%LOCALAPPDATA%\OPS-command\reg-backup\）。還原只認得這張表裡的 Id，
+# 備份檔被改過也寫不到別的機碼。
+$Script:RegTweaks = @(
+    @{ Id = 'FileExt'; Group = '檔案總管'; Name = '顯示副檔名'; Desc = '檔名後面顯示 .exe、.txt，比較不會被「假文件、真程式」騙'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'HideFileExt'; On = 0; Off = 1; Effect = '重開檔案總管' }
+    @{ Id = 'Hidden'; Group = '檔案總管'; Name = '顯示隱藏的檔案和資料夾'; Desc = '看得到 AppData、ProgramData 這類隱藏資料夾'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'Hidden'; On = 1; Off = 2; Effect = '重開檔案總管' }
+    @{ Id = 'LaunchThisPC'; Group = '檔案總管'; Name = '檔案總管一開就是「本機」'; Desc = '直接看到各個磁碟機，而不是「快速存取／首頁」'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'LaunchTo'; On = 1; Off = $null; Effect = '新開的視窗' }
+    @{ Id = 'ClassicMenu'; Group = '檔案總管'; Name = 'Windows 11 使用舊版右鍵選單'; Desc = '按右鍵直接出現完整選單，不用再點「顯示其他選項」'
+       Path = 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32'; Kind = 'Key'; For = 'Win11'; Effect = '重開檔案總管' }
+    @{ Id = 'Seconds'; Group = '工作列'; Name = '工作列時鐘顯示秒數'; Desc = '對時、確認排程有沒有準時跑很方便（Windows 11 要 23H2 以後）'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'ShowSecondsInSystemClock'; On = 1; Off = $null; Effect = '重開檔案總管' }
+    @{ Id = 'AutoPlay'; Group = '安全'; Name = '關閉自動播放'; Desc = '插入隨身碟、光碟時不自動開啟或執行裡面的東西'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers'; Value = 'DisableAutoplay'; On = 1; Off = 0; Effect = '立即' }
+    @{ Id = 'RecentDocs'; Group = '隱私'; Name = '不記錄最近開過的檔案'; Desc = '開始功能表、檔案總管不再列出最近使用的檔案'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'Start_TrackDocs'; On = 0; Off = $null; Effect = '重開檔案總管' }
+    @{ Id = 'AdId'; Group = '隱私'; Name = '關閉廣告識別碼'; Desc = 'App 不能用這個識別碼追蹤你、推個人化廣告'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo'; Value = 'Enabled'; On = 0; Off = 1; Effect = '立即' }
+    @{ Id = 'LongPath'; Group = '系統'; Name = '允許超過 260 字元的長路徑'; Desc = '解決「檔名或路徑太長」無法複製、解壓縮（程式本身也要支援）'
+       Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'; Value = 'LongPathsEnabled'; On = 1; Off = 0; Effect = '新開的程式' }
+    @{ Id = 'FastBoot'; Group = '系統'; Name = '關閉快速啟動'; Desc = '關機就是真的關機：避免更新裝不完、雙系統或網路喚醒（WOL）出問題'
+       Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power'; Value = 'HiberbootEnabled'; On = 0; Off = 1; Effect = '下次關機' }
+    @{ Id = 'NumLock'; Group = '系統'; Name = '開機時 NumLock 預設開啟'; Desc = '登入畫面打數字密碼不用先按 NumLock'
+       Path = 'Registry::HKEY_USERS\.DEFAULT\Control Panel\Keyboard'; Value = 'InitialKeyboardIndicators'; Kind = 'String'; On = '2'; OnAlso = @('2147483650'); Off = '2147483648'; Effect = '重開機' }
+    @{ Id = 'WER'; Group = '系統'; Name = '關閉 Windows 錯誤報告'; Desc = '程式當掉時不再收集、上傳錯誤報告給微軟'
+       Path = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting'; Value = 'Disabled'; On = 1; Off = 0; Effect = '立即' }
+    @{ Id = 'SrvMgr'; Group = '伺服器'; Name = '登入時不自動開「伺服器管理員」'; Desc = '每次 RDP 登入不會再跳出伺服器管理員'
+       Path = 'HKLM:\SOFTWARE\Microsoft\ServerManager'; Value = 'DoNotOpenServerManagerAtLogon'; On = 1; Off = 0; For = 'Server'; Effect = '下次登入' }
+    @{ Id = 'ShutdownReason'; Group = '伺服器'; Name = '關機、重開不用填原因'; Desc = '關掉「關機事件追蹤器」（關機時要選原因的那個視窗）'
+       Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Reliability'; Value = 'ShutdownReasonOn'; On = 0; Off = $null; For = 'Server'; Effect = '立即' }
+)
+
+function Test-RegTweakApplies($t) {
+    if (-not $t.For) { return $true }
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    if (-not $os) { return $true }
+    switch ($t.For) {
+        'Server' { return ($os.ProductType -ne 1) }
+        'Win11'  { return ($os.ProductType -eq 1 -and [int]$os.BuildNumber -ge 22000) }
+    }
+    $true
+}
+
+function Test-RegTweakMachine($t) { $t.Path -notlike 'HKCU:*' }
+
+function Get-RegTweakState($t) {
+    if ($t.Kind -eq 'Key') { return [bool](Test-Path -LiteralPath $t.Path) }
+    $v = $null
+    try { $v = (Get-ItemProperty -LiteralPath $t.Path -Name $t.Value -ErrorAction Stop).($t.Value) } catch { }
+    # 沒設定 = Windows 預設（表裡每一項的預設都是「沒開啟」）
+    if ($null -eq $v) { return $false }
+    $onValues = @(@($t.On) + @($t.OnAlso) | Where-Object { $null -ne $_ } | ForEach-Object { [string]$_ })
+    $onValues -contains [string]$v
+}
+
+function Set-RegTweak($t, [bool]$On) {
+    if ($t.Kind -eq 'Key') {
+        if ($On) {
+            if (-not (Test-Path -LiteralPath $t.Path)) { New-Item -Path $t.Path -Force -ErrorAction Stop | Out-Null }
+            Set-Item -LiteralPath $t.Path -Value '' -ErrorAction Stop
+        } else {
+            # 這種機碼是開啟時才建的（例如 CLSID\{...}\InprocServer32），關閉就把那個 CLSID 整個拿掉
+            $parent = Split-Path $t.Path -Parent
+            if (Test-Path -LiteralPath $parent) { Remove-Item -LiteralPath $parent -Recurse -Force -ErrorAction Stop }
+        }
+        return
+    }
+    $val = if ($On) { $t.On } else { $t.Off }
+    if ($null -eq $val) {
+        if (Test-Path -LiteralPath $t.Path) { Remove-ItemProperty -LiteralPath $t.Path -Name $t.Value -ErrorAction SilentlyContinue }
+        return
+    }
+    if (-not (Test-Path -LiteralPath $t.Path)) { New-Item -Path $t.Path -Force -ErrorAction Stop | Out-Null }
+    $type = if ($t.Kind -eq 'String') { 'String' } else { 'DWord' }
+    New-ItemProperty -LiteralPath $t.Path -Name $t.Value -Value $val -PropertyType $type -Force -ErrorAction Stop | Out-Null
+}
+
+# 原本的樣子（存在與否、類型、值）
+function Get-RegTweakSnapshot($t) {
+    if ($t.Kind -eq 'Key') { return [ordered]@{ Id = $t.Id; Exists = [bool](Test-Path -LiteralPath $t.Path) } }
+    $k = Get-Item -LiteralPath $t.Path -ErrorAction SilentlyContinue
+    if ($k -and (@($k.GetValueNames()) -contains $t.Value)) {
+        return [ordered]@{ Id = $t.Id; Exists = $true; Kind = [string]$k.GetValueKind($t.Value)
+                           Data = $k.GetValue($t.Value, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) }
+    }
+    [ordered]@{ Id = $t.Id; Exists = $false }
+}
+
+function Restore-RegTweakSnapshot($t, $s) {
+    if ($t.Kind -eq 'Key') { Set-RegTweak $t ([bool]$s.Exists); return }
+    if (-not $s.Exists) {
+        if (Test-Path -LiteralPath $t.Path) { Remove-ItemProperty -LiteralPath $t.Path -Name $t.Value -ErrorAction SilentlyContinue }
+        return
+    }
+    if ([string]$s.Kind -notin @('DWord', 'String', 'ExpandString', 'QWord')) { throw "$($t.Name)：備份裡的類型「$($s.Kind)」不支援還原。" }
+    if (-not (Test-Path -LiteralPath $t.Path)) { New-Item -Path $t.Path -Force -ErrorAction Stop | Out-Null }
+    New-ItemProperty -LiteralPath $t.Path -Name $t.Value -Value $s.Data -PropertyType ([string]$s.Kind) -Force -ErrorAction Stop | Out-Null
+}
+
+function Save-RegTweakBackup($Tweaks, [string]$Dir, [string]$Reason) {
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $file = Join-Path $Dir ("{0}.json" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $doc = [ordered]@{ Time = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'); User = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                       Reason = $Reason; Items = @($Tweaks | ForEach-Object { Get-RegTweakSnapshot $_ }) }
+    [IO.File]::WriteAllText($file, ($doc | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false))
+    $file
+}
+
+# 重新啟動檔案總管：Windows 會自己把殼層開回來（AutoRestartShell），等不到才手動開
+function Restart-RegExplorer {
+    Get-Process explorer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction Stop
+    for ($i = 0; $i -lt 20; $i++) {
+        Start-Sleep -Milliseconds 300
+        if (Get-Process explorer -ErrorAction SilentlyContinue) { return '已重新啟動檔案總管。' }
+    }
+    Start-Process explorer.exe
+    '已重新啟動檔案總管（手動開回來）。'
+}
+
+function Show-RegTweaksPanel {
+    $win  = New-UiWindow -Title '常用登錄檔設定' -Subtitle '勾選＝開啟這個設定，取消勾選＝改回 Windows 預設；按「套用變更」前會先備份' -Width 1140 -Height 780
+    $form = $win.Form
+    # 閉包裡的 $Script: 指的不是這支腳本，要用的值先在這一層取出來
+    $ctx = @{ Form = $form; State = @{}; BackupDir = (Join-Path $Script:LocalDir 'reg-backup'); Tweaks = $Script:RegTweaks
+              User = [Security.Principal.WindowsIdentity]::GetCurrent().Name; Loading = $false }
+
+    $note = New-Object Windows.Forms.Label
+    $note.Dock = 'Top'; $note.AutoSize = $true; $note.MaximumSize = New-Object Drawing.Size(1080, 0); $note.Padding = New-Object Windows.Forms.Padding(0, 0, 0, 8)
+    $note.ForeColor = $Script:Ui.Text
+    $note.Text = "「目前使用者」的項目只影響這個帳號（$($ctx.User)），不用系統管理員；「整台電腦」的項目要系統管理員。" +
+                 "`r`n黃底＝勾選跟目前不一樣、按「套用變更」才會寫入。每次套用前都把原本的值存到 %LOCALAPPDATA%\OPS-command\reg-backup\，弄錯可以按「還原備份」。"
+
+    $grid = New-Object Windows.Forms.DataGridView
+    $grid.Dock = 'Fill'; $grid.AllowUserToAddRows = $false; $grid.AllowUserToDeleteRows = $false; $grid.AllowUserToResizeRows = $false
+    $grid.RowHeadersVisible = $false; $grid.SelectionMode = 'FullRowSelect'; $grid.MultiSelect = $false
+    $grid.BackgroundColor = [Drawing.Color]::White; $grid.BorderStyle = 'None'; $grid.AutoSizeColumnsMode = 'Fill'
+    $grid.ColumnHeadersHeightSizeMode = 'AutoSize'; $grid.RowTemplate.Height = 30; $grid.ShowCellToolTips = $true
+    foreach ($c in @(@('Pick', '開啟', 6, $true), @('Group', '分類', 8, $false), @('Name', '設定', 24, $false), @('Desc', '說明', 42, $false),
+                     @('Scope', '範圍', 10, $false), @('Effect', '何時生效', 11, $false), @('Now', '目前', 9, $false))) {
+        $col = if ($c[3]) { New-Object Windows.Forms.DataGridViewCheckBoxColumn } else { New-Object Windows.Forms.DataGridViewTextBoxColumn }
+        $col.Name = $c[0]; $col.HeaderText = $c[1]; $col.FillWeight = $c[2]; $col.ReadOnly = -not $c[3]; $col.SortMode = 'NotSortable'
+        [void]$grid.Columns.Add($col)
+    }
+    foreach ($t in $ctx.Tweaks) {
+        $scope = if (Test-RegTweakMachine $t) { '整台電腦' } else { '目前使用者' }
+        $i = $grid.Rows.Add($false, $t.Group, $t.Name, $t.Desc, $scope, $t.Effect, '')
+        $row = $grid.Rows[$i]; $row.Tag = $t
+        $where = if ($t.Kind -eq 'Key') { $t.Path } else { "$($t.Path)\$($t.Value)" }
+        $tip = "$($t.Desc)`r`n登錄位置：" + ($where -replace '^Registry::', '' -replace '^HKCU:', 'HKEY_CURRENT_USER' -replace '^HKLM:', 'HKEY_LOCAL_MACHINE')
+        foreach ($cell in $row.Cells) { $cell.ToolTipText = $tip }
+        if (-not (Test-RegTweakApplies $t)) {
+            $row.Cells['Pick'].ReadOnly = $true
+            $row.Cells['Now'].Value = $(if ($t.For -eq 'Server') { '只有 Server' } else { '只有 Win11' })
+            $row.DefaultCellStyle.ForeColor = [Drawing.Color]::FromArgb(148, 163, 184)
+            $row.Tag = @{ Skip = $true; Id = $t.Id }
+        }
+    }
+    $grid.Add_CurrentCellDirtyStateChanged({ if ($grid.IsCurrentCellDirty) { [void]$grid.CommitEdit('CurrentCellChange') } }.GetNewClosure())
+
+    $bar = New-Object Windows.Forms.FlowLayoutPanel
+    $bar.Dock = 'Bottom'; $bar.AutoSize = $true; $bar.AutoSizeMode = 'GrowAndShrink'; $bar.Padding = New-Object Windows.Forms.Padding(0, 8, 0, 0)
+    $btnApply   = New-UiButton '套用變更' success 160
+    $btnReload  = New-UiButton '重新讀取' light 110
+    $btnRestore = New-UiButton '還原備份' primary 120
+    $btnExplorer = New-UiButton '重新啟動檔案總管' light 170
+    $btnRegedit = New-UiButton '開啟登錄編輯程式' light 170
+    $bar.Controls.AddRange(@($btnApply, $btnReload, $btnRestore, $btnExplorer, $btnRegedit))
+
+    $log = New-Object Windows.Forms.TextBox
+    $log.Multiline = $true; $log.ReadOnly = $true; $log.ScrollBars = 'Vertical'; $log.WordWrap = $true
+    $log.Dock = 'Bottom'; $log.Height = 100; $log.BorderStyle = 'FixedSingle'
+    $log.BackColor = $Script:Ui.LogBg; $log.ForeColor = $Script:Ui.LogFg; $log.Font = New-UiFont 10
+
+    # Fill 要先加（最後才排版），Top / Bottom 後加
+    $win.Body.Controls.Add($grid); $win.Body.Controls.Add($note); $win.Body.Controls.Add($bar); $win.Body.Controls.Add($log)
+    $ctx.Grid = $grid; $ctx.Log = $log; $ctx.Apply = $btnApply
+
+    $append = {
+        param([object[]]$Lines)
+        foreach ($l in $Lines) { if (-not $ctx.Log.IsDisposed) { $ctx.Log.AppendText("$l`r`n") } }
+    }.GetNewClosure()
+    # 勾選跟目前不一樣的列標黃底，按鈕顯示幾項
+    $mark = {
+        $n = 0
+        foreach ($row in $ctx.Grid.Rows) {
+            if ($row.Tag.Skip) { continue }
+            $diff = ([bool]$row.Cells['Pick'].Value) -ne [bool]$ctx.State[$row.Tag.Id]
+            $row.DefaultCellStyle.BackColor = if ($diff) { [Drawing.Color]::FromArgb(254, 249, 195) } else { [Drawing.Color]::Empty }
+            if ($diff) { $n++ }
+        }
+        $ctx.Apply.Text = if ($n) { "套用變更（$n 項）" } else { '套用變更' }
+    }.GetNewClosure()
+    $refresh = {
+        $ctx.Loading = $true
+        try {
+            # 目前儲存格是勾選框時，程式改的值不會畫出來（畫面還是舊的勾選），先結束編輯、清掉目前儲存格
+            [void]$ctx.Grid.EndEdit(); $ctx.Grid.CurrentCell = $null
+            foreach ($row in $ctx.Grid.Rows) {
+                if ($row.Tag.Skip) { continue }
+                $on = $false
+                try { $on = Get-RegTweakState $row.Tag; $row.Cells['Now'].Value = $(if ($on) { '已開啟' } else { '預設' }) }
+                catch { $row.Cells['Now'].Value = '讀不到' }
+                $ctx.State[$row.Tag.Id] = $on
+                $row.Cells['Pick'].Value = $on
+            }
+        } finally { $ctx.Loading = $false }
+        & $mark
+    }.GetNewClosure()
+    $grid.Add_CellValueChanged({ if (-not $ctx.Loading) { & $mark } }.GetNewClosure())
+
+    # 改之前問一次、備份，再逐項寫入；回傳有沒有需要重開檔案總管的項目
+    $applyList = {
+        param([array]$Items, [string]$What)
+        $needAdmin = @($Items | Where-Object { Test-RegTweakMachine $_.T })
+        if ($needAdmin.Count -and -not $IsAdmin) {
+            & $append "「$(@($needAdmin | ForEach-Object { $_.T.Name }) -join '、')」是整台電腦的設定，要系統管理員。"
+            [void](Request-PanelAdmin); return
+        }
+        $verb = { param($it) if ($it.Snapshot) { '還原成備份的值' } elseif ($it.On) { '開啟' } else { '改回預設' } }
+        $lines = @($Items | ForEach-Object { "・$(& $verb $_)：$($_.T.Name)（$($_.T.Effect)生效）" })
+        $ans = [Windows.Forms.MessageBox]::Show($ctx.Form, "將做以下變更：`r`n`r`n$($lines -join "`r`n")`r`n`r`n會先備份目前的值。確定？", $What, 'YesNo', 'Question')
+        if ($ans -ne 'Yes') { & $append '（已取消）'; return }
+        try { $file = Save-RegTweakBackup @($Items | ForEach-Object { $_.T }) $ctx.BackupDir $What }
+        catch { & $append "[錯誤] 備份失敗，這次不做變更：$($_.Exception.Message)"; return }
+        & $append '', "▶ $What（備份：$(Split-Path -Leaf $file)）"
+        $ok = @(); $bad = @()
+        foreach ($it in $Items) {
+            try {
+                if ($it.Snapshot) { Restore-RegTweakSnapshot $it.T $it.Snapshot } else { Set-RegTweak $it.T $it.On }
+                $ok += $it; & $append "  [完成] $(& $verb $it)：$($it.T.Name)"
+            } catch { $bad += "$($it.T.Name)：$($_.Exception.Message)"; & $append "  [錯誤] $($it.T.Name)：$($_.Exception.Message)" }
+        }
+        $detail = (@($ok | ForEach-Object { "$($_.T.Id)=$(if ($_.Snapshot) { 'restored' } elseif ($_.On) { 'on' } else { 'default' })" }) -join ', ') + "；備份 $(Split-Path -Leaf $file)"
+        Write-OpsLog '常用登錄檔設定' $What $(if ($bad.Count) { '失敗' } else { '成功' }) ($detail + $(if ($bad.Count) { '；' + ($bad -join '；') } else { '' }))
+        & $refresh
+        $effects = @($ok | ForEach-Object { $_.T.Effect } | Sort-Object -Unique)
+        if ($effects -contains '重開機') { & $append '  ※ 有項目要重新開機才生效。' }
+        if ($effects -contains '下次關機') { & $append '  ※ 快速啟動的設定在下次關機時生效。' }
+        if ($effects -contains '重開檔案總管') {
+            $r = [Windows.Forms.MessageBox]::Show($ctx.Form, "有項目要重新啟動檔案總管才會生效。`r`n現在重新啟動嗎？（工作列會消失一兩秒，開著的檔案總管視窗會關掉）", '重新啟動檔案總管', 'YesNo', 'Question')
+            if ($r -eq 'Yes') { try { & $append "  $(Restart-RegExplorer)" } catch { & $append "  [錯誤] $($_.Exception.Message)" } }
+            else { & $append '  ※ 之後可以按「重新啟動檔案總管」，或登出再登入。' }
+        }
+    }.GetNewClosure()
+
+    $btnApply.Add_Click({
+        $items = @()
+        foreach ($row in $ctx.Grid.Rows) {
+            if ($row.Tag.Skip) { continue }
+            $want = [bool]$row.Cells['Pick'].Value
+            if ($want -ne [bool]$ctx.State[$row.Tag.Id]) { $items += @{ T = $row.Tag; On = $want } }
+        }
+        if (-not $items.Count) { & $append '沒有要變更的項目（勾選跟目前一樣）。'; return }
+        & $applyList $items '套用登錄檔設定'
+    }.GetNewClosure())
+    $btnReload.Add_Click({ & $refresh; & $append '已重新讀取目前的值。' }.GetNewClosure())
+    $btnRestore.Add_Click({
+        $dlg = New-Object Windows.Forms.OpenFileDialog
+        $dlg.Title = '選擇要還原的登錄檔備份'; $dlg.Filter = '登錄檔設定備份 (*.json)|*.json'
+        if (Test-Path $ctx.BackupDir) { $dlg.InitialDirectory = $ctx.BackupDir }
+        if ($dlg.ShowDialog($ctx.Form) -ne 'OK') { $dlg.Dispose(); return }
+        $file = $dlg.FileName; $dlg.Dispose()
+        try { $doc = [IO.File]::ReadAllText($file) | ConvertFrom-Json } catch { & $append "[錯誤] 讀不懂這個備份檔：$($_.Exception.Message)"; return }
+        $items = @()
+        foreach ($s in @($doc.Items)) {
+            $t = $ctx.Tweaks | Where-Object { $_.Id -eq [string]$s.Id } | Select-Object -First 1
+            if (-not $t) { & $append "  略過不認得的項目：$($s.Id)"; continue }
+            $items += @{ T = $t; On = [bool](@($s.Exists)[0]); Snapshot = $s }
+        }
+        if (-not $items.Count) { & $append '這個備份檔裡沒有可還原的項目。'; return }
+        & $applyList $items "還原備份（$($doc.Time)）"
+    }.GetNewClosure())
+    $btnExplorer.Add_Click({
+        $r = [Windows.Forms.MessageBox]::Show($ctx.Form, "重新啟動檔案總管？`r`n工作列會消失一兩秒，開著的檔案總管視窗會關掉。", '重新啟動檔案總管', 'YesNo', 'Question')
+        if ($r -ne 'Yes') { return }
+        try { & $append (Restart-RegExplorer) } catch { & $append "[錯誤] $($_.Exception.Message)" }
+    }.GetNewClosure())
+    $btnRegedit.Add_Click({ Start-Process regedit.exe }.GetNewClosure())
+
+    $form.Add_Shown({ & $refresh; $ctx.Grid.ClearSelection(); & $append '已讀取目前的值。勾選要開啟的設定，按「套用變更」。' }.GetNewClosure())
+    Show-UiWindow $win
+}
+
 function Show-HyperVPanel {
     Show-FeaturePanel -Title 'Hyper-V／VMware 切換' -Subtitle '所有變更都要重新開機才生效' `
         -Note '已裝 VMware 又想用 Hyper-V → 「Hyper-V 優先」；要改用 VMware → 「VMware 優先」。啟用／移除元件可能要好幾分鐘，會在背景執行。家用版 Windows 沒有 Hyper-V。' `
@@ -4278,7 +4567,7 @@ function Show-WindowsPanel {
     $cleanup.BringToFront(); $cleanupText.BringToFront()
     $cleanup.Add_CheckedChanged({
         if ($cleanup.Checked) {
-            $ans=[Windows.Forms.MessageBox]::Show($form, "關閉面板時會刪除：`r`n%LOCALAPPDATA%\OPS-command\ 整個資料夾`r`n（下載的程式、操作記錄、錯誤紀錄、匯出的檔案、排程備份、測試輸出）`r`nWindows 事件記錄、看門狗與自動封鎖的設定不會動。`r`n確定要刪除？", '關閉時清除', 'YesNo', 'Question')
+            $ans=[Windows.Forms.MessageBox]::Show($form, "關閉面板時會刪除：`r`n%LOCALAPPDATA%\OPS-command\ 整個資料夾`r`n（下載的程式、操作記錄、錯誤紀錄、匯出的檔案、排程與登錄檔備份、測試輸出）`r`nWindows 事件記錄、看門狗與自動封鎖的設定不會動。`r`n確定要刪除？", '關閉時清除', 'YesNo', 'Question')
             if ($ans -ne 'Yes') { $cleanup.Checked=$false; return }
         }
         Set-OpsCleanupOnExit $cleanup.Checked
@@ -4432,6 +4721,7 @@ function Show-WindowsPanel {
     & $addSection '系統與更新' @(
         @{Title='Windows 更新（停止／還原）';Action={Show-WindowsUpdatePanel};Style='danger'}
         @{Title='Microsoft Store 自動更新';Action={Show-StorePanel};Style='info'}
+        @{Title='常用登錄檔設定';Action={Show-RegTweaksPanel};Style='info'}
         @{Title='Hyper-V／VMware 切換';Action={Show-HyperVPanel};Style='info'}
         @{Title='時間與時區';Action={Show-TimePanel};Style='info'}
         @{Title='常用軟體安裝（winget）';Action={Show-AppsPanel};Style='success'}
