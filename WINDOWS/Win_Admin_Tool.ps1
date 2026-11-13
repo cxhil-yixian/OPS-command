@@ -3,10 +3,11 @@
 # 工具版本（Windows 圖形介面自己的版本號，跟 Linux ops.sh 的版本無關）。
 # 改了程式就遞增：修 bug 加第三段、加功能加第二段、介面大改加第一段（見 README「版本號」）。
 # 主面板開啟後會到線上讀這一行比對版本，所以這一行要留在檔案開頭、格式不要改。
-$Script:ToolVersion = '2.5.0'
+$Script:ToolVersion = '2.6.0'
 
-# 「關閉時清除本工具的檔案」：主面板的勾選框。提權重開時用 -CleanupOnExit 把勾選狀態帶給新的管理員面板。
-$Script:CleanupOnExit = [bool]($args -contains '-CleanupOnExit')
+# 「關閉時清除本工具的檔案」：主面板的勾選框，預設勾選。使用者取消勾選後提權重開，用 -KeepFiles 把「不清除」
+# 帶給新的管理員面板（舊版的 -CleanupOnExit 仍接受，等於預設）。
+$Script:CleanupOnExit = -not ($args -contains '-KeepFiles')
 $script:ClosingForElevation = $false
 
 # ===== 檢查目前是否為系統管理員 (不強制提權,先記錄狀態) =====
@@ -96,7 +97,7 @@ function Restart-AsAdmin {
     # 一定要接住：沒接住的話例外會從按鈕事件漏出去，畫面上什麼都不會發生；
     # 而且呼叫端不能在失敗時關掉舊面板，否則使用者按「否」之後整個工具就不見了。
     try {
-        Start-Process powershell.exe -ArgumentList ("-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$self`"" + $(if ($Script:CleanupOnExit) { ' -CleanupOnExit' } else { '' })) -Verb RunAs -ErrorAction Stop
+        Start-Process powershell.exe -ArgumentList ("-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$self`"" + $(if ($Script:CleanupOnExit) { '' } else { ' -KeepFiles' })) -Verb RunAs -ErrorAction Stop
     } catch {
         $msg = if ($_.Exception.GetBaseException().NativeErrorCode -eq 1223) { '已取消提權，面板維持一般權限。' } else { "無法以系統管理員身分重新啟動：$($_.Exception.Message)" }
         [Windows.Forms.MessageBox]::Show($msg, '未提權', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Information) | Out-Null
@@ -2417,14 +2418,30 @@ $Script:RegTweaks = @(
        Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'LaunchTo'; On = 1; Off = $null; Effect = '新開的視窗' }
     @{ Id = 'ClassicMenu'; Group = '檔案總管'; Name = 'Windows 11 使用舊版右鍵選單'; Desc = '按右鍵直接出現完整選單，不用再點「顯示其他選項」'
        Path = 'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32'; Kind = 'Key'; For = 'Win11'; Effect = '重開檔案總管' }
+    @{ Id = 'FullPath'; Group = '檔案總管'; Name = '標題列顯示完整路徑'; Desc = '視窗標題顯示 C:\Users\… 完整路徑，不只資料夾名稱（Windows 10 有效）'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState'; Value = 'FullPath'; On = 1; Off = 0; Effect = '新開的視窗' }
+    @{ Id = 'NavExpand'; Group = '檔案總管'; Name = '左側窗格自動展開到目前資料夾'; Desc = '左邊的樹狀清單跟著你開的資料夾展開，知道自己在哪裡'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'NavPaneExpandToCurrentFolder'; On = 1; Off = $null; Effect = '新開的視窗' }
     @{ Id = 'Seconds'; Group = '工作列'; Name = '工作列時鐘顯示秒數'; Desc = '對時、確認排程有沒有準時跑很方便（Windows 11 要 23H2 以後）'
        Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'ShowSecondsInSystemClock'; On = 1; Off = $null; Effect = '重開檔案總管' }
+    @{ Id = 'NoCombine'; Group = '工作列'; Name = '工作列按鈕不合併'; Desc = '同一個程式開好幾個視窗時分開顯示、看得到標題（Windows 11 要 23H2 以後）'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'TaskbarGlomLevel'; On = 2; Off = $null; Effect = '重開檔案總管' }
+    @{ Id = 'TaskbarLeft'; Group = '工作列'; Name = 'Windows 11 開始按鈕靠左'; Desc = '工作列圖示靠左，跟 Windows 10 一樣'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'TaskbarAl'; On = 0; Off = $null; For = 'Win11'; Effect = '立即' }
+    @{ Id = 'MenuDelay'; Group = '操作'; Name = '選單展開更快'; Desc = '滑鼠移到子選單時的延遲從 0.4 秒改成 0.1 秒'
+       Path = 'HKCU:\Control Panel\Desktop'; Value = 'MenuShowDelay'; Kind = 'String'; On = '100'; Off = '400'; Effect = '登出' }
+    @{ Id = 'StickyKeys'; Group = '操作'; Name = '連按 5 次 Shift 不跳「相黏鍵」'; Desc = '打遊戲、遠端操作時不會突然跳出相黏鍵的詢問視窗'
+       Path = 'HKCU:\Control Panel\Accessibility\StickyKeys'; Value = 'Flags'; Kind = 'String'; On = '506'; Off = '510'; Effect = '登出' }
     @{ Id = 'AutoPlay'; Group = '安全'; Name = '關閉自動播放'; Desc = '插入隨身碟、光碟時不自動開啟或執行裡面的東西'
        Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers'; Value = 'DisableAutoplay'; On = 1; Off = 0; Effect = '立即' }
     @{ Id = 'RecentDocs'; Group = '隱私'; Name = '不記錄最近開過的檔案'; Desc = '開始功能表、檔案總管不再列出最近使用的檔案'
        Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced'; Value = 'Start_TrackDocs'; On = 0; Off = $null; Effect = '重開檔案總管' }
     @{ Id = 'AdId'; Group = '隱私'; Name = '關閉廣告識別碼'; Desc = 'App 不能用這個識別碼追蹤你、推個人化廣告'
        Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo'; Value = 'Enabled'; On = 0; Off = 1; Effect = '立即' }
+    @{ Id = 'SilentApps'; Group = '隱私'; Name = '不自動安裝「建議的 App」'; Desc = '開始功能表不會自己多出遊戲、購物這類推廣的 App'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager'; Value = 'SilentInstalledAppsEnabled'; On = 0; Off = 1; Effect = '立即' }
+    @{ Id = 'Bing'; Group = '隱私'; Name = '開始功能表搜尋不查網路（Bing）'; Desc = '搜尋只找本機的程式和檔案，比較快（Windows 10 有效，Windows 11 部分有效）'
+       Path = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Search'; Value = 'BingSearchEnabled'; On = 0; Off = $null; Effect = '重開檔案總管' }
     @{ Id = 'LongPath'; Group = '系統'; Name = '允許超過 260 字元的長路徑'; Desc = '解決「檔名或路徑太長」無法複製、解壓縮（程式本身也要支援）'
        Path = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'; Value = 'LongPathsEnabled'; On = 1; Off = 0; Effect = '新開的程式' }
     @{ Id = 'FastBoot'; Group = '系統'; Name = '關閉快速啟動'; Desc = '關機就是真的關機：避免更新裝不完、雙系統或網路喚醒（WOL）出問題'
@@ -2433,6 +2450,10 @@ $Script:RegTweaks = @(
        Path = 'Registry::HKEY_USERS\.DEFAULT\Control Panel\Keyboard'; Value = 'InitialKeyboardIndicators'; Kind = 'String'; On = '2'; OnAlso = @('2147483650'); Off = '2147483648'; Effect = '重開機' }
     @{ Id = 'WER'; Group = '系統'; Name = '關閉 Windows 錯誤報告'; Desc = '程式當掉時不再收集、上傳錯誤報告給微軟'
        Path = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting'; Value = 'Disabled'; On = 1; Off = 0; Effect = '立即' }
+    @{ Id = 'Verbose'; Group = '系統'; Name = '開機、關機顯示詳細進度'; Desc = '卡在「請稍候」時看得到是哪個服務、哪個步驟卡住'
+       Path = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'; Value = 'VerboseStatus'; On = 1; Off = $null; Effect = '下次開機' }
+    @{ Id = 'NoLockScreen'; Group = '系統'; Name = '略過鎖定畫面（直接到輸入密碼）'; Desc = '不用先按一下或往上滑；遠端主控台也少一步（家用版無效）'
+       Path = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'; Value = 'NoLockScreen'; On = 1; Off = $null; Effect = '下次鎖定' }
     @{ Id = 'SrvMgr'; Group = '伺服器'; Name = '登入時不自動開「伺服器管理員」'; Desc = '每次 RDP 登入不會再跳出伺服器管理員'
        Path = 'HKLM:\SOFTWARE\Microsoft\ServerManager'; Value = 'DoNotOpenServerManagerAtLogon'; On = 1; Off = 0; For = 'Server'; Effect = '下次登入' }
     @{ Id = 'ShutdownReason'; Group = '伺服器'; Name = '關機、重開不用填原因'; Desc = '關掉「關機事件追蹤器」（關機時要選原因的那個視窗）'
@@ -2645,6 +2666,8 @@ function Show-RegTweaksPanel {
         $effects = @($ok | ForEach-Object { $_.T.Effect } | Sort-Object -Unique)
         if ($effects -contains '重開機') { & $append '  ※ 有項目要重新開機才生效。' }
         if ($effects -contains '下次關機') { & $append '  ※ 快速啟動的設定在下次關機時生效。' }
+        if ($effects -contains '登出') { & $append '  ※ 有項目要登出再登入才生效。' }
+        if ($effects -contains '下次開機') { & $append '  ※ 有項目在下次開機、關機時生效。' }
         if ($effects -contains '重開檔案總管') {
             $r = [Windows.Forms.MessageBox]::Show($ctx.Form, "有項目要重新啟動檔案總管才會生效。`r`n現在重新啟動嗎？（工作列會消失一兩秒，開著的檔案總管視窗會關掉）", '重新啟動檔案總管', 'YesNo', 'Question')
             if ($r -eq 'Yes') { try { & $append "  $(Restart-RegExplorer)" } catch { & $append "  [錯誤] $($_.Exception.Message)" } }
@@ -4544,7 +4567,7 @@ function Show-WindowsPanel {
     $close.FlatStyle='Flat'
     $close.Add_Click({$form.Close()}.GetNewClosure())
     $head.Controls.Add($close)
-    # 關閉時清除本工具的檔案（預設不勾；提權重開會沿用）。先設好勾選狀態再掛事件，開窗時才不會跳確認
+    # 關閉時清除本工具的檔案（預設勾選；提權重開會沿用）。先設好勾選狀態再掛事件，開窗時才不會跳確認
     # 勾選方框與文字分開：CheckBox 的背景設成透明時，在深色標題列上方框會畫壞、第一個字被吃掉。
     # 方框用實底（跟標題列同色），文字用白色 Label，點文字也能切換。
     $cleanup=New-Object Windows.Forms.CheckBox
@@ -4721,7 +4744,7 @@ function Show-WindowsPanel {
     & $addSection '系統與更新' @(
         @{Title='Windows 更新（停止／還原）';Action={Show-WindowsUpdatePanel};Style='danger'}
         @{Title='Microsoft Store 自動更新';Action={Show-StorePanel};Style='info'}
-        @{Title='常用登錄檔設定';Action={Show-RegTweaksPanel};Style='info'}
+        @{Title='常用登錄檔設定';Action={Show-RegTweaksPanel};Style='success'}
         @{Title='Hyper-V／VMware 切換';Action={Show-HyperVPanel};Style='info'}
         @{Title='時間與時區';Action={Show-TimePanel};Style='info'}
         @{Title='常用軟體安裝（winget）';Action={Show-AppsPanel};Style='success'}
@@ -4764,7 +4787,7 @@ try {
     if (@(& ({ Get-Command Get-SelfPath -CommandType Function -ErrorAction SilentlyContinue }.GetNewClosure())).Count) {
         Show-WindowsPanel
     } else {
-        Start-Process powershell.exe -ArgumentList ("-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$(Get-SelfPath)`"" + $(if ($Script:CleanupOnExit) { ' -CleanupOnExit' } else { '' })) -ErrorAction Stop
+        Start-Process powershell.exe -ArgumentList ("-NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File `"$(Get-SelfPath)`"" + $(if ($Script:CleanupOnExit) { '' } else { ' -KeepFiles' })) -ErrorAction Stop
     }
 } catch {
     try { Add-Type -AssemblyName System.Windows.Forms } catch { }

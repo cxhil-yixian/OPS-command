@@ -264,6 +264,8 @@ $TestTag = "OPS-GUI-Test-$PID-$(Get-Random -Maximum 99999)"
 
 $ErrorActionPreference = 'Continue'
 . $funcFile
+# 「關閉時清除」預設勾選：測試關掉面板時不能把自己的輸出（%LOCALAPPDATA%\OPS-command\tests\）刪掉
+$Script:CleanupOnExit = $false
 $ErrorActionPreference = 'Continue'
 $Script:SelfPath = $target
 $ErrorBase = $Error.Count

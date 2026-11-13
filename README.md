@@ -280,7 +280,7 @@ Windows 10 / 11 另見 [WINDOWS/](WINDOWS/README.md)（PowerShell，與上表的
 | Windows 工具 | 狀態 |
 |---|---|
 | `ops-win.ps1`（一行指令進入點） | ✅ `irm \| iex` 對本機假網站實測：正常時核對後啟動；改一個位元組、清單缺項、清單 404 都拒絕 |
-| `Win_Admin_Tool.ps1` 圖形面板（2.5.0） | ✅ 每個功能都在 Windows 10 22H2 的 RDP 桌面上實際按過按鈕、核對系統狀態並還原 |
+| `Win_Admin_Tool.ps1` 圖形面板（2.6.0） | ✅ 每個功能都在 Windows 10 22H2 的 RDP 桌面上實際按過按鈕、核對系統狀態並還原 |
 
 2026-11 這一輪在一台 Windows 10 專業版 22H2（繁中、KVM 雲端虛擬機）上逐項實測，包含**換 RDP Port 兩輪**
 （不確認讓看門狗自動還原、確認後保留再換回）、停用再啟用 OpenSSH、Windows 更新停止／還原、臨時帳號的鎖定與

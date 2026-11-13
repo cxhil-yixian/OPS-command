@@ -272,7 +272,7 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 | 每 10 分鐘、每 30 分鐘跑一次腳本 | 自動排程 → 開啟自動排程管理 → 「定時執行腳本」→ 新增 | 執行時機選「每隔一段時間」，再選間隔與從幾點開始 |
 | 看這台電腦有哪些排程、改時間、刪掉不要的 | 自動排程 → 開啟自動排程管理 → 「所有排程」分頁 | 失敗的會標紅、點兩下看詳細；改或刪之前自動備份，弄錯按「還原備份」 |
 | 看這個工具改過什麼 | 檢查與紀錄 → 操作記錄 | — |
-| 用完不想在這台電腦留下這個工具的東西 | 主面板右上角勾「關閉時清除本工具的檔案」 | 關閉面板時刪掉工具下載的程式、紀錄、匯出的檔案，以及指令歷史裡那行一行指令；匯出的檔案要留請先搬走 |
+| 用完不想在這台電腦留下這個工具的東西 | 什麼都不用做：主面板右上角「關閉時清除本工具的檔案」預設已勾 | 關閉面板時刪掉工具下載的程式、紀錄、匯出的檔案、排程與登錄檔的備份，以及指令歷史裡那行一行指令；要保留就關之前取消勾選 |
 
 > [!CAUTION]
 > <b>磁碟管理的格式化和清除會永久刪掉資料。</b>「格式化磁碟區」和「清除整顆磁碟」沒有辦法復原。
@@ -351,5 +351,5 @@ irm https://raw.githubusercontent.com/cxhil-yixian/OPS-command/main/WINDOWS/ops-
 
 ---
 
-<sub>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.5.0</sub>
+<sub>OPS-command · Windows 新手指南 · 對應 Windows 工具 2.6.0</sub>
 <sub>想看更多細節，請看 [WINDOWS/README.md](../WINDOWS/README.md)。Linux 的版本在 [linux.md](linux.md)。</sub>
